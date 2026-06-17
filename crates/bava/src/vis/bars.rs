@@ -10,9 +10,10 @@
 //! - **Wave** — a smooth gradient waveform line across the width.
 //! - **Splitter** — a zig-zag line alternating above/below the axis.
 //!
-//! The first four reuse a one-sprite-per-bar pool (kept in sync with the live
-//! bar count by [`reconcile_bars`]); the last two are immediate-mode gizmo
-//! linestrips, so the sprite pool is hidden while they're active. All shapes
+//! The first four reuse a one-mesh-per-bar pool of rounded-rect [`Mesh2d`]s
+//! (kept in sync with the live bar count by [`reconcile_bars`], rounded per
+//! `items_roundness` with feather-antialiased edges); the last two are a single
+//! antialiased stroke mesh, hidden while a blocky shape is active. All shapes
 //! share the [`Cava`] resource and the monstercat neighbour-spreading pass.
 
 use bevy::post_process::bloom::Bloom;
@@ -20,7 +21,9 @@ use bevy::prelude::*;
 use bevy::render::view::Hdr;
 
 use crate::cava::{Cava, CavaSettings};
-use crate::vis::stroke::{apply_stroke, empty_stroke_mesh, stroke_material, STROKE_FEATHER};
+use crate::vis::stroke::{
+    apply_rounded_rect, apply_stroke, empty_stroke_mesh, stroke_material, STROKE_FEATHER,
+};
 use crate::vis::{
     gradient_color, spread_monstercat, DrawingMode, MirrorMode, VisFamily, VisSettings, VisShape,
 };
@@ -34,9 +37,13 @@ const LEVEL_STEPS: f32 = 14.0;
 /// Smooth segments used to draw a Wave line.
 const WAVE_SEGMENTS: usize = 192;
 
-/// Marks a bar sprite and records which Cava bar index it renders.
+/// Marks a bar mesh and records which Cava bar index it renders.
 #[derive(Component)]
 struct Bar(usize);
+
+/// Shared blend material for the bar meshes (per-vertex color supplies the hue).
+#[derive(Resource)]
+struct BarMaterial(Handle<ColorMaterial>);
 
 /// Handle for the line-shape (Wave/Splitter) stroke mesh, rebuilt each frame.
 #[derive(Resource)]
@@ -81,10 +88,13 @@ fn setup(
         },
     ));
 
+    // One shared blend material; each bar mesh carries its own per-vertex color.
+    let bar_material = materials.add(stroke_material());
     let n = settings.bars_per_channel.max(1);
     for i in 0..n {
-        spawn_bar(&mut commands, i);
+        spawn_bar(&mut commands, &mut meshes, &bar_material, i);
     }
+    commands.insert_resource(BarMaterial(bar_material));
 
     // Reusable antialiased stroke for the line shapes (Wave / Splitter); only one
     // is active at a time, so a single entity suffices.
@@ -99,24 +109,38 @@ fn setup(
     commands.insert_resource(BoxLineHandles { mesh: line_mesh });
 }
 
-/// Spawn a single bar sprite carrying its Cava bar index.
-fn spawn_bar(commands: &mut Commands, i: usize) {
+/// Spawn a single bar as its own (initially empty) rounded-rect mesh, carrying
+/// its Cava bar index and sharing the blend material.
+fn spawn_bar(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    material: &Handle<ColorMaterial>,
+    i: usize,
+) {
     commands.spawn((
-        Sprite::from_color(Color::WHITE, Vec2::new(4.0, 4.0)),
+        Mesh2d(meshes.add(empty_stroke_mesh())),
+        MeshMaterial2d(material.clone()),
         Transform::from_xyz(0.0, 0.0, 0.0),
+        Visibility::Hidden,
         Bar(i),
     ));
 }
 
-/// Grow or shrink the bar-sprite pool to match the live [`Cava::bars_per_channel`],
+/// Grow or shrink the bar-mesh pool to match the live [`Cava::bars_per_channel`],
 /// which the settings editor can change at runtime (the startup pool is fixed).
 /// Indices stay contiguous `0..target`, so [`update_bars`] addresses them safely.
-fn reconcile_bars(mut commands: Commands, cava: Res<Cava>, bars: Query<(Entity, &Bar)>) {
+fn reconcile_bars(
+    mut commands: Commands,
+    cava: Res<Cava>,
+    material: Res<BarMaterial>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    bars: Query<(Entity, &Bar)>,
+) {
     let target = cava.bars_per_channel.max(1);
     let current = bars.iter().count();
     if current < target {
         for i in current..target {
-            spawn_bar(&mut commands, i);
+            spawn_bar(&mut commands, &mut meshes, &material.0, i);
         }
     } else if current > target {
         // Drop the highest indices, keeping a contiguous 0..target range.
@@ -161,19 +185,20 @@ impl Layout {
     }
 }
 
-/// Position the bar sprites for the sprite-based shapes (Bars/Levels/Particles/
-/// Spine), or hide them when a line shape (Wave/Splitter) or a circle mode is
-/// active.
+/// Rebuild each bar mesh for the blocky shapes (Bars/Levels/Particles/Spine) as
+/// a rounded rect, or hide the pool when a line shape (Wave/Splitter) or a circle
+/// mode is active.
 fn update_bars(
     mode: Res<DrawingMode>,
     cava: Res<Cava>,
     vis: Res<VisSettings>,
     windows: Query<&Window>,
-    mut bars: Query<(&Bar, &mut Sprite, &mut Transform, &mut Visibility)>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut bars: Query<(&Bar, &Mesh2d, &mut Transform, &mut Visibility)>,
 ) {
     let shape = (mode.family() == VisFamily::Box).then(|| mode.shape());
-    // Line shapes and circle modes don't use the sprite pool.
-    let sprite_shape = match shape {
+    // Line shapes and circle modes don't use the bar-mesh pool.
+    let bar_shape = match shape {
         Some(s @ (VisShape::Bars | VisShape::Levels | VisShape::Particles | VisShape::Spine)) => s,
         _ => {
             for (_, _, _, mut v) in &mut bars {
@@ -198,53 +223,53 @@ fn update_bars(
     let mirror = vis.mirror != MirrorMode::Off;
     let (lo, hi) = (vis.fg_lo(), vis.fg_hi());
     // Only the column shapes use the mirrored (centered, half-height) layout.
-    let centered = mirror && matches!(sprite_shape, VisShape::Bars | VisShape::Levels);
+    let centered = mirror && matches!(bar_shape, VisShape::Bars | VisShape::Levels);
     let lyt = Layout::new(w, h, n, centered);
 
-    for (bar, mut sprite, mut transform, mut visibility) in &mut bars {
+    for (bar, mesh2d, mut transform, mut visibility) in &mut bars {
         *visibility = Visibility::Visible;
         let v = values.get(bar.0).copied().unwrap_or(0.0).clamp(0.0, 1.5);
         let x = lyt.bar_x(bar.0);
-        transform.translation.x = x;
 
-        match sprite_shape {
-            VisShape::Bars => {
-                let bar_h = (v * lyt.max_h).max(1.0);
-                place_column(&mut sprite, &mut transform, &lyt, bar_h, centered);
-            }
+        // Each shape resolves to a centered rounded rect: (center y, half extents).
+        let (cy, half) = match bar_shape {
+            VisShape::Bars => column_geom(&lyt, (v * lyt.max_h).max(1.0), centered),
             VisShape::Levels => {
                 // Snap the height to discrete VU-style steps.
                 let stepped = (v * LEVEL_STEPS).round() / LEVEL_STEPS;
-                let bar_h = (stepped * lyt.max_h).max(1.0);
-                place_column(&mut sprite, &mut transform, &lyt, bar_h, centered);
+                column_geom(&lyt, (stepped * lyt.max_h).max(1.0), centered)
             }
             VisShape::Particles => {
                 // A small square that floats at the bar's level.
                 let dot = lyt.bar_w.min(lyt.slot_w).max(2.0);
-                transform.translation.y = lyt.floor + v * lyt.max_h;
-                sprite.custom_size = Some(Vec2::splat(dot));
+                (lyt.floor + v * lyt.max_h, Vec2::splat(dot * 0.5))
             }
             VisShape::Spine => {
                 // A square on the center line, side growing with the level.
                 let side = (lyt.bar_w * (0.35 + v)).clamp(2.0, lyt.max_h);
-                transform.translation.y = 0.0;
-                sprite.custom_size = Some(Vec2::splat(side));
+                (0.0, Vec2::splat(side * 0.5))
             }
-            _ => unreachable!("sprite_shape is constrained above"),
-        }
+            _ => unreachable!("bar_shape is constrained above"),
+        };
 
-        sprite.color = gradient_color(lo, hi, v.min(1.0));
+        transform.translation.x = x;
+        transform.translation.y = cy;
+
+        if let Some(mesh) = meshes.get_mut(&mesh2d.0) {
+            let radius = vis.items_roundness.clamp(0.0, 1.0) * half.x.min(half.y);
+            let color = gradient_color(lo, hi, v.min(1.0));
+            apply_rounded_rect(mesh, half, radius, STROKE_FEATHER, color);
+        }
     }
 }
 
-/// Place a column sprite either growing from the floor or centered (mirrored).
-fn place_column(sprite: &mut Sprite, transform: &mut Transform, lyt: &Layout, bar_h: f32, centered: bool) {
+/// Center-y and half-extents of a column of height `bar_h`, growing from the
+/// floor or centered (mirrored).
+fn column_geom(lyt: &Layout, bar_h: f32, centered: bool) -> (f32, Vec2) {
     if centered {
-        transform.translation.y = 0.0;
-        sprite.custom_size = Some(Vec2::new(lyt.bar_w, bar_h * 2.0));
+        (0.0, Vec2::new(lyt.bar_w * 0.5, bar_h))
     } else {
-        transform.translation.y = lyt.floor + bar_h * 0.5;
-        sprite.custom_size = Some(Vec2::new(lyt.bar_w, bar_h));
+        (lyt.floor + bar_h * 0.5, Vec2::new(lyt.bar_w * 0.5, bar_h * 0.5))
     }
 }
 

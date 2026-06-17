@@ -9,6 +9,8 @@
 //! The mesh carries `ATTRIBUTE_COLOR`, so a plain blend [`ColorMaterial`] tinted
 //! white multiplies through the per-vertex gradient/alpha — no custom shader.
 
+use std::f32::consts::{FRAC_PI_2, PI};
+
 use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
@@ -30,6 +32,78 @@ pub(crate) fn stroke_material() -> ColorMaterial {
         alpha_mode: AlphaMode2d::Blend,
         ..default()
     }
+}
+
+/// Arc segments per rounded-rect corner.
+const CORNER_SEGS: usize = 4;
+
+/// Overwrite `mesh` with a filled, feather-antialiased rounded rectangle centered
+/// at the origin: `half` extents, corner `radius` (clamped to the shorter half),
+/// a `feather`-px alpha ramp at the edge, filled with `color`. Position it with
+/// the entity's `Transform`. Same blend [`stroke_material`] applies.
+pub(crate) fn apply_rounded_rect(
+    mesh: &mut Mesh,
+    half: Vec2,
+    radius: f32,
+    feather: f32,
+    color: Color,
+) {
+    let hx = half.x.max(0.01);
+    let hy = half.y.max(0.01);
+    let r = radius.clamp(0.0, hx.min(hy));
+
+    // Boundary points (CCW) with their outward normals, walking the four corner
+    // arcs. Straight edges fall out of connecting consecutive arc endpoints.
+    let centers = [
+        (Vec2::new(hx - r, -(hy - r)), -FRAC_PI_2), // right-bottom: -90°..0°
+        (Vec2::new(hx - r, hy - r), 0.0),           // right-top:     0°..90°
+        (Vec2::new(-(hx - r), hy - r), FRAC_PI_2),  // left-top:     90°..180°
+        (Vec2::new(-(hx - r), -(hy - r)), PI),      // left-bottom: 180°..270°
+    ];
+    let lin = color.to_linear();
+    let rgb = [lin.red, lin.green, lin.blue];
+
+    let mut boundary: Vec<(Vec2, Vec2)> = Vec::with_capacity(4 * (CORNER_SEGS + 1));
+    for (center, a0) in centers {
+        for s in 0..=CORNER_SEGS {
+            let ang = a0 + (s as f32 / CORNER_SEGS as f32) * FRAC_PI_2;
+            let dir = Vec2::new(ang.cos(), ang.sin());
+            boundary.push((center + dir * r, dir));
+        }
+    }
+    let nb = boundary.len();
+
+    // Vertex 0 = center; 1..=nb = boundary (full alpha); nb+1..=2nb = feather (0).
+    let mut positions = Vec::with_capacity(1 + nb * 2);
+    let mut colors = Vec::with_capacity(1 + nb * 2);
+    positions.push([0.0, 0.0, 0.0]);
+    colors.push([rgb[0], rgb[1], rgb[2], lin.alpha]);
+    for (p, _) in &boundary {
+        positions.push([p.x, p.y, 0.0]);
+        colors.push([rgb[0], rgb[1], rgb[2], lin.alpha]);
+    }
+    for (p, n) in &boundary {
+        let q = *p + *n * feather;
+        positions.push([q.x, q.y, 0.0]);
+        colors.push([rgb[0], rgb[1], rgb[2], 0.0]);
+    }
+
+    let b0 = 1u32;
+    let o0 = 1 + nb as u32;
+    let mut indices = Vec::with_capacity(nb * 9);
+    for i in 0..nb {
+        let i1 = (i + 1) % nb;
+        let (bi, bi1) = (b0 + i as u32, b0 + i1 as u32);
+        let (oi, oi1) = (o0 + i as u32, o0 + i1 as u32);
+        // Fan fill from the center.
+        indices.extend_from_slice(&[0, bi, bi1]);
+        // Feather ring quad (boundary → outer).
+        indices.extend_from_slice(&[bi, bi1, oi1, bi, oi1, oi]);
+    }
+
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
+    mesh.insert_indices(Indices::U32(indices));
 }
 
 /// Overwrite `mesh` with a feathered stroke through `pts` (each a position +
