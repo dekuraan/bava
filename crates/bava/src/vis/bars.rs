@@ -15,7 +15,9 @@
 //! linestrips, so the sprite pool is hidden while they're active. All shapes
 //! share the [`Cava`] resource and the monstercat neighbour-spreading pass.
 
+use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
+use bevy::render::view::Hdr;
 
 use crate::cava::{Cava, CavaSettings};
 use crate::vis::{
@@ -47,9 +49,21 @@ impl Plugin for BarsPlugin {
     }
 }
 
-/// Spawn the 2D camera and one sprite per bar.
+/// Spawn the 2D camera and one sprite per bar. The camera is HDR with 8× MSAA
+/// and bloom, so the amplitude-boosted (HDR-range) colors from
+/// [`gradient_color`](crate::vis::gradient_color) glow at peaks and the gizmo /
+/// mesh edges stay smooth.
 fn setup(mut commands: Commands, settings: Res<CavaSettings>) {
-    commands.spawn(Camera2d);
+    commands.spawn((
+        Camera2d,
+        Hdr,
+        Msaa::Sample8,
+        // NATURAL bloom, nudged up a touch for a punchier neon glow.
+        Bloom {
+            intensity: 0.25,
+            ..Bloom::NATURAL
+        },
+    ));
 
     let n = settings.bars_per_channel.max(1);
     for i in 0..n {

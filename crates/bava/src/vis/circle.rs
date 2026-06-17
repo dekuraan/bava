@@ -40,11 +40,12 @@ pub struct CirclePlugin;
 impl Plugin for CirclePlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, setup_circle)
-            .add_systems(Update, (draw_ring, update_fill));
+            .add_systems(Update, (sync_gizmo_line, draw_ring, update_fill));
     }
 }
 
-/// Configure line width and spawn the (hidden) fill blob.
+/// Configure line width / joints and spawn the (hidden) fill blob. Round joints
+/// keep the corners of the Wave / Splitter / ring linestrips smooth.
 fn setup_circle(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -52,7 +53,9 @@ fn setup_circle(
     mut store: ResMut<GizmoConfigStore>,
     vis: Res<VisSettings>,
 ) {
-    store.config_mut::<DefaultGizmoConfigGroup>().0.line.width = vis.line_thickness;
+    let line = &mut store.config_mut::<DefaultGizmoConfigGroup>().0.line;
+    line.width = vis.line_thickness;
+    line.joints = GizmoLineJoint::Round(8);
 
     let mesh = meshes.add(fan_mesh());
     let material = materials.add(ColorMaterial::from(Color::NONE));
@@ -64,6 +67,15 @@ fn setup_circle(
         FillBlob,
     ));
     commands.insert_resource(FillHandles { mesh, material });
+}
+
+/// Keep the gizmo line width in sync with the live `line_thickness` setting so
+/// the editor's slider updates the Wave / Splitter / ring strokes immediately.
+fn sync_gizmo_line(vis: Res<VisSettings>, mut store: ResMut<GizmoConfigStore>) {
+    if !vis.is_changed() {
+        return;
+    }
+    store.config_mut::<DefaultGizmoConfigGroup>().0.line.width = vis.line_thickness;
 }
 
 /// A triangle fan: vertex 0 is the center, 1..=SEGMENTS are the ring. Positions
