@@ -8,7 +8,8 @@
 //! source are pinned to the running capture thread and only take effect after a
 //! save + relaunch.
 //!
-//! Toggle the window with the `` ` `` (backquote) key, or close it with its X.
+//! Toggle the window with the `[gui] toggle_key` (default `p`), or close it with
+//! its X. The key is configurable in `config.toml` and round-trips through Save.
 
 use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts, EguiPrimaryContextPass};
@@ -19,12 +20,14 @@ use crate::vis::{
     ColorProfile, Direction, DrawingMode, MirrorMode, Theme, VisSettings,
 };
 
-/// Editor window state: visibility, the cached profile list, and transient UI
-/// scratch (a status line and the "save as" name field).
-#[derive(Resource, Default)]
+/// Editor window state: visibility, the toggle key, the cached profile list,
+/// and transient UI scratch (a status line and the "save as" name field).
+#[derive(Resource)]
 pub struct EditorState {
     /// Whether the editor window is shown.
     pub open: bool,
+    /// Key that toggles the window (from `[gui] toggle_key`).
+    pub toggle_key: KeyCode,
     /// True while egui holds keyboard focus (e.g. a text field), so the rest of
     /// the app can suppress its own key handling (the Space mode-cycle).
     pub capture_keyboard: bool,
@@ -40,11 +43,27 @@ pub struct EditorState {
     profiles_loaded: bool,
 }
 
+impl Default for EditorState {
+    fn default() -> Self {
+        Self {
+            open: false,
+            toggle_key: KeyCode::KeyP,
+            capture_keyboard: false,
+            status: String::new(),
+            new_profile_name: String::new(),
+            profiles: Vec::new(),
+            selected_profile: None,
+            profiles_loaded: false,
+        }
+    }
+}
+
 impl EditorState {
-    /// A fresh editor state, optionally starting with the window open.
-    pub fn opened(open: bool) -> Self {
+    /// A fresh editor state with the given visibility and toggle key.
+    pub fn new(open: bool, toggle_key: KeyCode) -> Self {
         Self {
             open,
+            toggle_key,
             ..Self::default()
         }
     }
@@ -75,9 +94,10 @@ fn editor_ui(
         return; // primary egui context not ready yet
     };
 
-    // Toggle with backquote (ignored while a text field has focus); Escape closes.
+    // Toggle with the configured key (ignored while a text field has focus);
+    // Escape closes.
     editor.capture_keyboard = ctx.wants_keyboard_input();
-    if keys.just_pressed(KeyCode::Backquote) && !editor.capture_keyboard {
+    if keys.just_pressed(editor.toggle_key) && !editor.capture_keyboard {
         editor.open = !editor.open;
     }
     if editor.open && keys.just_pressed(KeyCode::Escape) {
@@ -134,7 +154,8 @@ fn persistence_section(
 ) {
     ui.horizontal(|ui| {
         if ui.button("💾 Save").clicked() {
-            let cfg = Config::from_settings(cava, vis, *mode);
+            let mut cfg = Config::from_settings(cava, vis, *mode);
+            cfg.set_gui_toggle_key(editor.toggle_key);
             editor.status = match cfg.write(&handle.path) {
                 Ok(()) => format!("Saved → {}", handle.path.display()),
                 Err(e) => format!("Save failed: {e}"),
@@ -147,6 +168,7 @@ fn persistence_section(
             {
                 Some(cfg) => {
                     apply_config(&cfg, vis, mode, cava, rebuild);
+                    editor.toggle_key = cfg.gui_toggle_key();
                     editor.status = "Reloaded config".into();
                 }
                 None => editor.status = "Reload failed".into(),
@@ -174,6 +196,7 @@ fn persistence_section(
                     match Config::load_profile(&name) {
                         Some(cfg) => {
                             apply_config(&cfg, vis, mode, cava, rebuild);
+                            editor.toggle_key = cfg.gui_toggle_key();
                             editor.status = format!("Loaded profile '{name}'");
                         }
                         None => editor.status = format!("Profile '{name}' not found"),
@@ -190,7 +213,8 @@ fn persistence_section(
                 if name.is_empty() {
                     editor.status = "Enter a profile name first".into();
                 } else {
-                    let cfg = Config::from_settings(cava, vis, *mode);
+                    let mut cfg = Config::from_settings(cava, vis, *mode);
+                    cfg.set_gui_toggle_key(editor.toggle_key);
                     editor.status = match cfg.save_profile(&name) {
                         Ok(path) => {
                             editor.profiles = Config::list_profiles();
