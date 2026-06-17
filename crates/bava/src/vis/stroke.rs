@@ -14,6 +14,9 @@ use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 use bevy::sprite_render::AlphaMode2d;
 
+/// Default antialiasing feather half-width, in pixels, for stroke edges.
+pub(crate) const STROKE_FEATHER: f32 = 1.5;
+
 /// A new, empty stroke mesh (filled per frame by [`apply_stroke`]).
 pub(crate) fn empty_stroke_mesh() -> Mesh {
     Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())

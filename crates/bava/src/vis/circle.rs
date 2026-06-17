@@ -14,7 +14,7 @@ use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
 use crate::cava::Cava;
-use crate::vis::stroke::{apply_stroke, empty_stroke_mesh, stroke_material};
+use crate::vis::stroke::{apply_stroke, empty_stroke_mesh, stroke_material, STROKE_FEATHER};
 use crate::vis::{gradient_color, spread_monstercat, DrawingMode, VisFamily, VisSettings};
 
 /// Segments around the ring. Higher = smoother curve.
@@ -23,9 +23,6 @@ const SEGMENTS: usize = 256;
 const BASE_FRAC: f32 = 0.16;
 /// How far peaks push outward, as a fraction of the smaller window dimension.
 const AMP_FRAC: f32 = 0.26;
-
-/// Antialiasing feather width (px) for the ring stroke.
-const RING_FEATHER: f32 = 1.5;
 
 /// Handles for the fill mesh/material so they can be updated each frame.
 #[derive(Resource)]
@@ -54,23 +51,16 @@ pub struct CirclePlugin;
 impl Plugin for CirclePlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, setup_circle)
-            .add_systems(Update, (sync_gizmo_line, update_ring, update_fill));
+            .add_systems(Update, (update_ring, update_fill));
     }
 }
 
-/// Configure line width / joints and spawn the (hidden) fill blob. Round joints
-/// keep the corners of the Wave / Splitter / ring linestrips smooth.
+/// Spawn the (hidden) fill blob and ring-outline stroke entities.
 fn setup_circle(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
-    mut store: ResMut<GizmoConfigStore>,
-    vis: Res<VisSettings>,
 ) {
-    let line = &mut store.config_mut::<DefaultGizmoConfigGroup>().0.line;
-    line.width = vis.line_thickness;
-    line.joints = GizmoLineJoint::Round(8);
-
     let mesh = meshes.add(fan_mesh());
     let material = materials.add(ColorMaterial::from(Color::NONE));
     commands.spawn((
@@ -94,15 +84,6 @@ fn setup_circle(
         RingStroke,
     ));
     commands.insert_resource(RingHandles { mesh: ring_mesh });
-}
-
-/// Keep the gizmo line width in sync with the live `line_thickness` setting so
-/// the editor's slider updates the Wave / Splitter / ring strokes immediately.
-fn sync_gizmo_line(vis: Res<VisSettings>, mut store: ResMut<GizmoConfigStore>) {
-    if !vis.is_changed() {
-        return;
-    }
-    store.config_mut::<DefaultGizmoConfigGroup>().0.line.width = vis.line_thickness;
 }
 
 /// A triangle fan: vertex 0 is the center, 1..=SEGMENTS are the ring. Positions
@@ -198,7 +179,7 @@ fn update_ring(
 
     if let Some(mesh) = meshes.get_mut(&ring.mesh) {
         // `closed` joins the ring; half-width follows the line-thickness setting.
-        apply_stroke(mesh, &pts, vis.line_thickness * 0.5, RING_FEATHER, true);
+        apply_stroke(mesh, &pts, vis.line_thickness * 0.5, STROKE_FEATHER, true);
     }
 }
 

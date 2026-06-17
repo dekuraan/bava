@@ -20,6 +20,7 @@ use bevy::prelude::*;
 use bevy::render::view::Hdr;
 
 use crate::cava::{Cava, CavaSettings};
+use crate::vis::stroke::{apply_stroke, empty_stroke_mesh, stroke_material, STROKE_FEATHER};
 use crate::vis::{
     gradient_color, spread_monstercat, DrawingMode, MirrorMode, VisFamily, VisSettings, VisShape,
 };
@@ -37,6 +38,16 @@ const WAVE_SEGMENTS: usize = 192;
 #[derive(Component)]
 struct Bar(usize);
 
+/// Handle for the line-shape (Wave/Splitter) stroke mesh, rebuilt each frame.
+#[derive(Resource)]
+struct BoxLineHandles {
+    mesh: Handle<Mesh>,
+}
+
+/// Marks the box-line stroke entity.
+#[derive(Component)]
+struct BoxLineStroke;
+
 /// 2D linear visualizer plugin.
 pub struct BarsPlugin;
 
@@ -45,7 +56,7 @@ impl Plugin for BarsPlugin {
         app.add_systems(Startup, setup)
             // Reconcile the sprite pool first so a live bar-count change (editor
             // "Apply" / profile load) is reflected the same frame it converges.
-            .add_systems(Update, (reconcile_bars, update_bars, draw_box_lines).chain());
+            .add_systems(Update, (reconcile_bars, update_bars, update_box_lines).chain());
     }
 }
 
@@ -53,7 +64,12 @@ impl Plugin for BarsPlugin {
 /// and bloom, so the amplitude-boosted (HDR-range) colors from
 /// [`gradient_color`](crate::vis::gradient_color) glow at peaks and the gizmo /
 /// mesh edges stay smooth.
-fn setup(mut commands: Commands, settings: Res<CavaSettings>) {
+fn setup(
+    mut commands: Commands,
+    settings: Res<CavaSettings>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
+) {
     commands.spawn((
         Camera2d,
         Hdr,
@@ -69,6 +85,18 @@ fn setup(mut commands: Commands, settings: Res<CavaSettings>) {
     for i in 0..n {
         spawn_bar(&mut commands, i);
     }
+
+    // Reusable antialiased stroke for the line shapes (Wave / Splitter); only one
+    // is active at a time, so a single entity suffices.
+    let line_mesh = meshes.add(empty_stroke_mesh());
+    commands.spawn((
+        Mesh2d(line_mesh.clone()),
+        MeshMaterial2d(materials.add(stroke_material())),
+        Transform::from_xyz(0.0, 0.0, 1.0),
+        Visibility::Hidden,
+        BoxLineStroke,
+    ));
+    commands.insert_resource(BoxLineHandles { mesh: line_mesh });
 }
 
 /// Spawn a single bar sprite carrying its Cava bar index.
@@ -220,20 +248,27 @@ fn place_column(sprite: &mut Sprite, transform: &mut Transform, lyt: &Layout, ba
     }
 }
 
-/// Draw the line-based box shapes (Wave, Splitter) with gizmos. No-op for every
-/// other mode (the sprite pool or the circle renderer handles those).
-fn draw_box_lines(
+/// Rebuild the antialiased stroke for the line-based box shapes (Wave, Splitter),
+/// or hide it for every other mode (handled by the sprite pool / circle renderer).
+fn update_box_lines(
     mode: Res<DrawingMode>,
     cava: Res<Cava>,
     vis: Res<VisSettings>,
     windows: Query<&Window>,
-    mut gizmos: Gizmos,
+    line: Res<BoxLineHandles>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut q: Query<&mut Visibility, With<BoxLineStroke>>,
 ) {
-    if mode.family() != VisFamily::Box {
-        return;
+    let shape = (mode.family() == VisFamily::Box).then(|| mode.shape());
+    let active = matches!(shape, Some(VisShape::Wave | VisShape::Splitter));
+    for mut v in &mut q {
+        *v = if active {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
     }
-    let shape = mode.shape();
-    if !matches!(shape, VisShape::Wave | VisShape::Splitter) {
+    if !active {
         return;
     }
 
@@ -251,29 +286,35 @@ fn draw_box_lines(
     let (lo, hi) = (vis.fg_lo(), vis.fg_hi());
     let lyt = Layout::new(w, h, n, false);
 
-    match shape {
-        VisShape::Wave => {
+    let pts: Vec<(Vec2, Color)> = match shape {
+        Some(VisShape::Wave) => {
             // A smooth gradient waveform across the full width.
-            let points = (0..=WAVE_SEGMENTS).map(|k| {
-                let t = k as f32 / WAVE_SEGMENTS as f32;
-                let v = sample_h(&values, t).clamp(0.0, 1.5);
-                let x = lyt.left + t * w;
-                let y = lyt.floor + v * lyt.max_h;
-                (Vec2::new(x, y), gradient_color(lo, hi, v.min(1.0)))
-            });
-            gizmos.linestrip_gradient_2d(points);
+            (0..=WAVE_SEGMENTS)
+                .map(|k| {
+                    let t = k as f32 / WAVE_SEGMENTS as f32;
+                    let v = sample_h(&values, t).clamp(0.0, 1.5);
+                    let x = lyt.left + t * w;
+                    let y = lyt.floor + v * lyt.max_h;
+                    (Vec2::new(x, y), gradient_color(lo, hi, v.min(1.0)))
+                })
+                .collect()
         }
-        VisShape::Splitter => {
+        Some(VisShape::Splitter) => {
             // Zig-zag: each bar alternates above/below the center line.
-            let points = (0..n).map(|i| {
-                let v = values[i].clamp(0.0, 1.5);
-                let dir = if i % 2 == 0 { 1.0 } else { -1.0 };
-                let y = dir * v * lyt.max_h * 0.5;
-                (Vec2::new(lyt.bar_x(i), y), gradient_color(lo, hi, v.min(1.0)))
-            });
-            gizmos.linestrip_gradient_2d(points);
+            (0..n)
+                .map(|i| {
+                    let v = values[i].clamp(0.0, 1.5);
+                    let dir = if i % 2 == 0 { 1.0 } else { -1.0 };
+                    let y = dir * v * lyt.max_h * 0.5;
+                    (Vec2::new(lyt.bar_x(i), y), gradient_color(lo, hi, v.min(1.0)))
+                })
+                .collect()
         }
-        _ => {}
+        _ => Vec::new(),
+    };
+
+    if let Some(mesh) = meshes.get_mut(&line.mesh) {
+        apply_stroke(mesh, &pts, vis.line_thickness * 0.5, STROKE_FEATHER, false);
     }
 }
 
