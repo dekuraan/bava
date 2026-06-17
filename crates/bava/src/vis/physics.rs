@@ -30,6 +30,8 @@
 //! [`PhysicsDebugPlugin`] draws the live collider wireframes when
 //! `[physics] debug_draw` is on (toggle at runtime with **F3**).
 
+use std::collections::VecDeque;
+
 use avian2d::prelude::*;
 use bevy::prelude::*;
 
@@ -37,6 +39,7 @@ use crate::cava::Cava;
 use crate::gui::EditorState;
 use crate::vis::bars::{column_geom, Layout, LEVEL_STEPS, MAX_HEIGHT_FRAC};
 use crate::vis::circle::blob_ring;
+use crate::vis::stroke::{apply_stroke, empty_stroke_mesh, stroke_material, STROKE_FEATHER};
 use crate::vis::{
     gradient_color, spread_monstercat, DrawingMode, MirrorMode, VisFamily, VisSettings, VisShape,
 };
@@ -79,6 +82,10 @@ pub struct PhysicsSettings {
     pub bar_push: f32,
     /// Planet mode: radial acceleration pulling balls toward the center, px/s².
     pub central_gravity: f32,
+    /// Draw a fading color trail behind each ball.
+    pub trails: bool,
+    /// Trail length: how many recent positions each trail keeps.
+    pub trail_length: usize,
     /// Draw the avian collider wireframes (toggle at runtime with F3).
     pub debug_draw: bool,
 }
@@ -98,6 +105,8 @@ impl Default for PhysicsSettings {
             bar_restitution: 1.0,
             bar_push: 1.6,
             central_gravity: 1500.0,
+            trails: true,
+            trail_length: 18,
             debug_draw: false,
         }
     }
@@ -114,6 +123,30 @@ struct Ball {
 /// Monotonic counter handing out [`Ball::id`]s.
 #[derive(Resource, Default)]
 struct BallCounter(u64);
+
+/// A fading color trail rendered behind a ball as a feathered stroke. Lives on
+/// its own (un-parented) entity so the polyline can stay in world space; it is
+/// reaped by [`update_trails`] the frame its `ball` no longer exists, covering
+/// every despawn path (cap, escape, mode change).
+#[derive(Component)]
+struct Trail {
+    /// The ball this trail follows.
+    ball: Entity,
+    /// Recent world positions, oldest → newest.
+    points: VecDeque<Vec2>,
+    /// The ball's (HDR) tint; the per-point alpha fades it tail-ward.
+    color: Color,
+    /// Stroke half-width, derived from the ball radius.
+    half_width: f32,
+}
+
+/// Shared blend material for every trail mesh (per-vertex color/alpha do the work).
+#[derive(Resource)]
+struct TrailMaterial(Handle<ColorMaterial>);
+
+/// Only record a new trail point once the ball has moved at least this far (px²),
+/// so a resting ball doesn't pile up a zero-length smear.
+const TRAIL_MIN_STEP_SQ: f32 = 4.0;
 
 /// Time-smoothed Wave surface, shared by the heightfield/mesh update and the
 /// ball-push pass. `heights`/`prev` are absolute world-space y of the surface at
@@ -204,6 +237,7 @@ impl Plugin for PhysicsPlugin {
                     (update_surface, push_balls).chain(),
                     (reconcile_columns, update_columns, push_columns).chain(),
                     (update_planet, planet_forces).chain(),
+                    update_trails,
                     toggle_physics_debug,
                     sync_physics_debug,
                 ),
@@ -233,11 +267,15 @@ fn physics_supported(mode: DrawingMode, vis: &VisSettings) -> bool {
 fn setup_physics(
     mut commands: Commands,
     settings: Res<PhysicsSettings>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
     windows: Query<&Window>,
 ) {
     if !settings.enabled {
         return;
     }
+
+    // Shared blend material for the ball trails.
+    commands.insert_resource(TrailMaterial(materials.add(stroke_material())));
 
     // Gravity in our pixel space; Box mode uses it, circle modes zero it.
     commands.insert_resource(Gravity(Vec2::NEG_Y * settings.gravity));
@@ -352,6 +390,7 @@ fn spawn_ball_on_click(
     settings: Res<PhysicsSettings>,
     vis: Res<VisSettings>,
     editor: Res<EditorState>,
+    trail_mat: Res<TrailMaterial>,
     mut counter: ResMut<BallCounter>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
@@ -411,21 +450,38 @@ fn spawn_ball_on_click(
         Vec2::ZERO
     };
 
-    commands.spawn((
-        RigidBody::Dynamic,
-        Collider::circle(radius),
-        Restitution::new(restitution),
-        LinearDamping(damping),
-        Mass(mass),
-        LinearVelocity(velocity),
-        // Continuous collision detection: stops fast-falling balls from
-        // tunneling through the surface and the walls.
-        SweptCcd::default(),
-        Mesh2d(meshes.add(Circle::new(radius))),
-        MeshMaterial2d(materials.add(color)),
-        Transform::from_translation(world.extend(1.0)),
-        Ball { id, radius },
-    ));
+    let ball = commands
+        .spawn((
+            RigidBody::Dynamic,
+            Collider::circle(radius),
+            Restitution::new(restitution),
+            LinearDamping(damping),
+            Mass(mass),
+            LinearVelocity(velocity),
+            // Continuous collision detection: stops fast-falling balls from
+            // tunneling through the surface and the walls.
+            SweptCcd::default(),
+            Mesh2d(meshes.add(Circle::new(radius))),
+            MeshMaterial2d(materials.add(color)),
+            Transform::from_translation(world.extend(1.0)),
+            Ball { id, radius },
+        ))
+        .id();
+
+    // A trail entity following this ball, drawn just behind it (z = 0.9).
+    if settings.trails {
+        commands.spawn((
+            Mesh2d(meshes.add(empty_stroke_mesh())),
+            MeshMaterial2d(trail_mat.0.clone()),
+            Transform::from_xyz(0.0, 0.0, 0.9),
+            Trail {
+                ball,
+                points: VecDeque::with_capacity(settings.trail_length + 1),
+                color,
+                half_width: (radius * 0.7).max(1.0),
+            },
+        ));
+    }
 }
 
 /// Despawn the oldest balls once the live count exceeds `max_balls`.
@@ -922,6 +978,54 @@ fn planet_forces(
             if target > along {
                 vel.0 += outward * (target - along);
             }
+        }
+    }
+}
+
+/// Extend each ball's trail with its current position (or retract it when the
+/// ball is at rest), rebuild the fading feathered stroke, and reap trails whose
+/// ball has been despawned. The per-point alpha ramps 0 → 1 from tail to head,
+/// so the trail fades out behind the ball and blooms via the HDR camera.
+fn update_trails(
+    mut commands: Commands,
+    settings: Res<PhysicsSettings>,
+    balls: Query<&Transform, With<Ball>>,
+    mut trails: Query<(Entity, &mut Trail, &Mesh2d)>,
+    mut meshes: ResMut<Assets<Mesh>>,
+) {
+    let max_len = settings.trail_length.max(2);
+    for (entity, mut trail, mesh2d) in &mut trails {
+        // Reap the trail once its ball is gone (covers every despawn path).
+        let Ok(ball_tf) = balls.get(trail.ball) else {
+            commands.entity(entity).despawn();
+            continue;
+        };
+        let pos = ball_tf.translation.truncate();
+
+        // Record a new head when the ball moved; otherwise retract the tail so a
+        // resting ball's trail shrinks away instead of lingering as a smear.
+        let moved = trail
+            .points
+            .back()
+            .is_none_or(|&last| last.distance_squared(pos) > TRAIL_MIN_STEP_SQ);
+        if moved {
+            trail.points.push_back(pos);
+        } else {
+            trail.points.pop_front();
+        }
+        while trail.points.len() > max_len {
+            trail.points.pop_front();
+        }
+
+        let m = trail.points.len();
+        let pts: Vec<(Vec2, Color)> = trail
+            .points
+            .iter()
+            .enumerate()
+            .map(|(i, &p)| (p, trail.color.with_alpha((i + 1) as f32 / m as f32)))
+            .collect();
+        if let Some(mesh) = meshes.get_mut(&mesh2d.0) {
+            apply_stroke(mesh, &pts, trail.half_width, STROKE_FEATHER, false);
         }
     }
 }

@@ -265,6 +265,10 @@ pub struct PhysicsConfig {
     pub bar_push: f32,
     /// Planet mode: radial acceleration pulling balls toward the center, px/s².
     pub central_gravity: f32,
+    /// Draw a fading color trail behind each ball.
+    pub trails: bool,
+    /// Trail length: how many recent positions each trail keeps.
+    pub trail_length: usize,
     /// Draw the avian collider wireframes (toggle at runtime with F3).
     pub debug_draw: bool,
 }
@@ -363,6 +367,8 @@ impl Config {
                 bar_restitution: physics.bar_restitution,
                 bar_push: physics.bar_push,
                 central_gravity: physics.central_gravity,
+                trails: physics.trails,
+                trail_length: physics.trail_length,
                 debug_draw: physics.debug_draw,
             },
             // The editor hotkey isn't derived from the runtime settings; callers
@@ -604,6 +610,8 @@ impl Config {
             bar_restitution: p.bar_restitution,
             bar_push: p.bar_push,
             central_gravity: p.central_gravity,
+            trails: p.trails,
+            trail_length: p.trail_length,
             debug_draw: p.debug_draw,
         }
     }
