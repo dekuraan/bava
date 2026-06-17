@@ -26,10 +26,10 @@ pub enum VisFamily {
     Circle,
 }
 
-/// The per-bar shape / algorithm, independent of layout family. Part of the
-/// forward-looking mode model; not every shape has a renderer yet.
+/// The per-bar shape / algorithm, independent of layout family. The box family
+/// renders all six distinctly; the circle family renders Wave/Levels/Particles/
+/// Bars/Spine via the shared circle renderer.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-#[allow(dead_code)]
 pub enum VisShape {
     /// Smooth Bézier waveform.
     Wave,
@@ -84,7 +84,6 @@ impl DrawingMode {
     ];
 
     /// The shape/algorithm of this mode.
-    #[allow(dead_code)]
     pub fn shape(self) -> VisShape {
         use DrawingMode::*;
         match self {
