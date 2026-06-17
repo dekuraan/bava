@@ -25,7 +25,10 @@ pub struct BarsPlugin;
 
 impl Plugin for BarsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, setup).add_systems(Update, update_bars);
+        app.add_systems(Startup, setup)
+            // Reconcile the sprite pool first so a live bar-count change (editor
+            // "Apply" / profile load) is reflected the same frame it converges.
+            .add_systems(Update, (reconcile_bars, update_bars).chain());
     }
 }
 
@@ -35,11 +38,36 @@ fn setup(mut commands: Commands, settings: Res<CavaSettings>) {
 
     let n = settings.bars_per_channel.max(1);
     for i in 0..n {
-        commands.spawn((
-            Sprite::from_color(Color::WHITE, Vec2::new(4.0, 4.0)),
-            Transform::from_xyz(0.0, 0.0, 0.0),
-            Bar(i),
-        ));
+        spawn_bar(&mut commands, i);
+    }
+}
+
+/// Spawn a single bar sprite carrying its Cava bar index.
+fn spawn_bar(commands: &mut Commands, i: usize) {
+    commands.spawn((
+        Sprite::from_color(Color::WHITE, Vec2::new(4.0, 4.0)),
+        Transform::from_xyz(0.0, 0.0, 0.0),
+        Bar(i),
+    ));
+}
+
+/// Grow or shrink the bar-sprite pool to match the live [`Cava::bars_per_channel`],
+/// which the settings editor can change at runtime (the startup pool is fixed).
+/// Indices stay contiguous `0..target`, so [`update_bars`] addresses them safely.
+fn reconcile_bars(mut commands: Commands, cava: Res<Cava>, bars: Query<(Entity, &Bar)>) {
+    let target = cava.bars_per_channel.max(1);
+    let current = bars.iter().count();
+    if current < target {
+        for i in current..target {
+            spawn_bar(&mut commands, i);
+        }
+    } else if current > target {
+        // Drop the highest indices, keeping a contiguous 0..target range.
+        for (entity, bar) in &bars {
+            if bar.0 >= target {
+                commands.entity(entity).despawn();
+            }
+        }
     }
 }
 

@@ -11,6 +11,9 @@ default-run = "bava"
 cavacore-rs.workspace = true
 bevy = "0.18"
 
+# In-app settings editor (immediate-mode GUI overlay).
+bevy_egui = "0.39"
+
 # Audio capture (PulseAudio simple API, works through pipewire-pulse).
 libpulse-binding = "2"
 libpulse-simple-binding = "2"

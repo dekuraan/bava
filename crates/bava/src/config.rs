@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-use bevy::prelude::{Color, Vec2};
+use bevy::prelude::{Color, Resource, Vec2};
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 
@@ -22,14 +22,59 @@ pub struct Cli {
     #[arg(long, value_name = "FILE")]
     pub config: Option<PathBuf>,
 
+    /// Load a named saved profile (`~/.config/bava/profiles/<NAME>.toml`) as the
+    /// base config before applying any other overrides.
+    #[arg(long, value_name = "NAME")]
+    pub profile: Option<String>,
+
+    /// Open the settings editor on startup (also toggled live with the `` ` `` key).
+    #[arg(long)]
+    pub gui: bool,
+
     /// Capture source, a PulseAudio monitor name (e.g. `alsa_output.….monitor`).
     /// Overrides `[audio] source`.
     #[arg(long, value_name = "NAME")]
     pub source: Option<String>,
 
+    /// Capture sample rate in Hz. Overrides `[audio] rate`.
+    #[arg(long)]
+    pub rate: Option<u32>,
+
+    /// Channels to capture (1 or 2). Overrides `[audio] channels`.
+    #[arg(long)]
+    pub channels: Option<usize>,
+
+    /// Samples per channel per cavacore execution. Overrides `[audio] frame_samples`.
+    #[arg(long)]
+    pub frame_samples: Option<usize>,
+
     /// Bars per channel. Overrides `[cava] bars_per_channel`.
     #[arg(long)]
     pub bars: Option<usize>,
+
+    /// Smoothing factor 0..1. Overrides `[cava] noise_reduction`.
+    #[arg(long)]
+    pub noise_reduction: Option<f64>,
+
+    /// Low edge of the visualized band, Hz. Overrides `[cava] low_cutoff_freq`.
+    #[arg(long)]
+    pub low_cutoff: Option<u32>,
+
+    /// High edge of the visualized band, Hz. Overrides `[cava] high_cutoff_freq`.
+    #[arg(long)]
+    pub high_cutoff: Option<u32>,
+
+    /// Initial drawing mode. Overrides `[vis] mode`.
+    #[arg(long, value_enum)]
+    pub mode: Option<DrawingMode>,
+
+    /// Mirroring behaviour. Overrides `[vis] mirror`.
+    #[arg(long, value_enum)]
+    pub mirror: Option<MirrorMode>,
+
+    /// Monstercat neighbour-spread factor. Overrides `[vis] monstercat`.
+    #[arg(long)]
+    pub monstercat: Option<f32>,
 
     /// Log input/output signal levels about once per second.
     #[arg(long)]
@@ -171,44 +216,11 @@ impl Default for ImageConfig {
 impl Default for Config {
     fn default() -> Self {
         // Mirror the pipeline/vis defaults so the generated file documents them.
-        let s = CavaSettings::default();
-        let v = VisSettings::default();
-        Self {
-            audio: AudioConfig {
-                source: s.source,
-                rate: s.rate,
-                channels: s.channels,
-                frame_samples: s.frame_samples,
-            },
-            cava: CavaConfig {
-                bars_per_channel: s.bars_per_channel,
-                autosens: s.autosens,
-                noise_reduction: s.noise_reduction,
-                low_cutoff_freq: s.low_cutoff_freq,
-                high_cutoff_freq: s.high_cutoff_freq,
-            },
-            vis: VisConfig {
-                mode: DrawingMode::default(),
-                monstercat: v.monstercat,
-                mirror: v.mirror,
-                reverse_mirror: v.reverse_mirror,
-                direction: v.direction,
-                reverse_order: v.reverse_order,
-                filling: v.filling,
-                line_thickness: v.line_thickness,
-                items_offset: v.items_offset,
-                items_roundness: v.items_roundness,
-                hearts: v.hearts,
-                inner_radius: v.inner_radius,
-                rotation: v.rotation,
-                area_margin: v.area_margin,
-                area_offset: v.area_offset.to_array(),
-                active_profile: v.active_profile,
-                profiles: v.profiles.iter().map(ColorProfileConfig::from).collect(),
-                background: ImageConfig::from(&v.background),
-                foreground: ImageConfig::from(&v.foreground),
-            },
-        }
+        Config::from_settings(
+            &CavaSettings::default(),
+            &VisSettings::default(),
+            DrawingMode::default(),
+        )
     }
 }
 
@@ -231,9 +243,107 @@ impl Default for VisConfig {
 }
 
 impl Config {
+    /// Build a config file model from the live runtime settings, so the editor
+    /// can serialize the current in-app state back to TOML. Inverse of
+    /// [`to_cava_settings`](Self::to_cava_settings) / [`to_vis_settings`](Self::to_vis_settings).
+    pub fn from_settings(cava: &CavaSettings, vis: &VisSettings, mode: DrawingMode) -> Self {
+        Self {
+            audio: AudioConfig {
+                source: cava.source.clone(),
+                rate: cava.rate,
+                channels: cava.channels,
+                frame_samples: cava.frame_samples,
+            },
+            cava: CavaConfig {
+                bars_per_channel: cava.bars_per_channel,
+                autosens: cava.autosens,
+                noise_reduction: cava.noise_reduction,
+                low_cutoff_freq: cava.low_cutoff_freq,
+                high_cutoff_freq: cava.high_cutoff_freq,
+            },
+            vis: VisConfig {
+                mode,
+                monstercat: vis.monstercat,
+                mirror: vis.mirror,
+                reverse_mirror: vis.reverse_mirror,
+                direction: vis.direction,
+                reverse_order: vis.reverse_order,
+                filling: vis.filling,
+                line_thickness: vis.line_thickness,
+                items_offset: vis.items_offset,
+                items_roundness: vis.items_roundness,
+                hearts: vis.hearts,
+                inner_radius: vis.inner_radius,
+                rotation: vis.rotation,
+                area_margin: vis.area_margin,
+                area_offset: vis.area_offset.to_array(),
+                active_profile: vis.active_profile,
+                profiles: vis.profiles.iter().map(ColorProfileConfig::from).collect(),
+                background: ImageConfig::from(&vis.background),
+                foreground: ImageConfig::from(&vis.foreground),
+            },
+        }
+    }
+
     /// Default config path: `~/.config/bava/config.toml`.
     pub fn default_path() -> Option<PathBuf> {
         dirs::config_dir().map(|d| d.join("bava").join("config.toml"))
+    }
+
+    /// Directory holding named profiles: `~/.config/bava/profiles/`.
+    pub fn profiles_dir() -> Option<PathBuf> {
+        dirs::config_dir().map(|d| d.join("bava").join("profiles"))
+    }
+
+    /// File path for a named profile, with the name sanitized to a bare stem so
+    /// it can't escape the profiles directory.
+    pub fn profile_path(name: &str) -> Option<PathBuf> {
+        let stem = sanitize_profile_name(name);
+        if stem.is_empty() {
+            return None;
+        }
+        Self::profiles_dir().map(|d| d.join(format!("{stem}.toml")))
+    }
+
+    /// Names of all saved profiles (`.toml` stems), sorted. Empty if the
+    /// directory is missing or unreadable.
+    pub fn list_profiles() -> Vec<String> {
+        let Some(dir) = Self::profiles_dir() else {
+            return Vec::new();
+        };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return Vec::new();
+        };
+        let mut names: Vec<String> = entries
+            .filter_map(|e| {
+                let path = e.ok()?.path();
+                if path.extension().and_then(|s| s.to_str()) == Some("toml") {
+                    path.file_stem()
+                        .and_then(|s| s.to_str())
+                        .map(str::to_string)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// Load a named profile, or `None` if it is missing or fails to parse.
+    pub fn load_profile(name: &str) -> Option<Self> {
+        let path = Self::profile_path(name)?;
+        let text = std::fs::read_to_string(&path).ok()?;
+        toml::from_str(&text).ok()
+    }
+
+    /// Save this config as a named profile under [`profiles_dir`](Self::profiles_dir).
+    pub fn save_profile(&self, name: &str) -> std::io::Result<PathBuf> {
+        let path = Self::profile_path(name).ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid profile name")
+        })?;
+        self.write(&path)?;
+        Ok(path)
     }
 
     /// Load the config at `path`, creating it with defaults if it doesn't exist.
@@ -276,13 +386,40 @@ impl Config {
         std::fs::write(path, text)
     }
 
-    /// Apply CLI overrides in place.
+    /// Apply CLI overrides in place. Precedence is CLI > config file > defaults.
     pub fn apply_cli(&mut self, cli: &Cli) {
         if let Some(source) = &cli.source {
             self.audio.source = Some(source.clone());
         }
+        if let Some(rate) = cli.rate {
+            self.audio.rate = rate;
+        }
+        if let Some(channels) = cli.channels {
+            self.audio.channels = channels;
+        }
+        if let Some(frame_samples) = cli.frame_samples {
+            self.audio.frame_samples = frame_samples;
+        }
         if let Some(bars) = cli.bars {
             self.cava.bars_per_channel = bars;
+        }
+        if let Some(nr) = cli.noise_reduction {
+            self.cava.noise_reduction = nr;
+        }
+        if let Some(low) = cli.low_cutoff {
+            self.cava.low_cutoff_freq = low;
+        }
+        if let Some(high) = cli.high_cutoff {
+            self.cava.high_cutoff_freq = high;
+        }
+        if let Some(mode) = cli.mode {
+            self.vis.mode = mode;
+        }
+        if let Some(mirror) = cli.mirror {
+            self.vis.mirror = mirror;
+        }
+        if let Some(monstercat) = cli.monstercat {
+            self.vis.monstercat = monstercat;
         }
     }
 
@@ -335,6 +472,23 @@ impl Config {
     pub fn vis_mode(&self) -> DrawingMode {
         self.vis.mode
     }
+}
+
+/// The active config file location, kept as a resource so the in-app editor can
+/// save/reload to the same path the app launched with.
+#[derive(Resource, Clone, Debug)]
+pub struct ConfigHandle {
+    /// Path of the main `config.toml` this session reads and writes.
+    pub path: PathBuf,
+}
+
+/// Reduce a user-supplied profile name to a safe single-segment file stem:
+/// trims whitespace and keeps only alphanumerics, space, `-` and `_`.
+fn sanitize_profile_name(name: &str) -> String {
+    name.trim()
+        .chars()
+        .filter(|c| c.is_alphanumeric() || matches!(c, ' ' | '-' | '_'))
+        .collect()
 }
 
 // --- DTO ⇄ runtime conversions (hex colors, image layers) -------------------

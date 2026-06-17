@@ -7,14 +7,17 @@
 
 mod cava;
 mod config;
+mod gui;
 mod mpris;
 mod vis;
 
 use bevy::prelude::*;
+use bevy_egui::EguiPlugin;
 use clap::Parser;
 
 use cava::CavaPlugin;
-use config::{Cli, Config};
+use config::{Cli, Config, ConfigHandle};
+use gui::{EditorState, GuiPlugin};
 use mpris::MprisPlugin;
 use vis::VisPlugin;
 
@@ -28,6 +31,13 @@ fn main() {
         .unwrap_or_else(|| std::path::PathBuf::from("config.toml"));
 
     let mut config = Config::load_or_create(&path);
+    // A named profile, if requested, becomes the base before CLI overrides.
+    if let Some(name) = &cli.profile {
+        match Config::load_profile(name) {
+            Some(profile) => config = profile,
+            None => eprintln!("bava: profile '{name}' not found; using config file"),
+        }
+    }
     config.apply_cli(&cli);
 
     if cli.print_config {
@@ -50,6 +60,7 @@ fn main() {
         }),
         ..default()
     }))
+    .add_plugins(EguiPlugin::default())
     // Dark backdrop so the visualizer pops.
     .insert_resource(ClearColor(Color::srgb(0.02, 0.02, 0.04)))
     // Pipeline + vis config from CLI/TOML; inserted before the plugins so their
@@ -57,7 +68,10 @@ fn main() {
     .insert_resource(settings)
     .insert_resource(vis_settings)
     .insert_resource(vis_mode)
-    .add_plugins((CavaPlugin, MprisPlugin, VisPlugin));
+    // Where the editor saves/reloads, and whether it starts open.
+    .insert_resource(ConfigHandle { path })
+    .insert_resource(EditorState::opened(cli.gui))
+    .add_plugins((CavaPlugin, MprisPlugin, VisPlugin, GuiPlugin));
 
     // `--debug` also enables frame-time diagnostics, logging FPS/frame time ~1×/s.
     if cli.debug {

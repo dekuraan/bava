@@ -48,7 +48,9 @@ pub enum VisShape {
 /// Active drawing mode — Cavalier's 11 modes. Each is a [`VisShape`] laid out in
 /// a [`VisFamily`]; `Splitter` has no circle form, which is why there are 11 and
 /// not 12. Lives as its own resource so it can be toggled live with the space bar.
-#[derive(Resource, Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[derive(
+    Resource, Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize, clap::ValueEnum,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum DrawingMode {
     #[default]
@@ -114,7 +116,7 @@ impl DrawingMode {
 }
 
 /// Mirroring behaviour (Cavalier `Mirror`).
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum MirrorMode {
     /// Single visualization, no mirroring.
@@ -354,8 +356,16 @@ impl Plugin for VisPlugin {
     }
 }
 
-/// Space bar cycles the active drawing mode.
-fn cycle_mode(keys: Res<ButtonInput<KeyCode>>, mut mode: ResMut<DrawingMode>) {
+/// Space bar cycles the active drawing mode, unless the settings editor is
+/// holding keyboard focus (e.g. typing a profile name).
+fn cycle_mode(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut mode: ResMut<DrawingMode>,
+    editor: Res<crate::gui::EditorState>,
+) {
+    if editor.capture_keyboard {
+        return;
+    }
     if keys.just_pressed(KeyCode::Space) {
         *mode = mode.next();
         info!("bava: drawing mode → {:?}", *mode);
