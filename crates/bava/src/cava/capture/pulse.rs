@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! PulseAudio capture backend.
 //!
 //! Records the monitor source of the default sink via the PulseAudio "simple"

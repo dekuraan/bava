@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Physics playground layered over the visualizers (avian2d).
 //!
 //! **Box mode** (bars): left-click spawns a ball that falls under gravity,

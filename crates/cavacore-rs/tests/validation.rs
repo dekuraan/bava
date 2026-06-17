@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Construction, validation, buffer-sizing, lifecycle and thread-safety tests.
 //!
 //! These exercise the *safety* contract of the wrapper: every invalid argument

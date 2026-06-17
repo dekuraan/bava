@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Raw FFI bindings to [cavacore], the core audio-visualization engine of CAVA.
 //!
 //! cavacore wraps FFTW to turn interleaved PCM audio into a small number of

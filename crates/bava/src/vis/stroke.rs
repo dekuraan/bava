@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Feathered triangle-strip stroke meshes for smooth, glowing lines.
 //!
 //! Bevy gizmo lines have no analytic antialiasing and no soft edge. Instead we

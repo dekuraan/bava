@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! MPRIS now-playing + album-art integration.
 //!
 //! A background thread polls the active MPRIS player (e.g. spotifyd) over D-Bus,

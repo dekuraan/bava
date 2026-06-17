@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! In-app settings editor: a floating [`egui`] window for live-tweaking the
 //! visualizer, with TOML save/reload and named profiles.
 //!

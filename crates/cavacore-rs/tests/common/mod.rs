@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Shared deterministic test-signal helpers.
 #![allow(dead_code)] // each test binary uses a different subset
 

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The cavacore subsystem.
 //!
 //! A background thread captures audio into a ring buffer; a Bevy system drains

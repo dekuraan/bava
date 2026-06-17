@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Safe, idiomatic wrapper around [`cavacore-sys`].
 //!
 //! [`CavaPlan`] turns interleaved PCM audio into a small set of smoothed,

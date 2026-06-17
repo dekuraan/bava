@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Smooth circular visualizer.
 //!
 //! Draws a closed ring whose radius is modulated by the spectrum. The spectrum

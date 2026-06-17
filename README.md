@@ -76,7 +76,19 @@ Planned directions (the architecture already supports them):
 - **Native PipeWire capture**: add a second `AudioCapture` impl alongside the
   PulseAudio one and select by config.
 
+## License
+
+bava is licensed under the **GNU General Public License v3.0 or later**
+(GPL-3.0-or-later); see [`LICENSE`](LICENSE). The project links FFTW3
+(GPL-2.0-or-later) via cavacore, so distributed binaries are a combined work
+conveyed under the GPL.
+
+The project's own source could stand alone under a permissive license, but the
+FFTW linkage makes the shipped program copyleft. If you need a permissive
+binary, swap FFTW for a non-GPL FFT (e.g. PFFFT/KISS FFT or `rustfft`).
+
 ## Credits
 
 Vendors `cavacore.c` / `cavacore.h` from [karlstav/cava](https://github.com/karlstav/cava)
-(MIT, see `crates/cavacore-sys/vendor/cava/LICENSE`).
+(MIT, see `crates/cavacore-sys/vendor/cava/LICENSE`) — MIT is GPL-compatible, so
+its terms are preserved within this GPL-licensed work.

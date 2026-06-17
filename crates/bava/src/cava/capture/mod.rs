@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Audio capture backends.
 //!
 //! cavacore needs a stream of interleaved PCM samples. On Linux the natural
