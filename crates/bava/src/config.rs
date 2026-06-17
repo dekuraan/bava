@@ -391,15 +391,30 @@ impl Config {
 
     /// Load the config at `path`, creating it with defaults if it doesn't exist.
     ///
-    /// On a read or parse error, logs a warning and falls back to defaults so the
-    /// app always starts.
+    /// On a read error, logs a warning and falls back to defaults so the app
+    /// always starts. On a *parse* error the broken file is moved aside to
+    /// `<name>.bak` and a fresh default is written in its place, so a stale or
+    /// hand-broken config self-heals instead of silently using defaults forever
+    /// (the old contents stay recoverable in the backup).
     pub fn load_or_create(path: &PathBuf) -> Self {
         match std::fs::read_to_string(path) {
             Ok(text) => match toml::from_str::<Config>(&text) {
                 Ok(cfg) => cfg,
                 Err(e) => {
-                    eprintln!("bava: failed to parse {}: {e}; using defaults", path.display());
-                    Config::default()
+                    let backup = path.with_extension("toml.bak");
+                    let where_to = match std::fs::rename(path, &backup) {
+                        Ok(()) => format!("backed up to {}", backup.display()),
+                        Err(be) => format!("could not back it up: {be}"),
+                    };
+                    eprintln!(
+                        "bava: {} failed to parse ({e}); {where_to}, writing fresh defaults",
+                        path.display()
+                    );
+                    let cfg = Config::default();
+                    if let Err(we) = cfg.write(path) {
+                        eprintln!("bava: could not write fresh config to {}: {we}", path.display());
+                    }
+                    cfg
                 }
             },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -655,11 +670,21 @@ fn nib(h: &str, i: usize) -> Option<u8> {
     Some(v * 17)
 }
 
+/// Quantize a `0.0..=1.0` color channel to a `0..=255` byte (clamped, rounded).
+/// Shared by the hex writer here and the editor's egui color swatches.
+pub(crate) fn channel_to_u8(x: f32) -> u8 {
+    (x.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
 /// Format a [`Color`] as `"#rrggbb"`, or `"#aarrggbb"` when not fully opaque.
 fn color_to_hex(c: Color) -> String {
     let s = c.to_srgba();
-    let q = |x: f32| (x.clamp(0.0, 1.0) * 255.0).round() as u8;
-    let (r, g, b, a) = (q(s.red), q(s.green), q(s.blue), q(s.alpha));
+    let (r, g, b, a) = (
+        channel_to_u8(s.red),
+        channel_to_u8(s.green),
+        channel_to_u8(s.blue),
+        channel_to_u8(s.alpha),
+    );
     if a == 255 {
         format!("#{r:02x}{g:02x}{b:02x}")
     } else {

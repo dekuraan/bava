@@ -123,7 +123,7 @@ fn editor_ui(
             persistence_section(ui, &mut editor, &mut vis, &mut mode, &mut cava, &mut rebuild, &handle);
             ui.separator();
             egui::ScrollArea::vertical().show(ui, |ui| {
-                mode_section(ui, &mut vis, &mut mode);
+                mode_section(ui, &mut mode);
                 ui.separator();
                 geometry_section(ui, &mut vis);
                 ui.separator();
@@ -230,7 +230,7 @@ fn persistence_section(
 }
 
 /// Drawing-mode selector.
-fn mode_section(ui: &mut egui::Ui, _vis: &mut VisSettings, mode: &mut DrawingMode) {
+fn mode_section(ui: &mut egui::Ui, mode: &mut DrawingMode) {
     egui::ComboBox::from_label("Drawing mode")
         .selected_text(format!("{:?}", *mode))
         .show_ui(ui, |ui| {
@@ -463,7 +463,7 @@ fn apply_config(
 /// Bevy [`Color`] → egui [`Color32`] (straight, un-premultiplied alpha).
 fn color_to_egui(c: Color) -> egui::Color32 {
     let s = c.to_srgba();
-    let q = |x: f32| (x.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let q = crate::config::channel_to_u8;
     egui::Color32::from_rgba_unmultiplied(q(s.red), q(s.green), q(s.blue), q(s.alpha))
 }
 
