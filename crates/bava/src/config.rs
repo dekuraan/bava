@@ -5,12 +5,14 @@
 
 use std::path::PathBuf;
 
-use bevy::prelude::Color;
+use bevy::prelude::{Color, Vec2};
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 
 use crate::cava::CavaSettings;
-use crate::vis::{VisSettings, VisStyle};
+use crate::vis::{
+    ColorProfile, Direction, DrawingMode, ImageLayer, MirrorMode, Theme, VisSettings,
+};
 
 /// Command-line arguments. Anything provided here overrides the config file.
 #[derive(Parser, Debug)]
@@ -78,25 +80,92 @@ pub struct CavaConfig {
     pub high_cutoff_freq: u32,
 }
 
-/// `[vis]` — visualizer styling.
+/// `[vis]` — visualizer modes, geometry, colors and pictures. Mirrors the
+/// [Cavalier](https://github.com/NickvisionApps/Cavalier) option set so the
+/// config is forward-compatible with every drawing mode, even those not yet
+/// rendered. Colors are ARGB/RGB hex strings (`"#rrggbb"` or `"#aarrggbb"`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct VisConfig {
-    /// Active visualizer: `"bars"` or `"circle"` (toggle live with space).
-    pub style: String,
+    /// Active drawing mode (one of Cavalier's 11; toggle live with space).
+    pub mode: DrawingMode,
     /// Monstercat neighbour-spread factor (1.5 ≈ smooth waves, higher = tighter,
-    /// `<= 1` disables).
+    /// `<= 1` disables). bava-specific smoothing.
     pub monstercat: f32,
-    /// Mirror bars from the vertical center instead of the bottom.
-    pub mirror: bool,
-    /// Foreground gradient `[r, g, b]` (0..1) at low amplitude.
-    pub color_low: [f32; 3],
-    /// Foreground gradient `[r, g, b]` (0..1) at full amplitude.
-    pub color_high: [f32; 3],
-    /// Circle: fill the ring interior with a translucent blob.
-    pub fill: bool,
-    /// Outline thickness in pixels.
-    pub line_width: f32,
+    /// Mirroring: `"off"`, `"full"` or `"split_channels"`.
+    pub mirror: MirrorMode,
+    /// Flip which side the mirrored copy is drawn on.
+    pub reverse_mirror: bool,
+    /// Box orientation / circle gradient direction.
+    pub direction: Direction,
+    /// Reverse bar order before drawing.
+    pub reverse_order: bool,
+    /// Solid fill vs. stroked outline (Wave/Bars).
+    pub filling: bool,
+    /// Stroke width in pixels when not filling.
+    pub line_thickness: f32,
+    /// Spacing between discrete items (Levels/Particles), ~0..0.5.
+    pub items_offset: f32,
+    /// Corner-radius multiplier for items.
+    pub items_roundness: f32,
+    /// Spine modes draw hearts instead of squares.
+    pub hearts: bool,
+    /// Circle modes: inner radius as a ratio of the full radius (0..1).
+    pub inner_radius: f32,
+    /// Circle modes: angular offset in radians.
+    pub rotation: f32,
+    /// Padding around the whole drawing area, in pixels.
+    pub area_margin: f32,
+    /// Proportional shift of the draw region `[x, y]`.
+    pub area_offset: [f32; 2],
+    /// Index of the active color profile.
+    pub active_profile: usize,
+    /// Color schemes. A single fg/bg color is solid; two or more form a gradient.
+    #[serde(rename = "profile")]
+    pub profiles: Vec<ColorProfileConfig>,
+    /// Background picture overlay.
+    pub background: ImageConfig,
+    /// Foreground picture overlay (masked by the visualization shape).
+    pub foreground: ImageConfig,
+}
+
+/// `[[vis.profile]]` — a named color scheme.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ColorProfileConfig {
+    /// Display name.
+    pub name: String,
+    /// Light/dark hint: `"light"` or `"dark"`.
+    pub theme: Theme,
+    /// Foreground color stops as hex strings.
+    pub fg: Vec<String>,
+    /// Background color stops as hex strings.
+    pub bg: Vec<String>,
+}
+
+impl Default for ColorProfileConfig {
+    fn default() -> Self {
+        ColorProfileConfig::from(&ColorProfile::default())
+    }
+}
+
+/// `[vis.background]` / `[vis.foreground]` — a picture overlay.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ImageConfig {
+    /// Image file to draw, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
+    /// Scale multiplier applied to the source image.
+    pub scale: f32,
+    /// Opacity in `0..1`.
+    pub alpha: f32,
+}
+
+impl Default for ImageConfig {
+    fn default() -> Self {
+        ImageConfig::from(&ImageLayer::default())
+    }
 }
 
 impl Default for Config {
@@ -104,8 +173,6 @@ impl Default for Config {
         // Mirror the pipeline/vis defaults so the generated file documents them.
         let s = CavaSettings::default();
         let v = VisSettings::default();
-        let lo = v.color_lo.to_srgba();
-        let hi = v.color_hi.to_srgba();
         Self {
             audio: AudioConfig {
                 source: s.source,
@@ -121,13 +188,25 @@ impl Default for Config {
                 high_cutoff_freq: s.high_cutoff_freq,
             },
             vis: VisConfig {
-                style: "bars".into(),
+                mode: DrawingMode::default(),
                 monstercat: v.monstercat,
                 mirror: v.mirror,
-                color_low: [lo.red, lo.green, lo.blue],
-                color_high: [hi.red, hi.green, hi.blue],
-                fill: v.fill,
-                line_width: v.line_width,
+                reverse_mirror: v.reverse_mirror,
+                direction: v.direction,
+                reverse_order: v.reverse_order,
+                filling: v.filling,
+                line_thickness: v.line_thickness,
+                items_offset: v.items_offset,
+                items_roundness: v.items_roundness,
+                hearts: v.hearts,
+                inner_radius: v.inner_radius,
+                rotation: v.rotation,
+                area_margin: v.area_margin,
+                area_offset: v.area_offset.to_array(),
+                active_profile: v.active_profile,
+                profiles: v.profiles.iter().map(ColorProfileConfig::from).collect(),
+                background: ImageConfig::from(&v.background),
+                foreground: ImageConfig::from(&v.foreground),
             },
         }
     }
@@ -225,23 +304,122 @@ impl Config {
 
     /// Convert into the runtime [`VisSettings`] resource.
     pub fn to_vis_settings(&self) -> VisSettings {
-        let lo = self.vis.color_low;
-        let hi = self.vis.color_high;
+        let v = &self.vis;
+        let mut profiles: Vec<ColorProfile> = v.profiles.iter().map(ColorProfile::from).collect();
+        if profiles.is_empty() {
+            profiles.push(ColorProfile::default());
+        }
         VisSettings {
-            monstercat: self.vis.monstercat,
-            mirror: self.vis.mirror,
-            color_lo: Color::srgb(lo[0], lo[1], lo[2]),
-            color_hi: Color::srgb(hi[0], hi[1], hi[2]),
-            fill: self.vis.fill,
-            line_width: self.vis.line_width,
+            monstercat: v.monstercat,
+            mirror: v.mirror,
+            reverse_mirror: v.reverse_mirror,
+            direction: v.direction,
+            reverse_order: v.reverse_order,
+            filling: v.filling,
+            line_thickness: v.line_thickness,
+            items_offset: v.items_offset,
+            items_roundness: v.items_roundness,
+            hearts: v.hearts,
+            inner_radius: v.inner_radius,
+            rotation: v.rotation,
+            area_margin: v.area_margin,
+            area_offset: Vec2::from(v.area_offset),
+            active_profile: v.active_profile,
+            profiles,
+            background: ImageLayer::from(&v.background),
+            foreground: ImageLayer::from(&v.foreground),
         }
     }
 
-    /// The initial [`VisStyle`] from `[vis] style`.
-    pub fn vis_style(&self) -> VisStyle {
-        match self.vis.style.to_ascii_lowercase().as_str() {
-            "circle" => VisStyle::Circle,
-            _ => VisStyle::Bars,
+    /// The initial [`DrawingMode`] from `[vis] mode`.
+    pub fn vis_mode(&self) -> DrawingMode {
+        self.vis.mode
+    }
+}
+
+// --- DTO ⇄ runtime conversions (hex colors, image layers) -------------------
+
+impl From<&ColorProfile> for ColorProfileConfig {
+    fn from(p: &ColorProfile) -> Self {
+        Self {
+            name: p.name.clone(),
+            theme: p.theme,
+            fg: p.fg.iter().map(|c| color_to_hex(*c)).collect(),
+            bg: p.bg.iter().map(|c| color_to_hex(*c)).collect(),
         }
+    }
+}
+
+impl From<&ColorProfileConfig> for ColorProfile {
+    fn from(c: &ColorProfileConfig) -> Self {
+        Self {
+            name: c.name.clone(),
+            theme: c.theme,
+            fg: c.fg.iter().filter_map(|s| hex_to_color(s)).collect(),
+            bg: c.bg.iter().filter_map(|s| hex_to_color(s)).collect(),
+        }
+    }
+}
+
+impl From<&ImageLayer> for ImageConfig {
+    fn from(l: &ImageLayer) -> Self {
+        Self {
+            path: l.path.clone(),
+            scale: l.scale,
+            alpha: l.alpha,
+        }
+    }
+}
+
+impl From<&ImageConfig> for ImageLayer {
+    fn from(c: &ImageConfig) -> Self {
+        Self {
+            path: c.path.clone(),
+            scale: c.scale,
+            alpha: c.alpha,
+        }
+    }
+}
+
+/// Parse a `"#rgb"` / `"#rrggbb"` / `"#aarrggbb"` hex string into a [`Color`].
+/// Returns `None` on malformed input (the stop is then skipped).
+fn hex_to_color(s: &str) -> Option<Color> {
+    let h = s.trim().trim_start_matches('#');
+    let (a, r, g, b) = match h.len() {
+        // `#rgb` shorthand: each nibble is doubled (`f08` → `ff0088`).
+        3 => (255u8, nib(h, 0)?, nib(h, 1)?, nib(h, 2)?),
+        6 => (255u8, u8h(h, 0)?, u8h(h, 2)?, u8h(h, 4)?),
+        8 => (u8h(h, 0)?, u8h(h, 2)?, u8h(h, 4)?, u8h(h, 6)?),
+        _ => return None,
+    };
+    Some(Color::srgba(
+        r as f32 / 255.0,
+        g as f32 / 255.0,
+        b as f32 / 255.0,
+        a as f32 / 255.0,
+    ))
+}
+
+/// Parse two hex digits at byte offset `i`.
+fn u8h(h: &str, i: usize) -> Option<u8> {
+    u8::from_str_radix(h.get(i..i + 2)?, 16).ok()
+}
+
+/// Parse one hex digit at byte offset `i` and expand it to a full byte
+/// (`f` → `0xff`), for `#rgb` shorthand.
+fn nib(h: &str, i: usize) -> Option<u8> {
+    let v = u8::from_str_radix(h.get(i..i + 1)?, 16).ok()?;
+    Some(v * 17)
+}
+
+/// Format a [`Color`] as `"#rrggbb"`, or `"#aarrggbb"` when not fully opaque.
+fn color_to_hex(c: Color) -> String {
+    let s = c.to_srgba();
+    let q = |x: f32| (x.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let (r, g, b, a) = (q(s.red), q(s.green), q(s.blue), q(s.alpha));
+    if a == 255 {
+        format!("#{r:02x}{g:02x}{b:02x}")
+    } else {
+        format!("#{a:02x}{r:02x}{g:02x}{b:02x}")
     }
 }
