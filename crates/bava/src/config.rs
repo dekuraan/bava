@@ -241,6 +241,8 @@ pub struct PhysicsConfig {
     pub bar_restitution: f32,
     /// Launch gain: how strongly a rising surface flings balls along its normal.
     pub bar_push: f32,
+    /// Planet mode: radial acceleration pulling balls toward the center, px/s².
+    pub central_gravity: f32,
 }
 
 impl Default for Config {
@@ -336,6 +338,7 @@ impl Config {
                 bar_smoothing: physics.bar_smoothing,
                 bar_restitution: physics.bar_restitution,
                 bar_push: physics.bar_push,
+                central_gravity: physics.central_gravity,
             },
         }
     }
@@ -538,6 +541,7 @@ impl Config {
             bar_smoothing: p.bar_smoothing,
             bar_restitution: p.bar_restitution,
             bar_push: p.bar_push,
+            central_gravity: p.central_gravity,
         }
     }
 

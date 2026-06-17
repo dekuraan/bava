@@ -14,11 +14,17 @@
 //! from the rise rate. Shape comes from the engine, energy is scripted, and both
 //! agree on the same normal.
 //!
+//! **Planet mode** (circle visualizer): global gravity is switched off and each
+//! ball is pulled toward the center instead, so balls fall in and **orbit/bounce
+//! the pulsing blob**. The blob is a kinematic [`Collider::polyline`] ring rebuilt
+//! every frame from the same [`blob_ring`] the renderer draws, so the collision
+//! shape tracks the visual. When the blob expands it flings balls radially
+//! outward (and unsticks any it swallows), mirroring the bar surface. Clicking in
+//! this mode spawns balls with a tangential velocity so they orbit immediately.
+//!
 //! Physics runs in [`PostUpdate`] with a variable timestep (not avian's default
 //! fixed `FixedPostUpdate`) so it steps once per render frame, in lockstep with
 //! the per-frame cava analysis. Balls carry [`SweptCcd`] so they don't tunnel.
-//!
-//! Planet/orbit mode (circle visualizer) is a later pass.
 
 use avian2d::prelude::*;
 use bevy::asset::RenderAssetUsages;
@@ -26,6 +32,7 @@ use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
 use crate::cava::Cava;
+use crate::vis::circle::blob_ring;
 use crate::vis::{gradient_color, spread_monstercat, DrawingMode, VisFamily, VisSettings};
 
 /// 1 physics "metre" = this many world pixels. Scales avian's internal
@@ -38,6 +45,8 @@ const MAX_HEIGHT_FRAC: f32 = 0.9;
 /// Horizontal resolution of the heightfield collider and its fill mesh. Higher =
 /// smoother curve and finer slope normals.
 const SAMPLES: usize = 192;
+/// Park an inactive surface/planet body far outside the world.
+const PARKED: f32 = 1.0e6;
 
 /// Runtime physics tunables, mapped from `[physics]` in the config.
 #[derive(Resource, Clone, Debug)]
@@ -64,6 +73,8 @@ pub struct PhysicsSettings {
     pub bar_restitution: f32,
     /// Launch gain: how strongly a rising surface flings balls along its normal.
     pub bar_push: f32,
+    /// Planet mode: radial acceleration pulling balls toward the center, px/s².
+    pub central_gravity: f32,
 }
 
 impl Default for PhysicsSettings {
@@ -80,6 +91,7 @@ impl Default for PhysicsSettings {
             bar_smoothing: 0.05,
             bar_restitution: 1.0,
             bar_push: 1.6,
+            central_gravity: 1500.0,
         }
     }
 }
@@ -114,6 +126,18 @@ impl Default for Surface {
     }
 }
 
+/// Planet-mode blob ring, sampled this frame and last (per-segment radii from the
+/// center). Shared by the collider rebuild and the radial ball forces.
+#[derive(Resource, Default)]
+struct Planet {
+    radii: Vec<f32>,
+    prev: Vec<f32>,
+}
+
+/// The single kinematic polyline body for the planet blob.
+#[derive(Component)]
+struct PlanetBody;
+
 /// The single kinematic heightfield body for the spectrum surface.
 #[derive(Component)]
 struct SurfaceBody;
@@ -146,6 +170,7 @@ impl Plugin for PhysicsPlugin {
         app.init_resource::<PhysicsSettings>()
             .init_resource::<BallCounter>()
             .init_resource::<Surface>()
+            .init_resource::<Planet>()
             // Run the simulation in PostUpdate (variable timestep) so it steps
             // once per render frame, matching the per-frame cava analysis.
             .add_plugins(
@@ -161,8 +186,10 @@ impl Plugin for PhysicsPlugin {
                     enforce_ball_cap,
                     despawn_escaped_balls,
                     resize_walls,
-                    // Update the surface before reading it to push balls.
+                    update_gravity_mode,
+                    // Update each surface before reading it to move balls.
                     (update_surface, push_balls).chain(),
+                    (update_planet, planet_forces).chain(),
                 ),
             );
     }
@@ -207,6 +234,15 @@ fn setup_physics(
         Restitution::new(settings.bar_restitution),
         Transform::default(),
         SurfaceBody,
+    ));
+
+    // Kinematic planet blob, parked offscreen until a circle mode activates it.
+    commands.spawn((
+        RigidBody::Kinematic,
+        Collider::circle(10.0),
+        Restitution::new(settings.bar_restitution),
+        Transform::from_xyz(PARKED, PARKED, 0.0),
+        PlanetBody,
     ));
 
     // Smooth filled visual for the surface, sitting above the bar sprites and
@@ -277,6 +313,7 @@ fn resize_walls(
 fn spawn_ball_on_click(
     mut commands: Commands,
     mouse: Res<ButtonInput<MouseButton>>,
+    mode: Res<DrawingMode>,
     settings: Res<PhysicsSettings>,
     vis: Res<VisSettings>,
     mut counter: ResMut<BallCounter>,
@@ -317,12 +354,29 @@ fn spawn_ball_on_click(
     let id = counter.0;
     counter.0 += 1;
 
+    // In planet mode, launch tangentially for a near-circular orbit; otherwise
+    // drop it in (gravity takes over).
+    let velocity = if mode.family() == VisFamily::Circle {
+        let r = world.length();
+        if r > 1.0 {
+            let radial = world / r;
+            let dir = if fastrand::bool() { 1.0 } else { -1.0 };
+            let tangent = Vec2::new(-radial.y, radial.x) * dir;
+            tangent * (settings.central_gravity * r).sqrt()
+        } else {
+            Vec2::ZERO
+        }
+    } else {
+        Vec2::ZERO
+    };
+
     commands.spawn((
         RigidBody::Dynamic,
         Collider::circle(radius),
         Restitution::new(restitution),
         LinearDamping(damping),
         Mass(mass),
+        LinearVelocity(velocity),
         // Continuous collision detection: stops fast-falling balls from
         // tunneling through the surface and the walls.
         SweptCcd::default(),
@@ -413,7 +467,7 @@ fn update_surface(
     handles: Res<FillHandles>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
-    mut body: Query<&mut Collider, With<SurfaceBody>>,
+    mut body: Query<(&mut Collider, &mut Transform), With<SurfaceBody>>,
     mut fill_vis: Query<&mut Visibility, With<SurfaceFill>>,
 ) {
     if !settings.enabled {
@@ -458,9 +512,11 @@ fn update_surface(
         }
     }
 
-    // Rebuild the heightfield collider to match (x spans [-w/2, w/2]).
-    if let Ok(mut collider) = body.single_mut() {
+    // Rebuild the heightfield collider to match (x spans [-w/2, w/2]); park the
+    // whole body offscreen while a circle mode owns the simulation.
+    if let Ok((mut collider, mut transform)) = body.single_mut() {
         *collider = Collider::heightfield(surface.heights.clone(), Vec2::new(w, 1.0));
+        transform.translation.y = if active { 0.0 } else { -PARKED };
     }
 
     // Rebuild the fill mesh (top curve + floor), tinted by loudness.
@@ -546,6 +602,140 @@ fn push_balls(
         let along = vel.0.dot(n);
         if target_n > along {
             vel.0 += n * (target_n - along);
+        }
+    }
+}
+
+/// Switch global gravity by mode: downward in box mode; off in planet mode, where
+/// [`planet_forces`] applies radial gravity toward the center instead.
+fn update_gravity_mode(
+    mode: Res<DrawingMode>,
+    settings: Res<PhysicsSettings>,
+    mut gravity: ResMut<Gravity>,
+) {
+    if !settings.enabled {
+        return;
+    }
+    gravity.0 = if mode.family() == VisFamily::Box {
+        Vec2::NEG_Y * settings.gravity
+    } else {
+        Vec2::ZERO
+    };
+}
+
+/// Rebuild the planet blob collider from the rendered [`blob_ring`], cache its
+/// per-segment radii (this frame + last) for the radial forces, and park the body
+/// offscreen while a box mode is active.
+fn update_planet(
+    mode: Res<DrawingMode>,
+    settings: Res<PhysicsSettings>,
+    cava: Res<Cava>,
+    vis: Res<VisSettings>,
+    windows: Query<&Window>,
+    planet: ResMut<Planet>,
+    mut body: Query<(&mut Collider, &mut Transform), With<PlanetBody>>,
+) {
+    if !settings.enabled {
+        return;
+    }
+    let Ok((mut collider, mut transform)) = body.single_mut() else {
+        return;
+    };
+    if mode.family() != VisFamily::Circle {
+        transform.translation = Vec3::new(PARKED, PARKED, 0.0);
+        return;
+    }
+    transform.translation = Vec3::ZERO;
+
+    let Some(window) = windows.iter().next() else {
+        return;
+    };
+    let extent = window.width().min(window.height());
+    let mut values = cava.mono();
+    if values.is_empty() {
+        return;
+    }
+    spread_monstercat(&mut values, vis.monstercat);
+    let ring = blob_ring(&values, extent);
+    let n = ring.len();
+    if n < 3 {
+        return;
+    }
+
+    // Cache radii (this frame + last) for the radial velocity field.
+    let planet = planet.into_inner();
+    if planet.radii.len() != n {
+        planet.radii = ring.iter().map(|p| p.length()).collect();
+        planet.prev = planet.radii.clone();
+    } else {
+        planet.prev.copy_from_slice(&planet.radii);
+        for (i, p) in ring.iter().enumerate() {
+            planet.radii[i] = p.length();
+        }
+    }
+
+    // Closed-loop polyline matching the rendered blob.
+    let indices: Vec<[u32; 2]> = (0..n as u32).map(|k| [k, (k + 1) % n as u32]).collect();
+    *collider = Collider::polyline(ring, Some(indices));
+}
+
+/// Planet-mode radial forces: pull every ball toward the center, fling balls the
+/// expanding blob touches outward along the radius, and unstick any it swallows.
+fn planet_forces(
+    mode: Res<DrawingMode>,
+    settings: Res<PhysicsSettings>,
+    time: Res<Time>,
+    planet: Res<Planet>,
+    mut balls: Query<(&mut Transform, &mut LinearVelocity, &Ball)>,
+) {
+    if !settings.enabled || mode.family() != VisFamily::Circle {
+        return;
+    }
+    let dt = time.delta_secs();
+    if dt <= 0.0 {
+        return;
+    }
+    let n = planet.radii.len();
+    for (mut transform, mut vel, ball) in &mut balls {
+        let pos = transform.translation.truncate();
+        let r = pos.length();
+        if r < 1.0 {
+            continue;
+        }
+        let outward = pos / r;
+
+        // Central gravity: accelerate toward the center.
+        vel.0 -= outward * settings.central_gravity * dt;
+
+        if n < 3 {
+            continue;
+        }
+        // Blob radius in this ball's direction (invert `ring_point`'s mapping:
+        // angle = t·TAU − π/2).
+        let ang = pos.y.atan2(pos.x);
+        let t = ((ang + std::f32::consts::FRAC_PI_2) / std::f32::consts::TAU).rem_euclid(1.0);
+        let k = ((t * n as f32).round() as usize) % n;
+        let surf_r = planet.radii[k];
+        let expand = (planet.radii[k] - planet.prev[k]) / dt;
+
+        // Unstick: ball swallowed inside the blob → push it back out onto it.
+        if r < surf_r - ball.radius {
+            transform.translation =
+                (outward * (surf_r + ball.radius)).extend(transform.translation.z);
+            let push = expand.max(0.0).max(120.0);
+            let along = vel.0.dot(outward);
+            if push > along {
+                vel.0 += outward * (push - along);
+            }
+            continue;
+        }
+        // Contact band + expanding blob → fling outward.
+        if (r - surf_r).abs() < ball.radius + 4.0 && expand > 0.0 {
+            let target = expand * settings.bar_push;
+            let along = vel.0.dot(outward);
+            if target > along {
+                vel.0 += outward * (target - along);
+            }
         }
     }
 }

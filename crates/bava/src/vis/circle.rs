@@ -105,6 +105,14 @@ fn sample(values: &[f32], t: f32) -> f32 {
     values[i0.min(n - 1)] + (values[i1] - values[i0.min(n - 1)]) * s
 }
 
+/// The blob ring vertices for `values` (already monstercat-spread), matching the
+/// rendered outline/fill. `extent` is the smaller window dimension. Exposed so
+/// the physics planet collider can track the visual shape exactly.
+pub(crate) fn blob_ring(values: &[f32], extent: f32) -> Vec<Vec2> {
+    let (base, amp) = (extent * BASE_FRAC, extent * AMP_FRAC);
+    (0..SEGMENTS).map(|k| ring_point(values, k, base, amp).0).collect()
+}
+
 /// Position of ring point `k` for a given spectrum, base radius and amplitude.
 fn ring_point(values: &[f32], k: usize, base: f32, amp: f32) -> (Vec2, f32) {
     let t = k as f32 / SEGMENTS as f32;
