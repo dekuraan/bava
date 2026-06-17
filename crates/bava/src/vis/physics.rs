@@ -238,10 +238,13 @@ fn setup_physics(
     ));
 
     // Kinematic planet blob, parked offscreen until a circle mode activates it.
+    // Frictionless (Min combine) so orbiting balls slide along the pulsing rim
+    // instead of being pinned by friction and dragged as the blob shape shifts.
     commands.spawn((
         RigidBody::Kinematic,
         Collider::circle(10.0),
         Restitution::new(settings.bar_restitution),
+        Friction::new(0.0).with_combine_rule(CoefficientCombine::Min),
         Transform::from_xyz(PARKED, PARKED, 0.0),
         PlanetBody,
     ));
@@ -725,8 +728,12 @@ fn planet_forces(
         let surf_r = planet.radii[k];
         let expand = (planet.radii[k] - planet.prev[k]) / dt;
 
-        // Unstick: ball swallowed inside the blob → push it back out onto it.
-        if r < surf_r - ball.radius {
+        // Unstick: the blob is solid, so a ball whose center has crossed *inside*
+        // the ring at all should never be there. Eject it the moment it crosses,
+        // not after a full radius — otherwise central gravity keeps dragging it
+        // deeper until it slips under the border and jitters there. Push it back
+        // out onto the rim and remove any inward velocity.
+        if r < surf_r {
             transform.translation =
                 (outward * (surf_r + ball.radius)).extend(transform.translation.z);
             let push = expand.max(0.0).max(120.0);
