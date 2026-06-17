@@ -140,13 +140,20 @@ fn mpris_loop(tx: Sender<MprisMsg>) {
         };
 
         if let Ok(metadata) = player.get_metadata() {
+            // Prefer the player's own art; fall back to a derived thumbnail for
+            // players that don't expose mpris:artUrl (e.g. Firefox/YouTube).
+            let art_url = metadata
+                .art_url()
+                .map(str::to_owned)
+                .or_else(|| metadata.url().and_then(youtube_thumbnail));
+
             let track = NowPlaying {
                 title: metadata.title().map(str::to_owned),
                 artist: metadata
                     .artists()
                     .and_then(|a| a.first().map(|s| s.to_string())),
                 album: metadata.album_name().map(str::to_owned),
-                art_url: metadata.art_url().map(str::to_owned),
+                art_url,
             };
 
             let art_url = track.art_url.clone();
@@ -168,6 +175,24 @@ fn mpris_loop(tx: Sender<MprisMsg>) {
 
         thread::sleep(Duration::from_millis(500));
     }
+}
+
+/// Derive a thumbnail image URL from a YouTube watch/short URL, so YouTube
+/// playback (which exposes no `mpris:artUrl`) still gets a backdrop.
+fn youtube_thumbnail(page_url: &str) -> Option<String> {
+    if !(page_url.contains("youtube.com") || page_url.contains("youtu.be")) {
+        return None;
+    }
+    // Handle `…watch?v=ID&…` and `youtu.be/ID?…` forms.
+    let id = page_url
+        .split_once("v=")
+        .map(|(_, rest)| rest)
+        .or_else(|| page_url.rsplit_once('/').map(|(_, rest)| rest))?;
+    let id = id.split(['&', '?', '#']).next().unwrap_or(id);
+    if id.is_empty() {
+        return None;
+    }
+    Some(format!("https://i.ytimg.com/vi/{id}/hqdefault.jpg"))
 }
 
 /// Fetch album art from an `http(s)://` or `file://` URL and decode to RGBA8.

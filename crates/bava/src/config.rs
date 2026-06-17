@@ -5,10 +5,12 @@
 
 use std::path::PathBuf;
 
+use bevy::prelude::Color;
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 
 use crate::cava::CavaSettings;
+use crate::vis::VisSettings;
 
 /// Command-line arguments. Anything provided here overrides the config file.
 #[derive(Parser, Debug)]
@@ -42,6 +44,7 @@ pub struct Cli {
 pub struct Config {
     pub audio: AudioConfig,
     pub cava: CavaConfig,
+    pub vis: VisConfig,
 }
 
 /// `[audio]` — capture parameters.
@@ -75,10 +78,28 @@ pub struct CavaConfig {
     pub high_cutoff_freq: u32,
 }
 
+/// `[vis]` — visualizer styling.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VisConfig {
+    /// Monstercat neighbour-spread factor (1.5 ≈ smooth waves, higher = tighter,
+    /// `<= 1` disables).
+    pub monstercat: f32,
+    /// Mirror bars from the vertical center instead of the bottom.
+    pub mirror: bool,
+    /// Foreground gradient `[r, g, b]` (0..1) at low amplitude.
+    pub color_low: [f32; 3],
+    /// Foreground gradient `[r, g, b]` (0..1) at full amplitude.
+    pub color_high: [f32; 3],
+}
+
 impl Default for Config {
     fn default() -> Self {
-        // Mirror the pipeline defaults so the generated file documents them.
+        // Mirror the pipeline/vis defaults so the generated file documents them.
         let s = CavaSettings::default();
+        let v = VisSettings::default();
+        let lo = v.color_lo.to_srgba();
+        let hi = v.color_hi.to_srgba();
         Self {
             audio: AudioConfig {
                 source: s.source,
@@ -93,6 +114,12 @@ impl Default for Config {
                 low_cutoff_freq: s.low_cutoff_freq,
                 high_cutoff_freq: s.high_cutoff_freq,
             },
+            vis: VisConfig {
+                monstercat: v.monstercat,
+                mirror: v.mirror,
+                color_low: [lo.red, lo.green, lo.blue],
+                color_high: [hi.red, hi.green, hi.blue],
+            },
         }
     }
 }
@@ -106,6 +133,12 @@ impl Default for AudioConfig {
 impl Default for CavaConfig {
     fn default() -> Self {
         Config::default().cava
+    }
+}
+
+impl Default for VisConfig {
+    fn default() -> Self {
+        Config::default().vis
     }
 }
 
@@ -178,6 +211,18 @@ impl Config {
             high_cutoff_freq: self.cava.high_cutoff_freq,
             source: self.audio.source.clone(),
             debug,
+        }
+    }
+
+    /// Convert into the runtime [`VisSettings`] resource.
+    pub fn to_vis_settings(&self) -> VisSettings {
+        let lo = self.vis.color_low;
+        let hi = self.vis.color_high;
+        VisSettings {
+            monstercat: self.vis.monstercat,
+            mirror: self.vis.mirror,
+            color_lo: Color::srgb(lo[0], lo[1], lo[2]),
+            color_hi: Color::srgb(hi[0], hi[1], hi[2]),
         }
     }
 }

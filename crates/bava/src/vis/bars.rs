@@ -1,12 +1,15 @@
 //! 2D bars / monstercat-style visualizer.
 //!
-//! Spawns one sprite per bar and, every frame, resizes and recolors them from
-//! the [`Cava`] resource: bars grow from the bottom of the window with a
-//! cyan→magenta hue gradient that brightens with amplitude.
+//! Spawns one sprite per bar and, every frame, resizes them from the [`Cava`]
+//! resource. The signature "monstercat" look comes from a neighbour-spreading
+//! pass: each bar lifts the bars around it with exponential falloff, so a single
+//! loud frequency becomes a smooth wave rather than an isolated spike. Bars are
+//! rendered as near-white over the album-art backdrop.
 
 use bevy::prelude::*;
 
 use crate::cava::{Cava, CavaSettings};
+use crate::vis::VisSettings;
 
 /// Fraction of window height a full-scale bar occupies.
 const MAX_HEIGHT_FRAC: f32 = 0.9;
@@ -40,9 +43,37 @@ fn setup(mut commands: Commands, settings: Res<CavaSettings>) {
     }
 }
 
-/// Resize and recolor each bar from the latest analyzed audio.
+/// Monstercat neighbour spreading: each bar raises the others to at least
+/// `value / factor^distance`, taking the max. Sources are the unsmoothed heights
+/// (`src`) so the spread is order-independent. `factor <= 1` is a no-op.
+fn spread_monstercat(values: &mut [f32], factor: f32) {
+    if factor <= 1.0 {
+        return;
+    }
+    let n = values.len();
+    let src: Vec<f32> = values.to_vec();
+    for z in 0..n {
+        let peak = src[z];
+        if peak <= 0.0 {
+            continue;
+        }
+        for (m, out) in values.iter_mut().enumerate() {
+            if m == z {
+                continue;
+            }
+            let dist = (z as i32 - m as i32).unsigned_abs() as f32;
+            let spread = peak / factor.powf(dist);
+            if spread > *out {
+                *out = spread;
+            }
+        }
+    }
+}
+
+/// Resize each bar from the latest analyzed audio (with monstercat spreading).
 fn update_bars(
     cava: Res<Cava>,
+    vis: Res<VisSettings>,
     windows: Query<&Window>,
     mut bars: Query<(&Bar, &mut Sprite, &mut Transform)>,
 ) {
@@ -51,32 +82,47 @@ fn update_bars(
     };
     let (w, h) = (window.width(), window.height());
 
-    let values = cava.mono();
+    let mut values = cava.mono();
     let n = values.len();
     if n == 0 {
         return;
     }
+    spread_monstercat(&mut values, vis.monstercat);
 
     let slot_w = w / n as f32;
     let bar_w = (slot_w - BAR_GAP).max(1.0);
-    let max_h = h * MAX_HEIGHT_FRAC;
+    // Mirrored bars span both up and down from the center, so each half uses
+    // about half the height budget.
+    let max_h = h * MAX_HEIGHT_FRAC * if vis.mirror { 0.5 } else { 1.0 };
     let floor = -h / 2.0;
     let left = -w / 2.0;
 
+    // Gradient endpoints, resolved once per frame.
+    let lo = vis.color_lo.to_srgba();
+    let hi = vis.color_hi.to_srgba();
+
     for (bar, mut sprite, mut transform) in &mut bars {
         let v = values.get(bar.0).copied().unwrap_or(0.0).clamp(0.0, 1.5);
-        let bar_h = (v * max_h).max(1.0);
-
+        let t = v.min(1.0);
         let x = left + slot_w * (bar.0 as f32 + 0.5);
+
+        let bar_h = (v * max_h).max(1.0);
         transform.translation.x = x;
-        transform.translation.y = floor + bar_h * 0.5;
+        if vis.mirror {
+            // Centered: extends ±bar_h from the middle → total height 2·bar_h.
+            transform.translation.y = 0.0;
+            sprite.custom_size = Some(Vec2::new(bar_w, bar_h * 2.0));
+        } else {
+            transform.translation.y = floor + bar_h * 0.5;
+            sprite.custom_size = Some(Vec2::new(bar_w, bar_h));
+        }
 
-        sprite.custom_size = Some(Vec2::new(bar_w, bar_h));
-
-        // Monstercat-ish gradient: hue sweeps across the spectrum, lightness
-        // tracks amplitude so active bars glow.
-        let hue = (195.0 + (bar.0 as f32 / n as f32) * 150.0) % 360.0;
-        let lightness = 0.35 + 0.4 * v.min(1.0);
-        sprite.color = Color::hsl(hue, 0.85, lightness);
+        // Foreground gradient: lerp lo→hi by amplitude.
+        sprite.color = Color::srgba(
+            lo.red + (hi.red - lo.red) * t,
+            lo.green + (hi.green - lo.green) * t,
+            lo.blue + (hi.blue - lo.blue) * t,
+            0.95,
+        );
     }
 }

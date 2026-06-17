@@ -39,6 +39,7 @@ fn main() {
     }
 
     let settings = config.to_cava_settings(cli.debug);
+    let vis_settings = config.to_vis_settings();
 
     let mut app = App::new();
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
@@ -50,9 +51,10 @@ fn main() {
     }))
     // Dark backdrop so the visualizer pops.
     .insert_resource(ClearColor(Color::srgb(0.02, 0.02, 0.04)))
-    // Pipeline config from CLI/TOML; inserted before CavaPlugin so its
-    // `init_resource` default doesn't override it.
+    // Pipeline + vis config from CLI/TOML; inserted before the plugins so their
+    // `init_resource` defaults don't override them.
     .insert_resource(settings)
+    .insert_resource(vis_settings)
     .add_plugins((CavaPlugin, MprisPlugin, VisPlugin));
 
     // `--debug` also enables frame-time diagnostics, logging FPS/frame time ~1×/s.

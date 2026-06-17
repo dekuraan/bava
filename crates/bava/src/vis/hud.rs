@@ -1,4 +1,4 @@
-//! On-screen HUD: a dimmed album-art backdrop and a now-playing text label,
+//! On-screen HUD: a dimmed album-art backdrop and a centered now-playing label,
 //! both driven by the [`mpris`](crate::mpris) resources.
 
 use bevy::prelude::*;
@@ -9,9 +9,13 @@ use crate::mpris::{AlbumArt, NowPlaying};
 #[derive(Component)]
 struct ArtBackground;
 
-/// Now-playing text label.
+/// Now-playing text label (title line).
 #[derive(Component)]
-struct NowPlayingLabel;
+struct NowPlayingTitle;
+
+/// Now-playing text label (artist / album line).
+#[derive(Component)]
+struct NowPlayingSub;
 
 /// Album-art backdrop + now-playing label.
 pub struct HudPlugin;
@@ -34,24 +38,53 @@ fn setup_hud(mut commands: Commands) {
         ArtBackground,
     ));
 
-    commands.spawn((
-        Text::new(""),
-        TextFont {
-            font_size: 20.0,
-            ..default()
-        },
-        TextColor(Color::WHITE),
-        Node {
+    // Centered now-playing block, pinned to the top of the screen. A full-width
+    // column with centered content keeps title + subtitle stacked and centered.
+    commands
+        .spawn(Node {
             position_type: PositionType::Absolute,
-            top: Val::Px(12.0),
-            left: Val::Px(12.0),
+            top: Val::Px(28.0),
+            left: Val::Px(0.0),
+            right: Val::Px(0.0),
+            flex_direction: FlexDirection::Column,
+            align_items: AlignItems::Center,
+            row_gap: Val::Px(4.0),
             ..default()
-        },
-        NowPlayingLabel,
-    ));
+        })
+        .with_children(|parent| {
+            parent.spawn((
+                Text::new(""),
+                TextFont {
+                    font_size: 30.0,
+                    ..default()
+                },
+                TextColor(Color::WHITE),
+                TextLayout::new_with_justify(Justify::Center),
+                TextShadow {
+                    offset: Vec2::splat(2.0),
+                    color: Color::srgba(0.0, 0.0, 0.0, 0.85),
+                },
+                NowPlayingTitle,
+            ));
+            parent.spawn((
+                Text::new(""),
+                TextFont {
+                    font_size: 18.0,
+                    ..default()
+                },
+                TextColor(Color::srgba(0.85, 0.85, 0.9, 1.0)),
+                TextLayout::new_with_justify(Justify::Center),
+                TextShadow {
+                    offset: Vec2::splat(1.5),
+                    color: Color::srgba(0.0, 0.0, 0.0, 0.8),
+                },
+                NowPlayingSub,
+            ));
+        });
 }
 
-/// Stretch the album art to fill the window, dimmed so bars stay readable.
+/// Cover-fit the album art to the window (preserving aspect), dimmed so the bars
+/// stay readable. Hidden when no art is available.
 fn update_background(
     art: Res<AlbumArt>,
     windows: Query<&Window>,
@@ -60,42 +93,46 @@ fn update_background(
     let Some(window) = windows.iter().next() else {
         return;
     };
+    let (ww, wh) = (window.width(), window.height());
+
     for mut sprite in &mut q {
-        match &art.image {
-            Some(handle) => {
+        match (&art.image, art.size) {
+            (Some(handle), Some((aw, ah))) if aw > 0 && ah > 0 => {
                 sprite.image = handle.clone();
-                sprite.custom_size = Some(Vec2::new(window.width(), window.height()));
-                // Tint darkens the texture so the visualizer reads clearly.
-                sprite.color = Color::srgb(0.28, 0.28, 0.28);
+                // Scale so the image fully covers the window without distortion;
+                // overflow simply extends past the screen edges.
+                let (aw, ah) = (aw as f32, ah as f32);
+                let scale = (ww / aw).max(wh / ah);
+                sprite.custom_size = Some(Vec2::new(aw * scale, ah * scale));
+                sprite.color = Color::srgb(0.4, 0.4, 0.42);
             }
-            None => {
-                sprite.color = Color::NONE;
-            }
+            _ => sprite.color = Color::NONE,
         }
     }
 }
 
-/// Reflect the current track in the label.
+/// Reflect the current track in the two-line label.
 fn update_label(
     now_playing: Res<NowPlaying>,
-    mut q: Query<&mut Text, With<NowPlayingLabel>>,
+    mut titles: Query<&mut Text, (With<NowPlayingTitle>, Without<NowPlayingSub>)>,
+    mut subs: Query<&mut Text, (With<NowPlayingSub>, Without<NowPlayingTitle>)>,
 ) {
     if !now_playing.is_changed() {
         return;
     }
-    let mut text = String::new();
-    if let Some(title) = &now_playing.title {
-        text.push_str(title);
+
+    let title = now_playing.title.clone().unwrap_or_default();
+    let sub = match (&now_playing.artist, &now_playing.album) {
+        (Some(a), Some(al)) => format!("{a} — {al}"),
+        (Some(a), None) => a.clone(),
+        (None, Some(al)) => al.clone(),
+        (None, None) => String::new(),
+    };
+
+    for mut t in &mut titles {
+        t.0 = title.clone();
     }
-    if let Some(artist) = &now_playing.artist {
-        text.push('\n');
-        text.push_str(artist);
-    }
-    if let Some(album) = &now_playing.album {
-        text.push_str("\n— ");
-        text.push_str(album);
-    }
-    for mut label in &mut q {
-        label.0 = text.clone();
+    for mut t in &mut subs {
+        t.0 = sub.clone();
     }
 }

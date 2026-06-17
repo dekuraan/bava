@@ -29,10 +29,12 @@ pub struct CavaSettings {
     pub channels: usize,
     /// Capture sample rate (Hz).
     pub rate: u32,
-    /// Samples per channel per capture read. This is just the feed granularity:
-    /// smaller chunks fill the ring more finely so each rendered frame gets a
-    /// roughly even slice of fresh audio (cava execute rate follows the render
-    /// rate, not this). 128 @ 44100 ≈ 2.9 ms/read.
+    /// Samples per channel per cavacore execution. cavacore needs a *steady*
+    /// count per call for its framerate estimate / autosens, so this fixes the
+    /// chunk size and thus the cava update rate: rate·channels / (this·channels)
+    /// executions per second. Smaller = higher cava rate = smoother/snappier
+    /// (128 @ 44100 ≈ 344 Hz); larger = slower. The render samples the latest
+    /// bars regardless.
     pub frame_samples: usize,
     /// Auto-scale output into 0..1.
     pub autosens: bool,
@@ -140,10 +142,14 @@ impl AudioRing {
 }
 
 /// cavacore state. Held as a **NonSend** resource because [`CavaPlan`] is `Send`
-/// but not `Sync`; it is executed exclusively on the main thread, once per frame.
+/// but not `Sync`; it is executed exclusively on the main thread.
 struct CavaState {
     plan: CavaPlan,
-    /// Reused buffer for the samples drained each frame.
+    /// Captured samples awaiting a full chunk. cavacore's framerate estimate and
+    /// autosens assume a *steady* sample count per execute, so we feed it fixed
+    /// chunks rather than "whatever arrived this frame".
+    accum: VecDeque<f64>,
+    /// Reused contiguous buffer for the current chunk handed to cavacore.
     scratch: Vec<f64>,
 }
 
@@ -182,6 +188,7 @@ impl Plugin for CavaPlugin {
                 );
                 app.insert_non_send_resource(CavaState {
                     plan,
+                    accum: VecDeque::new(),
                     scratch: Vec::new(),
                 });
             }
@@ -245,9 +252,11 @@ fn capture_reader(settings: CavaSettings, ring: AudioRing) {
     }
 }
 
-/// Once per rendered frame: drain all audio captured since the last frame, run a
-/// single `cava_execute`, and publish the bars. Calling cava at the render rate
-/// lets its framerate-adaptive smoothing produce native, low-latency motion.
+/// Each rendered frame: accumulate newly captured audio and feed cavacore in
+/// fixed-size chunks (steady `new_samples` → stable framerate/autosens),
+/// processing every full chunk that has buffered, then publish the latest bars.
+/// cava runs at a steady high rate (≈ rate·channels / chunk), so the bars the
+/// render samples are always fresh and smooth.
 fn feed_cava(
     ring: Res<AudioRing>,
     state: Option<NonSendMut<CavaState>>,
@@ -259,35 +268,40 @@ fn feed_cava(
         return; // cavacore failed to init; leave bars at zero
     };
     let state = &mut *state;
+    let chunk = (settings.frame_samples.max(1) * settings.channels.max(1)).max(1);
 
-    // Drain everything captured since the previous frame (≈ rate / fps samples).
-    state.scratch.clear();
+    // Accumulate whatever was captured since the last frame.
     if let Ok(mut q) = ring.buf.lock() {
-        state.scratch.extend(q.drain(..));
+        state.accum.extend(q.drain(..));
     }
 
-    // Feeding 0 new samples is valid and just advances the smoothing filters.
-    let bars = state.plan.execute(&state.scratch);
+    // Process every complete chunk; cavacore sees a constant sample count.
+    let mut executed = 0u32;
+    while state.accum.len() >= chunk {
+        state.scratch.clear();
+        state.scratch.extend(state.accum.drain(..chunk));
+        state.plan.execute(&state.scratch);
+        executed += 1;
+        if settings.debug {
+            dbg.max_in = dbg
+                .max_in
+                .max(state.scratch.iter().fold(0.0f64, |m, &s| m.max(s.abs())));
+        }
+    }
 
+    // Publish the most recent analysis (unchanged if no chunk was ready).
+    let bars = state.plan.last_output();
     cava.bars.clear();
     cava.bars.extend(bars.iter().map(|&v| v as f32));
 
-    // Aggregate over a ~1s window so the stats reflect every frame, not a single
-    // sampled one (which can repeatedly land on an empty-ring frame).
     if settings.debug {
         dbg.frames += 1;
-        dbg.total_samples += state.scratch.len() as u64;
-        dbg.max_in = dbg
-            .max_in
-            .max(state.scratch.iter().fold(0.0f64, |m, &s| m.max(s.abs())));
+        dbg.executes += executed as u64;
         dbg.max_out = dbg.max_out.max(bars.iter().fold(0.0f64, |m, &b| m.max(b)));
         if dbg.frames >= 240 {
             info!(
-                "bava: {} frames | avg new_samples/frame={:.0} | max input={:.3} | max bar={:.3}",
-                dbg.frames,
-                dbg.total_samples as f64 / dbg.frames as f64,
-                dbg.max_in,
-                dbg.max_out,
+                "bava: {} frames | {} cava executes/s | chunk={} | max input={:.3} | max bar={:.3}",
+                dbg.frames, dbg.executes, chunk, dbg.max_in, dbg.max_out,
             );
             *dbg = FeedStats::default();
         }
@@ -298,7 +312,7 @@ fn feed_cava(
 #[derive(Default)]
 struct FeedStats {
     frames: u64,
-    total_samples: u64,
+    executes: u64,
     max_in: f64,
     max_out: f64,
 }
