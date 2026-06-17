@@ -11,6 +11,7 @@
 pub mod bars;
 pub mod circle;
 pub mod hud;
+mod stroke;
 
 use std::path::PathBuf;
 

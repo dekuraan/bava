@@ -14,6 +14,7 @@ use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
 use crate::cava::Cava;
+use crate::vis::stroke::{apply_stroke, empty_stroke_mesh, stroke_material};
 use crate::vis::{gradient_color, spread_monstercat, DrawingMode, VisFamily, VisSettings};
 
 /// Segments around the ring. Higher = smoother curve.
@@ -23,6 +24,9 @@ const BASE_FRAC: f32 = 0.16;
 /// How far peaks push outward, as a fraction of the smaller window dimension.
 const AMP_FRAC: f32 = 0.26;
 
+/// Antialiasing feather width (px) for the ring stroke.
+const RING_FEATHER: f32 = 1.5;
+
 /// Handles for the fill mesh/material so they can be updated each frame.
 #[derive(Resource)]
 struct FillHandles {
@@ -30,9 +34,19 @@ struct FillHandles {
     material: Handle<ColorMaterial>,
 }
 
+/// Handle for the ring-outline stroke mesh, rebuilt each frame.
+#[derive(Resource)]
+struct RingHandles {
+    mesh: Handle<Mesh>,
+}
+
 /// Marks the fill-blob entity.
 #[derive(Component)]
 struct FillBlob;
+
+/// Marks the ring-outline stroke entity.
+#[derive(Component)]
+struct RingStroke;
 
 /// Smooth circular visualizer plugin.
 pub struct CirclePlugin;
@@ -40,7 +54,7 @@ pub struct CirclePlugin;
 impl Plugin for CirclePlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, setup_circle)
-            .add_systems(Update, (sync_gizmo_line, draw_ring, update_fill));
+            .add_systems(Update, (sync_gizmo_line, update_ring, update_fill));
     }
 }
 
@@ -67,6 +81,19 @@ fn setup_circle(
         FillBlob,
     ));
     commands.insert_resource(FillHandles { mesh, material });
+
+    // The ring outline is now a feathered (antialiased) stroke mesh rather than a
+    // gizmo. White blend material; the per-vertex gradient supplies the color.
+    let ring_mesh = meshes.add(empty_stroke_mesh());
+    let ring_material = materials.add(stroke_material());
+    commands.spawn((
+        Mesh2d(ring_mesh.clone()),
+        MeshMaterial2d(ring_material),
+        Transform::from_xyz(0.0, 0.0, 1.0),
+        Visibility::Hidden,
+        RingStroke,
+    ));
+    commands.insert_resource(RingHandles { mesh: ring_mesh });
 }
 
 /// Keep the gizmo line width in sync with the live `line_thickness` setting so
@@ -126,16 +153,27 @@ fn ring_point(values: &[f32], k: usize, base: f32, amp: f32) -> (Vec2, f32) {
     (Vec2::new(ang.cos() * r, ang.sin() * r), v)
 }
 
-/// Draw the outline ring when the circle style is active.
-fn draw_ring(
+/// Rebuild the antialiased ring-outline stroke when a circle mode is active, and
+/// hide it otherwise.
+fn update_ring(
     mode: Res<DrawingMode>,
     cava: Res<Cava>,
     vis: Res<VisSettings>,
     windows: Query<&Window>,
-    mut gizmos: Gizmos,
+    ring: Res<RingHandles>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut q: Query<&mut Visibility, With<RingStroke>>,
 ) {
     // The circle renderer stands in for every radial (circle) mode for now.
-    if mode.family() != VisFamily::Circle {
+    let active = mode.family() == VisFamily::Circle;
+    for mut v in &mut q {
+        *v = if active {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+    }
+    if !active {
         return;
     }
     let Some(window) = windows.iter().next() else {
@@ -151,11 +189,17 @@ fn draw_ring(
     let (base, amp) = (extent * BASE_FRAC, extent * AMP_FRAC);
 
     let (lo, hi) = (vis.fg_lo(), vis.fg_hi());
-    let points = (0..=SEGMENTS).map(|k| {
-        let (pos, v) = ring_point(&values, k % SEGMENTS, base, amp);
-        (pos, gradient_color(lo, hi, v))
-    });
-    gizmos.linestrip_gradient_2d(points);
+    let pts: Vec<(Vec2, Color)> = (0..SEGMENTS)
+        .map(|k| {
+            let (pos, v) = ring_point(&values, k, base, amp);
+            (pos, gradient_color(lo, hi, v.min(1.0)))
+        })
+        .collect();
+
+    if let Some(mesh) = meshes.get_mut(&ring.mesh) {
+        // `closed` joins the ring; half-width follows the line-thickness setting.
+        apply_stroke(mesh, &pts, vis.line_thickness * 0.5, RING_FEATHER, true);
+    }
 }
 
 /// Update / show the translucent fill blob when enabled.
