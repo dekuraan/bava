@@ -79,6 +79,8 @@ pub struct PhysicsSettings {
     pub bar_push: f32,
     /// Planet mode: radial acceleration pulling balls toward the center, px/s².
     pub central_gravity: f32,
+    /// Draw the avian collider wireframes (toggle at runtime with F3).
+    pub debug_draw: bool,
 }
 
 impl Default for PhysicsSettings {
@@ -96,6 +98,7 @@ impl Default for PhysicsSettings {
             bar_restitution: 1.0,
             bar_push: 1.6,
             central_gravity: 1500.0,
+            debug_draw: false,
         }
     }
 }
@@ -180,11 +183,12 @@ impl Plugin for PhysicsPlugin {
             .init_resource::<Planet>()
             // Run the simulation in PostUpdate (variable timestep) so it steps
             // once per render frame, matching the per-frame cava analysis.
-            .add_plugins(
+            .add_plugins((
                 PhysicsPlugins::default()
                     .with_length_unit(LENGTH_UNIT)
                     .set(PhysicsSchedulePlugin::new(PostUpdate)),
-            )
+                PhysicsDebugPlugin::default(),
+            ))
             .add_systems(Startup, setup_physics)
             .add_systems(
                 Update,
@@ -200,6 +204,8 @@ impl Plugin for PhysicsPlugin {
                     (update_surface, push_balls).chain(),
                     (reconcile_columns, update_columns, push_columns).chain(),
                     (update_planet, planet_forces).chain(),
+                    toggle_physics_debug,
+                    sync_physics_debug,
                 ),
             );
     }
@@ -917,5 +923,29 @@ fn planet_forces(
                 vel.0 += outward * (target - along);
             }
         }
+    }
+}
+
+/// Toggle the collider debug draw with **F3** (suppressed while egui has the
+/// keyboard, so typing in the editor doesn't flip it).
+fn toggle_physics_debug(
+    keys: Res<ButtonInput<KeyCode>>,
+    editor: Res<EditorState>,
+    mut settings: ResMut<PhysicsSettings>,
+) {
+    if !editor.capture_keyboard && keys.just_pressed(KeyCode::F3) {
+        settings.debug_draw = !settings.debug_draw;
+    }
+}
+
+/// Mirror `[physics] debug_draw` onto avian's gizmo config, drawing only the
+/// collider wireframes (the axis/joint/contact gizmos stay off).
+fn sync_physics_debug(settings: Res<PhysicsSettings>, mut store: ResMut<GizmoConfigStore>) {
+    let (config, gizmos) = store.config_mut::<PhysicsGizmos>();
+    config.enabled = settings.enabled && settings.debug_draw;
+    if config.enabled {
+        gizmos.collider_color = Some(Color::srgb(0.2, 1.0, 0.4));
+        gizmos.axis_lengths = None;
+        gizmos.aabb_color = None;
     }
 }

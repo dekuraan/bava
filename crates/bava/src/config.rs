@@ -265,6 +265,8 @@ pub struct PhysicsConfig {
     pub bar_push: f32,
     /// Planet mode: radial acceleration pulling balls toward the center, px/s².
     pub central_gravity: f32,
+    /// Draw the avian collider wireframes (toggle at runtime with F3).
+    pub debug_draw: bool,
 }
 
 impl Default for Config {
@@ -361,6 +363,7 @@ impl Config {
                 bar_restitution: physics.bar_restitution,
                 bar_push: physics.bar_push,
                 central_gravity: physics.central_gravity,
+                debug_draw: physics.debug_draw,
             },
             // The editor hotkey isn't derived from the runtime settings; callers
             // that have a live key (the editor's "Save") override it afterward
@@ -601,6 +604,7 @@ impl Config {
             bar_restitution: p.bar_restitution,
             bar_push: p.bar_push,
             central_gravity: p.central_gravity,
+            debug_draw: p.debug_draw,
         }
     }
 
