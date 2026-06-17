@@ -67,6 +67,15 @@ impl Default for CavaSettings {
     }
 }
 
+/// Request to rebuild the cavacore plan from the current [`CavaSettings`].
+///
+/// Set `.0 = true` (e.g. from the settings editor) after changing DSP-relevant
+/// fields — `bars_per_channel`, `autosens`, `noise_reduction`, the cutoffs — and
+/// [`rebuild_cava`] picks it up next frame. The capture thread's rate/channels
+/// are fixed at startup, so those are kept as-is during a rebuild.
+#[derive(Resource, Default)]
+pub struct CavaRebuild(pub bool);
+
 /// Latest visualization bars, refreshed each frame from the capture thread.
 ///
 /// For stereo, [`bars`](Self::bars) is all left-channel bars (low→high) followed
@@ -158,7 +167,9 @@ pub struct CavaPlugin;
 
 impl Plugin for CavaPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<CavaSettings>().init_resource::<Cava>();
+        app.init_resource::<CavaSettings>()
+            .init_resource::<Cava>()
+            .init_resource::<CavaRebuild>();
         let settings = app.world().resource::<CavaSettings>().clone();
 
         // Size the Cava resource up front.
@@ -205,7 +216,7 @@ impl Plugin for CavaPlugin {
             .expect("failed to spawn capture thread");
         app.insert_resource(ring);
 
-        app.add_systems(Update, feed_cava)
+        app.add_systems(Update, (rebuild_cava, feed_cava).chain())
             .add_systems(Last, stop_on_exit);
     }
 }
@@ -268,7 +279,11 @@ fn feed_cava(
         return; // cavacore failed to init; leave bars at zero
     };
     let state = &mut *state;
-    let chunk = (settings.frame_samples.max(1) * settings.channels.max(1)).max(1);
+    // Stride comes from the *plan*, not live settings: the plan and capture
+    // thread are pinned to the startup channel count, so an editor edit to
+    // `CavaSettings.channels` must not change how we deinterleave (it would
+    // desync the chunk from the plan and corrupt the analysis until restart).
+    let chunk = (settings.frame_samples.max(1) * state.plan.channels().max(1)).max(1);
 
     // Accumulate whatever was captured since the last frame.
     if let Ok(mut q) = ring.buf.lock() {
@@ -305,6 +320,52 @@ fn feed_cava(
             );
             *dbg = FeedStats::default();
         }
+    }
+}
+
+/// Rebuild the cavacore plan in place when a [`CavaRebuild`] is requested,
+/// applying the DSP-relevant [`CavaSettings`] (bars, autosens, noise reduction,
+/// cutoffs) live. Rate and channels stay pinned to the running capture thread,
+/// so those edits only take effect on the next launch (or after re-saving).
+fn rebuild_cava(
+    mut request: ResMut<CavaRebuild>,
+    state: Option<NonSendMut<CavaState>>,
+    settings: Res<CavaSettings>,
+    mut cava: ResMut<Cava>,
+) {
+    if !request.0 {
+        return;
+    }
+    request.0 = false;
+
+    let Some(mut state) = state else {
+        return; // cavacore never initialized; nothing to rebuild
+    };
+
+    // Keep the capture thread's rate/channels; only the analysis params change.
+    let channels = state.plan.channels();
+    let cfg = CavaConfig {
+        bars: settings.bars_per_channel as u32,
+        rate: state.plan.rate(),
+        channels: channels as u32,
+        autosens: settings.autosens,
+        noise_reduction: settings.noise_reduction,
+        low_cutoff_freq: settings.low_cutoff_freq,
+        high_cutoff_freq: settings.high_cutoff_freq,
+    };
+    match cfg.build() {
+        Ok(plan) => {
+            let bars = plan.bars();
+            state.plan = plan;
+            state.accum.clear();
+            state.scratch.clear();
+            // Resize the published bars to the new bar count.
+            cava.bars = vec![0.0; bars * channels];
+            cava.bars_per_channel = bars;
+            cava.channels = channels;
+            info!("bava: rebuilt cavacore — {bars} bars/ch");
+        }
+        Err(e) => error!("bava: cavacore rebuild failed: {e}; keeping previous plan"),
     }
 }
 

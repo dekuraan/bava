@@ -17,6 +17,9 @@ avian2d = "0.6"
 # Tiny, dep-free RNG for randomizing spawned ball properties.
 fastrand = "2"
 
+# In-app settings editor (immediate-mode GUI overlay).
+bevy_egui = "0.39"
+
 # Audio capture (PulseAudio simple API, works through pipewire-pulse).
 libpulse-binding = "2"
 libpulse-simple-binding = "2"

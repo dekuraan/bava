@@ -14,7 +14,7 @@ use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
 use crate::cava::Cava;
-use crate::vis::{gradient_color, spread_monstercat, VisSettings, VisStyle};
+use crate::vis::{gradient_color, spread_monstercat, DrawingMode, VisFamily, VisSettings};
 
 /// Segments around the ring. Higher = smoother curve.
 const SEGMENTS: usize = 256;
@@ -52,7 +52,7 @@ fn setup_circle(
     mut store: ResMut<GizmoConfigStore>,
     vis: Res<VisSettings>,
 ) {
-    store.config_mut::<DefaultGizmoConfigGroup>().0.line.width = vis.line_width;
+    store.config_mut::<DefaultGizmoConfigGroup>().0.line.width = vis.line_thickness;
 
     let mesh = meshes.add(fan_mesh());
     let material = materials.add(ColorMaterial::from(Color::NONE));
@@ -116,13 +116,14 @@ fn ring_point(values: &[f32], k: usize, base: f32, amp: f32) -> (Vec2, f32) {
 
 /// Draw the outline ring when the circle style is active.
 fn draw_ring(
-    style: Res<VisStyle>,
+    mode: Res<DrawingMode>,
     cava: Res<Cava>,
     vis: Res<VisSettings>,
     windows: Query<&Window>,
     mut gizmos: Gizmos,
 ) {
-    if *style != VisStyle::Circle {
+    // The circle renderer stands in for every radial (circle) mode for now.
+    if mode.family() != VisFamily::Circle {
         return;
     }
     let Some(window) = windows.iter().next() else {
@@ -137,16 +138,17 @@ fn draw_ring(
     spread_monstercat(&mut values, vis.monstercat);
     let (base, amp) = (extent * BASE_FRAC, extent * AMP_FRAC);
 
+    let (lo, hi) = (vis.fg_lo(), vis.fg_hi());
     let points = (0..=SEGMENTS).map(|k| {
         let (pos, v) = ring_point(&values, k % SEGMENTS, base, amp);
-        (pos, gradient_color(vis.color_lo, vis.color_hi, v))
+        (pos, gradient_color(lo, hi, v))
     });
     gizmos.linestrip_gradient_2d(points);
 }
 
 /// Update / show the translucent fill blob when enabled.
 fn update_fill(
-    style: Res<VisStyle>,
+    mode: Res<DrawingMode>,
     cava: Res<Cava>,
     vis: Res<VisSettings>,
     windows: Query<&Window>,
@@ -155,7 +157,7 @@ fn update_fill(
     mut materials: ResMut<Assets<ColorMaterial>>,
     mut q: Query<&mut Visibility, With<FillBlob>>,
 ) {
-    let active = *style == VisStyle::Circle && vis.fill;
+    let active = mode.family() == VisFamily::Circle && vis.filling;
     for mut v in &mut q {
         *v = if active {
             Visibility::Visible
@@ -191,7 +193,7 @@ fn update_fill(
 
         // Tint the fill by loudness; keep it translucent so art shows through.
         if let Some(mat) = materials.get_mut(&fill.material) {
-            mat.color = gradient_color(vis.color_lo, vis.color_hi, peak).with_alpha(0.28);
+            mat.color = gradient_color(vis.fg_lo(), vis.fg_hi(), peak).with_alpha(0.28);
         }
     }
 }

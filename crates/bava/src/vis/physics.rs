@@ -18,7 +18,9 @@ use avian2d::prelude::*;
 use bevy::prelude::*;
 
 use crate::cava::{Cava, CavaSettings};
-use crate::vis::{gradient_color, spread_monstercat, VisSettings, VisStyle};
+use crate::vis::{
+    gradient_color, spread_monstercat, DrawingMode, MirrorMode, VisFamily, VisSettings,
+};
 
 /// 1 physics "metre" = this many world pixels. Scales avian's internal
 /// tolerances (contact margins etc.) to our pixel-space coordinates.
@@ -123,7 +125,14 @@ impl Plugin for PhysicsPlugin {
             .add_systems(Startup, setup_physics)
             .add_systems(
                 Update,
-                (spawn_ball_on_click, enforce_ball_cap, resize_walls, drive_bar_bodies),
+                (
+                    spawn_ball_on_click,
+                    enforce_ball_cap,
+                    resize_walls,
+                    // Keep the platform pool matched to the live bar count before
+                    // driving them, mirroring `bars::reconcile_bars`.
+                    (reconcile_bar_bodies, drive_bar_bodies).chain(),
+                ),
             );
     }
 }
@@ -160,18 +169,51 @@ fn setup_physics(
 
     let n = cava_settings.bars_per_channel.max(1);
     for i in 0..n {
-        commands.spawn((
-            RigidBody::Kinematic,
-            Collider::rectangle(8.0, BAR_THICKNESS),
-            Restitution::new(settings.bar_restitution),
-            Transform::from_translation(Vec3::new(0.0, PARKED_Y, 0.0)),
-            LinearVelocity::default(),
-            BarBody {
-                index: i,
-                smoothed: 0.0,
-                prev_top: PARKED_Y,
-            },
-        ));
+        spawn_bar_body(&mut commands, i, settings.bar_restitution);
+    }
+}
+
+/// Spawn one kinematic bar platform for cava bar `index`, parked offscreen until
+/// the next [`drive_bar_bodies`] places it.
+fn spawn_bar_body(commands: &mut Commands, index: usize, bar_restitution: f32) {
+    commands.spawn((
+        RigidBody::Kinematic,
+        Collider::rectangle(8.0, BAR_THICKNESS),
+        Restitution::new(bar_restitution),
+        Transform::from_translation(Vec3::new(0.0, PARKED_Y, 0.0)),
+        LinearVelocity::default(),
+        BarBody {
+            index,
+            smoothed: 0.0,
+            prev_top: PARKED_Y,
+        },
+    ));
+}
+
+/// Grow or shrink the platform pool to match the live [`Cava::bars_per_channel`]
+/// (the settings editor can change it at runtime), keeping a contiguous
+/// `0..target` index range — mirrors `bars::reconcile_bars`.
+fn reconcile_bar_bodies(
+    mut commands: Commands,
+    settings: Res<PhysicsSettings>,
+    cava: Res<Cava>,
+    bodies: Query<(Entity, &BarBody)>,
+) {
+    if !settings.enabled {
+        return;
+    }
+    let target = cava.bars_per_channel.max(1);
+    let current = bodies.iter().count();
+    if current < target {
+        for i in current..target {
+            spawn_bar_body(&mut commands, i, settings.bar_restitution);
+        }
+    } else if current > target {
+        for (entity, body) in &bodies {
+            if body.index >= target {
+                commands.entity(entity).despawn();
+            }
+        }
     }
 }
 
@@ -243,7 +285,7 @@ fn spawn_ball_on_click(
         (settings.radius, settings.restitution, settings.air_resistance, settings.mass, 0.5)
     };
 
-    let color = gradient_color(vis.color_lo, vis.color_hi, tint);
+    let color = gradient_color(vis.fg_lo(), vis.fg_hi(), tint);
     let id = counter.0;
     counter.0 += 1;
 
@@ -286,7 +328,7 @@ fn enforce_ball_cap(
 /// edge, and set its velocity to the per-frame delta so contacts launch balls.
 /// While the circle style is active, platforms are parked far offscreen.
 fn drive_bar_bodies(
-    style: Res<VisStyle>,
+    mode: Res<DrawingMode>,
     settings: Res<PhysicsSettings>,
     cava: Res<Cava>,
     vis: Res<VisSettings>,
@@ -299,8 +341,8 @@ fn drive_bar_bodies(
     }
     let dt = time.delta_secs();
 
-    // Park everything while the circle visualizer is active.
-    if *style != VisStyle::Bars {
+    // Park everything while a non-linear (circle) drawing mode is active.
+    if mode.family() != VisFamily::Box {
         for (mut body, mut transform, mut vel, _) in &mut bodies {
             transform.translation.y = PARKED_Y;
             vel.0 = Vec2::ZERO;
@@ -322,9 +364,10 @@ fn drive_bar_bodies(
     }
     spread_monstercat(&mut values, vis.monstercat);
 
+    let mirror = vis.mirror != MirrorMode::Off;
     let slot_w = w / n as f32;
     let bar_w = (slot_w - BAR_GAP).max(1.0);
-    let max_h = h * MAX_HEIGHT_FRAC * if vis.mirror { 0.5 } else { 1.0 };
+    let max_h = h * MAX_HEIGHT_FRAC * if mirror { 0.5 } else { 1.0 };
     let floor = -h / 2.0;
     let left = -w / 2.0;
     // Exponential smoothing factor for this frame's dt.
@@ -340,7 +383,7 @@ fn drive_bar_bodies(
 
         let bar_h = (body.smoothed * max_h).max(1.0);
         // Top edge: bars grow from the floor, or from the center when mirrored.
-        let top = if vis.mirror { bar_h } else { floor + bar_h };
+        let top = if mirror { bar_h } else { floor + bar_h };
         let x = left + slot_w * (body.index as f32 + 0.5);
 
         transform.translation.x = x;
