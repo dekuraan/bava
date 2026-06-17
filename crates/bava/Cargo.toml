@@ -24,3 +24,9 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png"]
 
 # Lock-free-ish hand-off from the audio/mpris threads to Bevy systems.
 crossbeam-channel = "0.5"
+
+# Configuration: CLI args (clap) layered over a TOML config file.
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+toml = "1"
+dirs = "6"

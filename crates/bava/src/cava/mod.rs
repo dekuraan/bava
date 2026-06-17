@@ -37,6 +37,8 @@ pub struct CavaSettings {
     pub high_cutoff_freq: u32,
     /// Optional explicit capture source; `None` resolves the default sink monitor.
     pub source: Option<String>,
+    /// Log input/output signal levels about once per second.
+    pub debug: bool,
 }
 
 impl Default for CavaSettings {
@@ -51,6 +53,7 @@ impl Default for CavaSettings {
             low_cutoff_freq: 50,
             high_cutoff_freq: 10_000,
             source: None,
+            debug: false,
         }
     }
 }
@@ -203,6 +206,13 @@ fn capture_loop(settings: CavaSettings, shared: Arc<Mutex<SharedBars>>, running:
     let frame_len = settings.frame_samples * settings.channels;
     let mut samples = vec![0.0f64; frame_len];
 
+    // With debug enabled, log the raw input peak and the analyzed output peak
+    // ~1×/s, which distinguishes a silent capture (input≈0) from a
+    // processing/render issue (input>0 but bars≈0).
+    let debug = settings.debug;
+    let mut frame_count = 0u64;
+    let frames_per_log = (capture.rate() as usize / settings.frame_samples.max(1)).max(1) as u64;
+
     while running.load(Ordering::Relaxed) {
         match capture.read(&mut samples) {
             Ok(0) => break, // end of stream
@@ -214,6 +224,15 @@ fn capture_loop(settings: CavaSettings, shared: Arc<Mutex<SharedBars>>, running:
         }
 
         let bars = plan.execute(&samples);
+
+        if debug {
+            frame_count += 1;
+            if frame_count % frames_per_log == 0 {
+                let in_peak = samples.iter().fold(0.0f64, |m, &s| m.max(s.abs()));
+                let out_peak = bars.iter().fold(0.0f64, |m, &b| m.max(b));
+                info!("bava: input peak={in_peak:.4}  output peak bar={out_peak:.4}");
+            }
+        }
 
         if let Ok(mut guard) = shared.lock() {
             guard.bars.clear();
