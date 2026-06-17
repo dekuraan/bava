@@ -235,10 +235,12 @@ pub struct PhysicsConfig {
     pub max_balls: usize,
     /// Randomize each spawned ball's properties around the defaults.
     pub randomize: bool,
-    /// Bar-platform smoothing time constant, in seconds (larger = smoother).
+    /// Spectrum-surface smoothing time constant, in seconds (larger = smoother).
     pub bar_smoothing: f32,
-    /// Restitution of the bar platforms.
+    /// Restitution of the spectrum surface.
     pub bar_restitution: f32,
+    /// Launch gain: how strongly a rising surface flings balls along its normal.
+    pub bar_push: f32,
 }
 
 impl Default for Config {
@@ -333,6 +335,7 @@ impl Config {
                 randomize: physics.randomize,
                 bar_smoothing: physics.bar_smoothing,
                 bar_restitution: physics.bar_restitution,
+                bar_push: physics.bar_push,
             },
         }
     }
@@ -534,6 +537,7 @@ impl Config {
             randomize: p.randomize,
             bar_smoothing: p.bar_smoothing,
             bar_restitution: p.bar_restitution,
+            bar_push: p.bar_push,
         }
     }
 

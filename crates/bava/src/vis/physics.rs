@@ -1,40 +1,43 @@
 //! Physics playground layered over the visualizers (avian2d).
 //!
-//! **Box mode** (the bars visualizer): left-click spawns a ball that falls under
-//! gravity, bounces off the window walls, and — the whole point — gets launched
-//! by the spectrum bars. Each bar is backed by a thin **kinematic platform** sat
-//! at the bar's top edge; the platform is teleported to the audio-driven height
-//! every frame *and* given a matching [`LinearVelocity`] so the solver transfers
-//! real bounce energy to resting balls. The platform target is smoothed so the
-//! collider tracks a clean curve instead of the raw, jittery cava values.
+//! **Box mode** (bars): left-click spawns a ball that falls under gravity,
+//! bounces off the window walls, and gets launched by the spectrum. Instead of
+//! one collider per bar, the spectrum is a single **smooth kinematic heightfield**
+//! — a continuous blobby curve rebuilt every frame from the (interpolated,
+//! time-smoothed) cava values. avian resolves contacts along the *true* surface
+//! normal, so balls are pushed **perpendicular to the local slope**, not just up.
+//!
+//! Because one rigid body can carry only one velocity, the heightfield can't
+//! itself impart per-column launch energy. So a [`push_balls`] pass reads the
+//! analytic surface-velocity field (how fast each column is rising) and adds an
+//! impulse **along the local surface normal** — direction from the slope, speed
+//! from the rise rate. Shape comes from the engine, energy is scripted, and both
+//! agree on the same normal.
 //!
 //! Physics runs in [`PostUpdate`] with a variable timestep (not avian's default
-//! fixed `FixedPostUpdate`) so the simulation steps once per render frame, in
-//! lockstep with the per-frame cava analysis that drives the bars.
+//! fixed `FixedPostUpdate`) so it steps once per render frame, in lockstep with
+//! the per-frame cava analysis. Balls carry [`SweptCcd`] so they don't tunnel.
 //!
 //! Planet/orbit mode (circle visualizer) is a later pass.
 
 use avian2d::prelude::*;
+use bevy::asset::RenderAssetUsages;
+use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
-use crate::cava::{Cava, CavaSettings};
-use crate::vis::{
-    gradient_color, spread_monstercat, DrawingMode, MirrorMode, VisFamily, VisSettings,
-};
+use crate::cava::Cava;
+use crate::vis::{gradient_color, spread_monstercat, DrawingMode, VisFamily, VisSettings};
 
 /// 1 physics "metre" = this many world pixels. Scales avian's internal
 /// tolerances (contact margins etc.) to our pixel-space coordinates.
 const LENGTH_UNIT: f32 = 100.0;
-/// Thickness of the kinematic bar platforms, in pixels.
-const BAR_THICKNESS: f32 = 8.0;
 /// Thickness of the boundary walls, in pixels.
 const WALL_THICKNESS: f32 = 200.0;
-/// Must match `bars::BAR_GAP` so platforms line up under the bar sprites.
-const BAR_GAP: f32 = 2.0;
 /// Must match `bars::MAX_HEIGHT_FRAC`.
 const MAX_HEIGHT_FRAC: f32 = 0.9;
-/// Park inactive (circle-mode) bar platforms far below the world.
-const PARKED_Y: f32 = -1.0e6;
+/// Horizontal resolution of the heightfield collider and its fill mesh. Higher =
+/// smoother curve and finer slope normals.
+const SAMPLES: usize = 192;
 
 /// Runtime physics tunables, mapped from `[physics]` in the config.
 #[derive(Resource, Clone, Debug)]
@@ -55,10 +58,12 @@ pub struct PhysicsSettings {
     pub max_balls: usize,
     /// Randomize each spawned ball's properties around the defaults.
     pub randomize: bool,
-    /// Bar-platform smoothing time constant, in seconds (larger = smoother).
+    /// Surface smoothing time constant, in seconds (larger = smoother/slower).
     pub bar_smoothing: f32,
-    /// Restitution of the bar platforms.
+    /// Restitution of the spectrum surface.
     pub bar_restitution: f32,
+    /// Launch gain: how strongly a rising surface flings balls along its normal.
+    pub bar_push: f32,
 }
 
 impl Default for PhysicsSettings {
@@ -74,29 +79,54 @@ impl Default for PhysicsSettings {
             randomize: true,
             bar_smoothing: 0.05,
             bar_restitution: 1.0,
+            bar_push: 1.6,
         }
     }
 }
 
-/// A spawned ball. `id` is a monotonic spawn counter used to evict the oldest.
+/// A spawned ball. `id` is a monotonic spawn counter used to evict the oldest;
+/// `radius` is cached for the surface-push proximity test.
 #[derive(Component)]
 struct Ball {
     id: u64,
+    radius: f32,
 }
 
 /// Monotonic counter handing out [`Ball::id`]s.
 #[derive(Resource, Default)]
 struct BallCounter(u64);
 
-/// A kinematic platform tracking one bar's top edge.
+/// Time-smoothed spectrum surface, shared by the collider/mesh update and the
+/// ball-push pass. `heights`/`prev` are absolute world-space y of the surface at
+/// each of [`SAMPLES`] evenly spaced x columns (this frame and last).
+#[derive(Resource)]
+struct Surface {
+    heights: Vec<f32>,
+    prev: Vec<f32>,
+}
+
+impl Default for Surface {
+    fn default() -> Self {
+        Self {
+            heights: vec![0.0; SAMPLES],
+            prev: vec![0.0; SAMPLES],
+        }
+    }
+}
+
+/// The single kinematic heightfield body for the spectrum surface.
 #[derive(Component)]
-struct BarBody {
-    /// Index into the cava bars.
-    index: usize,
-    /// Smoothed bar value (0..~1.5), low-pass filtered toward the raw value.
-    smoothed: f32,
-    /// Previous frame's top-edge y, for deriving the platform velocity.
-    prev_top: f32,
+struct SurfaceBody;
+
+/// The smooth filled visual for the spectrum surface.
+#[derive(Component)]
+struct SurfaceFill;
+
+/// Mesh/material handles for the surface fill, updated each frame.
+#[derive(Resource)]
+struct FillHandles {
+    mesh: Handle<Mesh>,
+    material: Handle<ColorMaterial>,
 }
 
 /// Which boundary a wall is, so it can be repositioned on resize.
@@ -108,13 +138,14 @@ enum WallSide {
     Bottom,
 }
 
-/// Physics plugin: avian + ball spawning + the kinematic bar platforms.
+/// Physics plugin: avian + ball spawning + the smooth spectrum surface.
 pub struct PhysicsPlugin;
 
 impl Plugin for PhysicsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PhysicsSettings>()
             .init_resource::<BallCounter>()
+            .init_resource::<Surface>()
             // Run the simulation in PostUpdate (variable timestep) so it steps
             // once per render frame, matching the per-frame cava analysis.
             .add_plugins(
@@ -128,20 +159,21 @@ impl Plugin for PhysicsPlugin {
                 (
                     spawn_ball_on_click,
                     enforce_ball_cap,
+                    despawn_escaped_balls,
                     resize_walls,
-                    // Keep the platform pool matched to the live bar count before
-                    // driving them, mirroring `bars::reconcile_bars`.
-                    (reconcile_bar_bodies, drive_bar_bodies).chain(),
+                    // Update the surface before reading it to push balls.
+                    (update_surface, push_balls).chain(),
                 ),
             );
     }
 }
 
-/// Spawn the boundary walls and one kinematic platform per bar.
+/// Spawn the boundary walls, the kinematic heightfield surface, and its fill.
 fn setup_physics(
     mut commands: Commands,
     settings: Res<PhysicsSettings>,
-    cava_settings: Res<CavaSettings>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
     windows: Query<&Window>,
 ) {
     if !settings.enabled {
@@ -167,54 +199,50 @@ fn setup_physics(
         ));
     }
 
-    let n = cava_settings.bars_per_channel.max(1);
-    for i in 0..n {
-        spawn_bar_body(&mut commands, i, settings.bar_restitution);
-    }
-}
-
-/// Spawn one kinematic bar platform for cava bar `index`, parked offscreen until
-/// the next [`drive_bar_bodies`] places it.
-fn spawn_bar_body(commands: &mut Commands, index: usize, bar_restitution: f32) {
+    // Kinematic heightfield surface, flat at the floor until the first update.
+    let floor = -h / 2.0;
     commands.spawn((
         RigidBody::Kinematic,
-        Collider::rectangle(8.0, BAR_THICKNESS),
-        Restitution::new(bar_restitution),
-        Transform::from_translation(Vec3::new(0.0, PARKED_Y, 0.0)),
-        LinearVelocity::default(),
-        BarBody {
-            index,
-            smoothed: 0.0,
-            prev_top: PARKED_Y,
-        },
+        Collider::heightfield(vec![floor; SAMPLES], Vec2::new(w, 1.0)),
+        Restitution::new(settings.bar_restitution),
+        Transform::default(),
+        SurfaceBody,
     ));
+
+    // Smooth filled visual for the surface, sitting above the bar sprites and
+    // below the balls (z = 0.5).
+    let mesh = meshes.add(fill_mesh());
+    let material = materials.add(ColorMaterial::from(Color::NONE));
+    commands.spawn((
+        Mesh2d(mesh.clone()),
+        MeshMaterial2d(material.clone()),
+        Transform::from_xyz(0.0, 0.0, 0.5),
+        Visibility::Hidden,
+        SurfaceFill,
+    ));
+    commands.insert_resource(FillHandles { mesh, material });
 }
 
-/// Grow or shrink the platform pool to match the live [`Cava::bars_per_channel`]
-/// (the settings editor can change it at runtime), keeping a contiguous
-/// `0..target` index range — mirrors `bars::reconcile_bars`.
-fn reconcile_bar_bodies(
-    mut commands: Commands,
-    settings: Res<PhysicsSettings>,
-    cava: Res<Cava>,
-    bodies: Query<(Entity, &BarBody)>,
-) {
-    if !settings.enabled {
-        return;
+/// A vertical strip mesh: `SAMPLES` top vertices (the curve) and `SAMPLES` bottom
+/// vertices (the floor). Positions are placeholders (overwritten each frame);
+/// the triangle indices are fixed.
+fn fill_mesh() -> Mesh {
+    let positions = vec![[0.0f32, 0.0, 0.0]; 2 * SAMPLES];
+    let normals = vec![[0.0f32, 0.0, 1.0]; 2 * SAMPLES];
+    let uvs = vec![[0.0f32, 0.0]; 2 * SAMPLES];
+    // Vertex layout: top_i = 2*i, bottom_i = 2*i + 1.
+    let mut indices = Vec::with_capacity((SAMPLES - 1) * 6);
+    for i in 0..SAMPLES - 1 {
+        let (t0, b0, t1, b1) = (2 * i as u32, 2 * i as u32 + 1, 2 * (i as u32 + 1), 2 * (i as u32 + 1) + 1);
+        indices.extend_from_slice(&[t0, b0, t1, b0, b1, t1]);
     }
-    let target = cava.bars_per_channel.max(1);
-    let current = bodies.iter().count();
-    if current < target {
-        for i in current..target {
-            spawn_bar_body(&mut commands, i, settings.bar_restitution);
-        }
-    } else if current > target {
-        for (entity, body) in &bodies {
-            if body.index >= target {
-                commands.entity(entity).despawn();
-            }
-        }
-    }
+
+    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+    mesh.insert_indices(Indices::U32(indices));
+    mesh
 }
 
 /// Size and center of a wall, given the current window dimensions. Walls sit
@@ -295,10 +323,13 @@ fn spawn_ball_on_click(
         Restitution::new(restitution),
         LinearDamping(damping),
         Mass(mass),
+        // Continuous collision detection: stops fast-falling balls from
+        // tunneling through the surface and the walls.
+        SweptCcd::default(),
         Mesh2d(meshes.add(Circle::new(radius))),
         MeshMaterial2d(materials.add(color)),
         Transform::from_translation(world.extend(1.0)),
-        Ball { id },
+        Ball { id, radius },
     ));
 }
 
@@ -320,82 +351,191 @@ fn enforce_ball_cap(
     }
 }
 
-/// Drive the kinematic bar platforms from the latest audio.
-///
-/// Mirrors `bars::update_bars`' layout (monstercat spread, height budget, slot
-/// positions) so the invisible platforms sit exactly under the bar sprites. Each
-/// frame we low-pass the bar value, teleport the platform to the smoothed top
-/// edge, and set its velocity to the per-frame delta so contacts launch balls.
-/// While the circle style is active, platforms are parked far offscreen.
-fn drive_bar_bodies(
+/// Safety net for balls that escape the play area — e.g. tunneled past a wall on
+/// a frame spike. Anything well past the window bounds (especially *below* the
+/// floor, where stuck balls collect) is despawned rather than left lost.
+fn despawn_escaped_balls(
+    mut commands: Commands,
+    settings: Res<PhysicsSettings>,
+    windows: Query<&Window>,
+    balls: Query<(Entity, &Transform), With<Ball>>,
+) {
+    if !settings.enabled {
+        return;
+    }
+    let Some(window) = windows.iter().next() else {
+        return;
+    };
+    // A generous margin past the edges so balls mid-bounce aren't culled.
+    let margin = 0.5 * window.height().max(window.width());
+    let (max_x, min_y, max_y) = (
+        window.width() / 2.0 + margin,
+        -window.height() / 2.0 - margin,
+        window.height() / 2.0 + margin,
+    );
+    for (entity, transform) in &balls {
+        let p = transform.translation;
+        if p.y < min_y || p.y > max_y || p.x.abs() > max_x {
+            commands.entity(entity).despawn();
+        }
+    }
+}
+
+/// Resolve the smoothed surface height for column `s` (0..SAMPLES) from the cava
+/// bar `values`, interpolating smoothly between bars for a blobby curve.
+fn sample_height(values: &[f32], s: usize) -> f32 {
+    let n = values.len();
+    if n == 1 {
+        return values[0];
+    }
+    let f = s as f32 / (SAMPLES - 1) as f32 * (n - 1) as f32;
+    let i0 = (f.floor() as usize).min(n - 1);
+    let i1 = (i0 + 1).min(n - 1);
+    let frac = f - i0 as f32;
+    let t = frac * frac * (3.0 - 2.0 * frac); // smoothstep
+    values[i0] + (values[i1] - values[i0]) * t
+}
+
+/// Rebuild the spectrum surface (heightfield collider + fill mesh) from the
+/// latest audio, time-smoothed. Parks flat at the floor while a circle mode is
+/// active. Updates the shared [`Surface`] resource for [`push_balls`].
+#[allow(clippy::too_many_arguments)]
+fn update_surface(
     mode: Res<DrawingMode>,
     settings: Res<PhysicsSettings>,
     cava: Res<Cava>,
     vis: Res<VisSettings>,
     time: Res<Time>,
     windows: Query<&Window>,
-    mut bodies: Query<(&mut BarBody, &mut Transform, &mut LinearVelocity, &mut Collider)>,
+    surface: ResMut<Surface>,
+    handles: Res<FillHandles>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
+    mut body: Query<&mut Collider, With<SurfaceBody>>,
+    mut fill_vis: Query<&mut Visibility, With<SurfaceFill>>,
 ) {
     if !settings.enabled {
         return;
     }
-    let dt = time.delta_secs();
-
-    // Park everything while a non-linear (circle) drawing mode is active.
-    if mode.family() != VisFamily::Box {
-        for (mut body, mut transform, mut vel, _) in &mut bodies {
-            transform.translation.y = PARKED_Y;
-            vel.0 = Vec2::ZERO;
-            body.prev_top = PARKED_Y;
-            body.smoothed = 0.0;
-        }
-        return;
-    }
-
     let Some(window) = windows.iter().next() else {
         return;
     };
     let (w, h) = (window.width(), window.height());
-
-    let mut values = cava.mono();
-    let n = values.len();
-    if n == 0 {
-        return;
-    }
-    spread_monstercat(&mut values, vis.monstercat);
-
-    let mirror = vis.mirror != MirrorMode::Off;
-    let slot_w = w / n as f32;
-    let bar_w = (slot_w - BAR_GAP).max(1.0);
-    let max_h = h * MAX_HEIGHT_FRAC * if mirror { 0.5 } else { 1.0 };
     let floor = -h / 2.0;
-    let left = -w / 2.0;
-    // Exponential smoothing factor for this frame's dt.
+    let dt = time.delta_secs();
+    let active = mode.family() == VisFamily::Box;
+
+    for mut v in &mut fill_vis {
+        *v = if active { Visibility::Visible } else { Visibility::Hidden };
+    }
+
+    // Save last frame's heights for the velocity field, then compute targets.
+    // Reborrow so the two fields can be split-borrowed past `ResMut`'s Deref.
+    let surface = surface.into_inner();
+    surface.prev.copy_from_slice(&surface.heights);
+
     let alpha = if settings.bar_smoothing > 0.0 {
         1.0 - (-dt / settings.bar_smoothing).exp()
     } else {
         1.0
     };
 
-    for (mut body, mut transform, mut vel, mut collider) in &mut bodies {
-        let raw = values.get(body.index).copied().unwrap_or(0.0).clamp(0.0, 1.5);
-        body.smoothed += (raw - body.smoothed) * alpha;
-
-        let bar_h = (body.smoothed * max_h).max(1.0);
-        // Top edge: bars grow from the floor, or from the center when mirrored.
-        let top = if mirror { bar_h } else { floor + bar_h };
-        let x = left + slot_w * (body.index as f32 + 0.5);
-
-        transform.translation.x = x;
-        transform.translation.y = top;
-        *collider = Collider::rectangle(bar_w, BAR_THICKNESS);
-
-        // Velocity from the per-frame top delta so the solver imparts bounce.
-        if dt > 0.0 && body.prev_top > PARKED_Y / 2.0 {
-            vel.0 = Vec2::new(0.0, (top - body.prev_top) / dt);
-        } else {
-            vel.0 = Vec2::ZERO;
+    let mut values = cava.mono();
+    if !active || values.is_empty() {
+        // Relax the surface flat to the floor when inactive.
+        for hgt in &mut surface.heights {
+            *hgt += (floor - *hgt) * alpha;
         }
-        body.prev_top = top;
+    } else {
+        spread_monstercat(&mut values, vis.monstercat);
+        let max_h = h * MAX_HEIGHT_FRAC;
+        for s in 0..SAMPLES {
+            let v = sample_height(&values, s).clamp(0.0, 1.5);
+            let target = floor + v * max_h;
+            surface.heights[s] += (target - surface.heights[s]) * alpha;
+        }
+    }
+
+    // Rebuild the heightfield collider to match (x spans [-w/2, w/2]).
+    if let Ok(mut collider) = body.single_mut() {
+        *collider = Collider::heightfield(surface.heights.clone(), Vec2::new(w, 1.0));
+    }
+
+    // Rebuild the fill mesh (top curve + floor), tinted by loudness.
+    if active {
+        let mut peak = 0.0f32;
+        if let Some(mesh) = meshes.get_mut(&handles.mesh) {
+            let mut positions = Vec::with_capacity(2 * SAMPLES);
+            for s in 0..SAMPLES {
+                let x = -w / 2.0 + s as f32 / (SAMPLES - 1) as f32 * w;
+                let y = surface.heights[s];
+                peak = peak.max((y - floor) / (h * MAX_HEIGHT_FRAC).max(1.0));
+                positions.push([x, y, 0.0]);
+                positions.push([x, floor, 0.0]);
+            }
+            mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+        }
+        if let Some(mat) = materials.get_mut(&handles.material) {
+            mat.color = gradient_color(vis.fg_lo(), vis.fg_hi(), peak).with_alpha(0.9);
+        }
+    }
+}
+
+/// Push balls **perpendicular to the local surface slope** when the surface is
+/// rising into them. Direction is the heightfield normal `n = (-dh/dx, 1)`; speed
+/// is the column's rise rate `dh/dt` projected onto `n`, scaled by `bar_push`.
+fn push_balls(
+    mode: Res<DrawingMode>,
+    settings: Res<PhysicsSettings>,
+    time: Res<Time>,
+    windows: Query<&Window>,
+    surface: Res<Surface>,
+    mut balls: Query<(&Transform, &mut LinearVelocity, &Ball)>,
+) {
+    if !settings.enabled || mode.family() != VisFamily::Box {
+        return;
+    }
+    let dt = time.delta_secs();
+    if dt <= 0.0 {
+        return;
+    }
+    let Some(window) = windows.iter().next() else {
+        return;
+    };
+    let w = window.width();
+    let dx = w / (SAMPLES - 1) as f32;
+
+    for (transform, mut vel, ball) in &mut balls {
+        let (x, y) = (transform.translation.x, transform.translation.y);
+        // Map x to a column index with neighbours for the slope.
+        let f = (x + w / 2.0) / w * (SAMPLES - 1) as f32;
+        if f < 1.0 || f > (SAMPLES - 2) as f32 {
+            continue;
+        }
+        let i = f.round() as usize;
+        let surf_y = surface.heights[i];
+
+        // Only act on balls in contact with / just above the surface.
+        let dist = y - surf_y;
+        if dist < -ball.radius || dist > ball.radius + 4.0 {
+            continue;
+        }
+
+        // Surface rise speed at this column.
+        let rise = (surface.heights[i] - surface.prev[i]) / dt;
+        if rise <= 0.0 {
+            continue;
+        }
+
+        // Local outward normal from the slope, and the rise projected onto it.
+        let slope = (surface.heights[i + 1] - surface.heights[i - 1]) / (2.0 * dx);
+        let n = Vec2::new(-slope, 1.0).normalize();
+        let target_n = rise * n.y * settings.bar_push;
+
+        // Add only the shortfall along n, so we launch without compounding.
+        let along = vel.0.dot(n);
+        if target_n > along {
+            vel.0 += n * (target_n - along);
+        }
     }
 }
