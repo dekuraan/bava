@@ -30,11 +30,11 @@ use crate::vis::{
 };
 
 /// Fraction of window height a full-scale bar occupies.
-const MAX_HEIGHT_FRAC: f32 = 0.9;
+pub(crate) const MAX_HEIGHT_FRAC: f32 = 0.9;
 /// Gap between bars, in pixels.
-const BAR_GAP: f32 = 2.0;
+pub(crate) const BAR_GAP: f32 = 2.0;
 /// Discrete steps a Levels column snaps to.
-const LEVEL_STEPS: f32 = 14.0;
+pub(crate) const LEVEL_STEPS: f32 = 14.0;
 /// Smooth segments used to draw a Wave line.
 const WAVE_SEGMENTS: usize = 192;
 
@@ -154,22 +154,23 @@ fn reconcile_bars(
 }
 
 /// Layout constants shared by the per-shape sprite/line code, derived once per
-/// frame from the window.
-struct Layout {
+/// frame from the window. Also consumed by `physics.rs` so the spectrum
+/// colliders land exactly on the rendered bars.
+pub(crate) struct Layout {
     /// Window half-width offset (left edge x).
-    left: f32,
+    pub(crate) left: f32,
     /// Window floor (bottom edge y).
-    floor: f32,
+    pub(crate) floor: f32,
     /// Per-bar horizontal slot width.
-    slot_w: f32,
+    pub(crate) slot_w: f32,
     /// Drawn bar width (slot minus the gap).
-    bar_w: f32,
+    pub(crate) bar_w: f32,
     /// Pixels a full-scale (value 1.0) bar spans.
-    max_h: f32,
+    pub(crate) max_h: f32,
 }
 
 impl Layout {
-    fn new(w: f32, h: f32, n: usize, half_height: bool) -> Self {
+    pub(crate) fn new(w: f32, h: f32, n: usize, half_height: bool) -> Self {
         let slot_w = w / n.max(1) as f32;
         Self {
             left: -w / 2.0,
@@ -181,7 +182,7 @@ impl Layout {
     }
 
     /// Center x of bar `i`.
-    fn bar_x(&self, i: usize) -> f32 {
+    pub(crate) fn bar_x(&self, i: usize) -> f32 {
         self.left + self.slot_w * (i as f32 + 0.5)
     }
 }
@@ -266,7 +267,7 @@ fn update_bars(
 
 /// Center-y and half-extents of a column of height `bar_h`, growing from the
 /// floor or centered (mirrored).
-fn column_geom(lyt: &Layout, bar_h: f32, centered: bool) -> (f32, Vec2) {
+pub(crate) fn column_geom(lyt: &Layout, bar_h: f32, centered: bool) -> (f32, Vec2) {
     if centered {
         (0.0, Vec2::new(lyt.bar_w * 0.5, bar_h))
     } else {

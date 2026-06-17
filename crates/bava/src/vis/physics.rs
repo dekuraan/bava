@@ -1,53 +1,55 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Physics playground layered over the visualizers (avian2d).
 //!
-//! **Box mode** (bars): left-click spawns a ball that falls under gravity,
-//! bounces off the window walls, and gets launched by the spectrum. Instead of
-//! one collider per bar, the spectrum is a single **smooth kinematic heightfield**
-//! — a continuous blobby curve rebuilt every frame from the (interpolated,
-//! time-smoothed) cava values. avian resolves contacts along the *true* surface
-//! normal, so balls are pushed **perpendicular to the local slope**, not just up.
+//! The collision geometry **tracks the rendered meshes** rather than a single
+//! smooth bottom wave. Physics is supported only on the shapes whose meshes map
+//! cleanly onto floor-anchored colliders; the rest are inert for now:
 //!
-//! Because one rigid body can carry only one velocity, the heightfield can't
-//! itself impart per-column launch energy. So a [`push_balls`] pass reads the
-//! analytic surface-velocity field (how fast each column is rising) and adds an
-//! impulse **along the local surface normal** — direction from the slope, speed
-//! from the rise rate. Shape comes from the engine, energy is scripted, and both
-//! agree on the same normal.
+//! - **Bars / Levels (box, un-mirrored)** — one kinematic rounded column per bar,
+//!   pooled and reshaped every frame to sit exactly on the rendered bar (gaps and
+//!   all), reusing [`bars`](crate::vis::bars)'s [`Layout`]/[`column_geom`]. Balls
+//!   rest on top of columns and fall **between** them to the floor. A
+//!   [`push_columns`] pass launches balls a rising column drives into, and
+//!   unsticks any a fast column has swallowed.
+//! - **Wave (box)** — a single smooth kinematic [`Collider::heightfield`] rebuilt
+//!   each frame from the (interpolated, time-smoothed) cava values; balls ride the
+//!   waveform and are launched along its true surface normal by [`push_balls`].
+//! - **All circle modes** — global gravity off, each ball pulled toward the center
+//!   by `central_gravity`, bouncing the pulsing [`Collider::polyline`] blob (rebuilt
+//!   each frame from the same [`blob_ring`] the renderer draws).
+//! - **Particles / Spine / Splitter (box)** and **mirrored Bars/Levels** — physics
+//!   **disabled**: colliders parked, clicks ignored. (Their meshes float above /
+//!   cross the axis, which a floor surface can't represent — a later increment.)
 //!
-//! **Planet mode** (circle visualizer): global gravity is switched off and each
-//! ball is pulled toward the center instead, so balls fall in and **orbit/bounce
-//! the pulsing blob**. The blob is a kinematic [`Collider::polyline`] ring rebuilt
-//! every frame from the same [`blob_ring`] the renderer draws, so the collision
-//! shape tracks the visual. When the blob expands it flings balls radially
-//! outward (and unsticks any it swallows), mirroring the bar surface. Clicking in
-//! this mode spawns balls with a tangential velocity so they orbit immediately.
+//! Switching mode runs [`on_mode_change`], which despawns the live balls and zeroes
+//! the surface caches so nothing carries phantom velocity into the new mode.
 //!
 //! Physics runs in [`PostUpdate`] with a variable timestep (not avian's default
 //! fixed `FixedPostUpdate`) so it steps once per render frame, in lockstep with
 //! the per-frame cava analysis. Balls carry [`SweptCcd`] so they don't tunnel.
+//! [`PhysicsDebugPlugin`] draws the live collider wireframes when
+//! `[physics] debug_draw` is on (toggle at runtime with **F3**).
 
 use avian2d::prelude::*;
-use bevy::asset::RenderAssetUsages;
-use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
 use crate::cava::Cava;
 use crate::gui::EditorState;
+use crate::vis::bars::{column_geom, Layout, LEVEL_STEPS, MAX_HEIGHT_FRAC};
 use crate::vis::circle::blob_ring;
-use crate::vis::{gradient_color, spread_monstercat, DrawingMode, VisFamily, VisSettings};
+use crate::vis::{
+    gradient_color, spread_monstercat, DrawingMode, MirrorMode, VisFamily, VisSettings, VisShape,
+};
 
 /// 1 physics "metre" = this many world pixels. Scales avian's internal
 /// tolerances (contact margins etc.) to our pixel-space coordinates.
 const LENGTH_UNIT: f32 = 100.0;
 /// Thickness of the boundary walls, in pixels.
 const WALL_THICKNESS: f32 = 200.0;
-/// Must match `bars::MAX_HEIGHT_FRAC`.
-const MAX_HEIGHT_FRAC: f32 = 0.9;
-/// Horizontal resolution of the heightfield collider and its fill mesh. Higher =
-/// smoother curve and finer slope normals.
+/// Horizontal resolution of the Wave heightfield collider. Higher = smoother
+/// curve and finer slope normals.
 const SAMPLES: usize = 192;
-/// Park an inactive surface/planet body far outside the world.
+/// Park an inactive surface/planet/column body far outside the world.
 const PARKED: f32 = 1.0e6;
 
 /// Runtime physics tunables, mapped from `[physics]` in the config.
@@ -73,7 +75,7 @@ pub struct PhysicsSettings {
     pub bar_smoothing: f32,
     /// Restitution of the spectrum surface.
     pub bar_restitution: f32,
-    /// Launch gain: how strongly a rising surface flings balls along its normal.
+    /// Launch gain: how strongly a rising surface/column flings balls.
     pub bar_push: f32,
     /// Planet mode: radial acceleration pulling balls toward the center, px/s².
     pub central_gravity: f32,
@@ -110,7 +112,7 @@ struct Ball {
 #[derive(Resource, Default)]
 struct BallCounter(u64);
 
-/// Time-smoothed spectrum surface, shared by the collider/mesh update and the
+/// Time-smoothed Wave surface, shared by the heightfield/mesh update and the
 /// ball-push pass. `heights`/`prev` are absolute world-space y of the surface at
 /// each of [`SAMPLES`] evenly spaced x columns (this frame and last).
 #[derive(Resource)]
@@ -128,6 +130,14 @@ impl Default for Surface {
     }
 }
 
+/// Per-bar column-top world y for Bars/Levels (this frame + last), sized to the
+/// live bar count. Shared by the column collider update and [`push_columns`].
+#[derive(Resource, Default)]
+struct Columns {
+    tops: Vec<f32>,
+    prev: Vec<f32>,
+}
+
 /// Planet-mode blob ring, sampled this frame and last (per-segment radii from the
 /// center). Shared by the collider rebuild and the radial ball forces.
 #[derive(Resource, Default)]
@@ -140,20 +150,14 @@ struct Planet {
 #[derive(Component)]
 struct PlanetBody;
 
-/// The single kinematic heightfield body for the spectrum surface.
+/// The single kinematic heightfield body for the Wave surface.
 #[derive(Component)]
 struct SurfaceBody;
 
-/// The smooth filled visual for the spectrum surface.
+/// One kinematic column collider for the Bars/Levels pool; the field is its Cava
+/// bar index (parallel to `bars::Bar`).
 #[derive(Component)]
-struct SurfaceFill;
-
-/// Mesh/material handles for the surface fill, updated each frame.
-#[derive(Resource)]
-struct FillHandles {
-    mesh: Handle<Mesh>,
-    material: Handle<ColorMaterial>,
-}
+struct BarColumn(usize);
 
 /// Which boundary a wall is, so it can be repositioned on resize.
 #[derive(Component, Clone, Copy)]
@@ -164,7 +168,7 @@ enum WallSide {
     Bottom,
 }
 
-/// Physics plugin: avian + ball spawning + the smooth spectrum surface.
+/// Physics plugin: avian + ball spawning + the mesh-matched spectrum colliders.
 pub struct PhysicsPlugin;
 
 impl Plugin for PhysicsPlugin {
@@ -172,6 +176,7 @@ impl Plugin for PhysicsPlugin {
         app.init_resource::<PhysicsSettings>()
             .init_resource::<BallCounter>()
             .init_resource::<Surface>()
+            .init_resource::<Columns>()
             .init_resource::<Planet>()
             // Run the simulation in PostUpdate (variable timestep) so it steps
             // once per render frame, matching the per-frame cava analysis.
@@ -184,6 +189,8 @@ impl Plugin for PhysicsPlugin {
             .add_systems(
                 Update,
                 (
+                    // Tear down on a mode switch before anything reads the caches.
+                    on_mode_change,
                     spawn_ball_on_click,
                     enforce_ball_cap,
                     despawn_escaped_balls,
@@ -191,25 +198,42 @@ impl Plugin for PhysicsPlugin {
                     update_gravity_mode,
                     // Update each surface before reading it to move balls.
                     (update_surface, push_balls).chain(),
+                    (reconcile_columns, update_columns, push_columns).chain(),
                     (update_planet, planet_forces).chain(),
                 ),
             );
     }
 }
 
-/// Spawn the boundary walls, the kinematic heightfield surface, and its fill.
+/// Whether the spectrum **column** pool drives physics this frame: the
+/// floor-anchored, un-mirrored Bars/Levels box modes.
+fn columns_active(mode: DrawingMode, vis: &VisSettings) -> bool {
+    mode.family() == VisFamily::Box
+        && matches!(mode.shape(), VisShape::Bars | VisShape::Levels)
+        && vis.mirror == MirrorMode::Off
+}
+
+/// Whether the **Wave** heightfield drives physics this frame.
+fn wave_active(mode: DrawingMode) -> bool {
+    mode == DrawingMode::WaveBox
+}
+
+/// Whether physics is supported at all in this mode (otherwise: inert).
+fn physics_supported(mode: DrawingMode, vis: &VisSettings) -> bool {
+    mode.family() == VisFamily::Circle || columns_active(mode, vis) || wave_active(mode)
+}
+
+/// Spawn the boundary walls, the kinematic Wave heightfield, and the planet body.
 fn setup_physics(
     mut commands: Commands,
     settings: Res<PhysicsSettings>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<ColorMaterial>>,
     windows: Query<&Window>,
 ) {
     if !settings.enabled {
         return;
     }
 
-    // Gravity in our pixel space; Box mode uses it, planet mode will zero it.
+    // Gravity in our pixel space; Box mode uses it, circle modes zero it.
     commands.insert_resource(Gravity(Vec2::NEG_Y * settings.gravity));
 
     let (w, h) = windows
@@ -228,13 +252,13 @@ fn setup_physics(
         ));
     }
 
-    // Kinematic heightfield surface, flat at the floor until the first update.
+    // Kinematic Wave heightfield, flat at the floor until the first update.
     let floor = -h / 2.0;
     commands.spawn((
         RigidBody::Kinematic,
         Collider::heightfield(vec![floor; SAMPLES], Vec2::new(w, 1.0)),
         Restitution::new(settings.bar_restitution),
-        Transform::default(),
+        Transform::from_xyz(0.0, -PARKED, 0.0),
         SurfaceBody,
     ));
 
@@ -249,45 +273,12 @@ fn setup_physics(
         Transform::from_xyz(PARKED, PARKED, 0.0),
         PlanetBody,
     ));
-
-    // Smooth filled visual for the surface, sitting above the bar sprites and
-    // below the balls (z = 0.5).
-    let mesh = meshes.add(fill_mesh());
-    let material = materials.add(ColorMaterial::from(Color::NONE));
-    commands.spawn((
-        Mesh2d(mesh.clone()),
-        MeshMaterial2d(material.clone()),
-        Transform::from_xyz(0.0, 0.0, 0.5),
-        Visibility::Hidden,
-        SurfaceFill,
-    ));
-    commands.insert_resource(FillHandles { mesh, material });
-}
-
-/// A vertical strip mesh: `SAMPLES` top vertices (the curve) and `SAMPLES` bottom
-/// vertices (the floor). Positions are placeholders (overwritten each frame);
-/// the triangle indices are fixed.
-fn fill_mesh() -> Mesh {
-    let positions = vec![[0.0f32, 0.0, 0.0]; 2 * SAMPLES];
-    let normals = vec![[0.0f32, 0.0, 1.0]; 2 * SAMPLES];
-    let uvs = vec![[0.0f32, 0.0]; 2 * SAMPLES];
-    // Vertex layout: top_i = 2*i, bottom_i = 2*i + 1.
-    let mut indices = Vec::with_capacity((SAMPLES - 1) * 6);
-    for i in 0..SAMPLES - 1 {
-        let (t0, b0, t1, b1) = (2 * i as u32, 2 * i as u32 + 1, 2 * (i as u32 + 1), 2 * (i as u32 + 1) + 1);
-        indices.extend_from_slice(&[t0, b0, t1, b0, b1, t1]);
-    }
-
-    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
-    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
-    mesh.insert_indices(Indices::U32(indices));
-    mesh
 }
 
 /// Size and center of a wall, given the current window dimensions. Walls sit
-/// just outside the visible area so balls bounce off the window edges.
+/// just outside the visible area so balls bounce off the window edges; the
+/// bottom wall's top face sits exactly on the floor (`-h/2`), the floor balls
+/// rest on when they fall between columns.
 fn wall_geometry(side: WallSide, w: f32, h: f32) -> (Vec2, Vec2) {
     let t = WALL_THICKNESS;
     match side {
@@ -314,7 +305,40 @@ fn resize_walls(
     }
 }
 
-/// Left-click spawns a ball at the cursor with (optionally randomized) props.
+/// Despawn the live balls and zero the surface caches whenever the drawing mode
+/// changes, so nothing carries stale geometry or phantom launch velocity into
+/// the new mode (gravity flips on box↔circle; supported↔inert toggles spawning).
+fn on_mode_change(
+    mut commands: Commands,
+    mode: Res<DrawingMode>,
+    mut last: Local<Option<DrawingMode>>,
+    balls: Query<Entity, With<Ball>>,
+    surface: ResMut<Surface>,
+    columns: ResMut<Columns>,
+    planet: ResMut<Planet>,
+) {
+    if *last == Some(*mode) {
+        return;
+    }
+    *last = Some(*mode);
+
+    for entity in &balls {
+        commands.entity(entity).despawn();
+    }
+    // Collapse each rate cache to zero delta (prev == current) so the first frame
+    // back doesn't read a huge rise/expand and fling the (now absent) balls.
+    // Reborrow to split-borrow the two fields past `ResMut`'s Deref.
+    let surface = surface.into_inner();
+    surface.prev.copy_from_slice(&surface.heights);
+    let columns = columns.into_inner();
+    columns.prev.copy_from_slice(&columns.tops);
+    let planet = planet.into_inner();
+    planet.prev.copy_from_slice(&planet.radii);
+}
+
+/// Left-click spawns a ball at the cursor with (optionally randomized) props,
+/// but only in a mode where physics is supported.
+#[allow(clippy::too_many_arguments)]
 fn spawn_ball_on_click(
     mut commands: Commands,
     mouse: Res<ButtonInput<MouseButton>>,
@@ -328,8 +352,12 @@ fn spawn_ball_on_click(
     windows: Query<&Window>,
     cameras: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
 ) {
-    // Skip when the click lands on the egui settings window.
-    if !settings.enabled || editor.capture_pointer || !mouse.just_pressed(MouseButton::Left) {
+    // Skip when disabled, when the click lands on egui, or in an inert mode.
+    if !settings.enabled
+        || editor.capture_pointer
+        || !mouse.just_pressed(MouseButton::Left)
+        || !physics_supported(*mode, &vis)
+    {
         return;
     }
     let Some(window) = windows.iter().next() else {
@@ -361,7 +389,7 @@ fn spawn_ball_on_click(
     let id = counter.0;
     counter.0 += 1;
 
-    // In planet mode, launch tangentially for a near-circular orbit; otherwise
+    // In circle modes, launch tangentially for a near-circular orbit; otherwise
     // drop it in (gravity takes over).
     let velocity = if mode.family() == VisFamily::Circle {
         let r = world.length();
@@ -444,8 +472,8 @@ fn despawn_escaped_balls(
     }
 }
 
-/// Resolve the smoothed surface height for column `s` (0..SAMPLES) from the cava
-/// bar `values`, interpolating smoothly between bars for a blobby curve.
+/// Resolve the smoothed Wave surface height for column `s` (0..SAMPLES) from the
+/// cava bar `values`, interpolating smoothly between bars for a blobby curve.
 fn sample_height(values: &[f32], s: usize) -> f32 {
     let n = values.len();
     if n == 1 {
@@ -459,10 +487,9 @@ fn sample_height(values: &[f32], s: usize) -> f32 {
     values[i0] + (values[i1] - values[i0]) * t
 }
 
-/// Rebuild the spectrum surface (heightfield collider + fill mesh) from the
-/// latest audio, time-smoothed. Parks flat at the floor while a circle mode is
-/// active. Updates the shared [`Surface`] resource for [`push_balls`].
-#[allow(clippy::too_many_arguments)]
+/// Rebuild the **Wave** heightfield collider from the latest audio, time-smoothed.
+/// Parked offscreen unless WaveBox is active. Updates the shared [`Surface`] for
+/// [`push_balls`].
 fn update_surface(
     mode: Res<DrawingMode>,
     settings: Res<PhysicsSettings>,
@@ -471,11 +498,7 @@ fn update_surface(
     time: Res<Time>,
     windows: Query<&Window>,
     surface: ResMut<Surface>,
-    handles: Res<FillHandles>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<ColorMaterial>>,
     mut body: Query<(&mut Collider, &mut Transform), With<SurfaceBody>>,
-    mut fill_vis: Query<&mut Visibility, With<SurfaceFill>>,
 ) {
     if !settings.enabled {
         return;
@@ -486,11 +509,7 @@ fn update_surface(
     let (w, h) = (window.width(), window.height());
     let floor = -h / 2.0;
     let dt = time.delta_secs();
-    let active = mode.family() == VisFamily::Box;
-
-    for mut v in &mut fill_vis {
-        *v = if active { Visibility::Visible } else { Visibility::Hidden };
-    }
+    let active = wave_active(*mode);
 
     // Save last frame's heights for the velocity field, then compute targets.
     // Reborrow so the two fields can be split-borrowed past `ResMut`'s Deref.
@@ -520,37 +539,17 @@ fn update_surface(
     }
 
     // Rebuild the heightfield collider to match (x spans [-w/2, w/2]); park the
-    // whole body offscreen while a circle mode owns the simulation.
+    // whole body offscreen while Wave isn't the active mode.
     if let Ok((mut collider, mut transform)) = body.single_mut() {
         *collider = Collider::heightfield(surface.heights.clone(), Vec2::new(w, 1.0));
         transform.translation.y = if active { 0.0 } else { -PARKED };
     }
-
-    // Rebuild the fill mesh (top curve + floor), tinted by loudness.
-    if active {
-        let mut peak = 0.0f32;
-        if let Some(mesh) = meshes.get_mut(&handles.mesh) {
-            let mut positions = Vec::with_capacity(2 * SAMPLES);
-            for s in 0..SAMPLES {
-                let x = -w / 2.0 + s as f32 / (SAMPLES - 1) as f32 * w;
-                let y = surface.heights[s];
-                peak = peak.max((y - floor) / (h * MAX_HEIGHT_FRAC).max(1.0));
-                positions.push([x, y, 0.0]);
-                positions.push([x, floor, 0.0]);
-            }
-            mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
-        }
-        if let Some(mat) = materials.get_mut(&handles.material) {
-            mat.color = gradient_color(vis.fg_lo(), vis.fg_hi(), peak).with_alpha(0.9);
-        }
-    }
 }
 
-/// Push balls **perpendicular to the local surface slope** when the surface is
-/// rising into them, and **unstick** any ball the surface has swallowed (a loud
-/// column can shoot up past a resting ball, trapping it between the surface and
-/// the floor where gravity can't free it). Direction is the heightfield normal
-/// `n = (-dh/dx, 1)`; speed is the column rise rate `dh/dt`, scaled by `bar_push`.
+/// Push balls **perpendicular to the local Wave slope** when the surface rises
+/// into them, and **unstick** any ball the surface has swallowed. Direction is
+/// the heightfield normal `n = (-dh/dx, 1)`; speed is the column rise rate
+/// `dh/dt`, scaled by `bar_push`.
 fn push_balls(
     mode: Res<DrawingMode>,
     settings: Res<PhysicsSettings>,
@@ -559,7 +558,7 @@ fn push_balls(
     surface: Res<Surface>,
     mut balls: Query<(&mut Transform, &mut LinearVelocity, &Ball)>,
 ) {
-    if !settings.enabled || mode.family() != VisFamily::Box {
+    if !settings.enabled || !wave_active(*mode) {
         return;
     }
     let dt = time.delta_secs();
@@ -613,8 +612,174 @@ fn push_balls(
     }
 }
 
-/// Switch global gravity by mode: downward in box mode; off in planet mode, where
-/// [`planet_forces`] applies radial gravity toward the center instead.
+/// Grow or shrink the column-collider pool to match the live bar count, mirroring
+/// [`bars::reconcile_bars`](crate::vis::bars). Indices stay contiguous `0..target`.
+fn reconcile_columns(
+    mut commands: Commands,
+    settings: Res<PhysicsSettings>,
+    cava: Res<Cava>,
+    columns: Query<(Entity, &BarColumn)>,
+) {
+    if !settings.enabled {
+        return;
+    }
+    let target = cava.bars_per_channel.max(1);
+    let current = columns.iter().count();
+    if current < target {
+        for i in current..target {
+            spawn_column(&mut commands, &settings, i);
+        }
+    } else if current > target {
+        for (entity, col) in &columns {
+            if col.0 >= target {
+                commands.entity(entity).despawn();
+            }
+        }
+    }
+}
+
+/// Spawn one parked kinematic column collider for bar index `i`.
+fn spawn_column(commands: &mut Commands, settings: &PhysicsSettings, i: usize) {
+    commands.spawn((
+        RigidBody::Kinematic,
+        Collider::rectangle(1.0, 1.0),
+        Restitution::new(settings.bar_restitution),
+        Transform::from_xyz(PARKED, PARKED, 0.0),
+        BarColumn(i),
+    ));
+}
+
+/// Reshape and reposition each column collider onto the rendered Bars/Levels mesh
+/// (reusing [`Layout`]/[`column_geom`] so the collider can't drift from the bar),
+/// caching each column top for [`push_columns`]. Parks the whole pool when the
+/// column shapes aren't the active mode.
+fn update_columns(
+    mode: Res<DrawingMode>,
+    settings: Res<PhysicsSettings>,
+    cava: Res<Cava>,
+    vis: Res<VisSettings>,
+    windows: Query<&Window>,
+    columns: ResMut<Columns>,
+    mut bodies: Query<(&BarColumn, &mut Collider, &mut Transform)>,
+) {
+    if !settings.enabled {
+        return;
+    }
+    let Some(window) = windows.iter().next() else {
+        return;
+    };
+    let columns = columns.into_inner();
+
+    if !columns_active(*mode, &vis) {
+        for (_, _, mut transform) in &mut bodies {
+            transform.translation = Vec3::new(PARKED, PARKED, 0.0);
+        }
+        // Keep tops flat so re-entry sees zero delta.
+        columns.prev.copy_from_slice(&columns.tops);
+        return;
+    }
+
+    let (w, h) = (window.width(), window.height());
+    let mut values = cava.mono();
+    let n = values.len();
+    if n == 0 {
+        return;
+    }
+    spread_monstercat(&mut values, vis.monstercat);
+    let lyt = Layout::new(w, h, n, false);
+
+    if columns.tops.len() != n {
+        columns.tops = vec![lyt.floor; n];
+        columns.prev = columns.tops.clone();
+    }
+    columns.prev.copy_from_slice(&columns.tops);
+
+    let levels = mode.shape() == VisShape::Levels;
+    for (col, mut collider, mut transform) in &mut bodies {
+        let i = col.0;
+        if i >= n {
+            transform.translation = Vec3::new(PARKED, PARKED, 0.0);
+            continue;
+        }
+        let mut v = values[i].clamp(0.0, 1.5);
+        if levels {
+            // Snap the height to discrete VU-style steps, matching the renderer.
+            v = (v * LEVEL_STEPS).round() / LEVEL_STEPS;
+        }
+        let bar_h = (v * lyt.max_h).max(1.0);
+        let (cy, half) = column_geom(&lyt, bar_h, false);
+        *collider = Collider::rectangle(half.x * 2.0, half.y * 2.0);
+        transform.translation = Vec3::new(lyt.bar_x(i), cy, 0.0);
+        columns.tops[i] = lyt.floor + bar_h;
+    }
+}
+
+/// Launch balls a rising column drives into (straight up — columns only move
+/// vertically), and unstick any a fast column has swallowed. Balls horizontally
+/// in a gap between bars are ignored: the bottom wall (floor) holds them.
+fn push_columns(
+    mode: Res<DrawingMode>,
+    settings: Res<PhysicsSettings>,
+    vis: Res<VisSettings>,
+    time: Res<Time>,
+    windows: Query<&Window>,
+    columns: Res<Columns>,
+    mut balls: Query<(&mut Transform, &mut LinearVelocity, &Ball)>,
+) {
+    if !settings.enabled || !columns_active(*mode, &vis) {
+        return;
+    }
+    let dt = time.delta_secs();
+    if dt <= 0.0 {
+        return;
+    }
+    let Some(window) = windows.iter().next() else {
+        return;
+    };
+    let (w, h) = (window.width(), window.height());
+    let n = columns.tops.len();
+    if n == 0 {
+        return;
+    }
+    let lyt = Layout::new(w, h, n, false);
+
+    for (mut transform, mut vel, ball) in &mut balls {
+        let (x, y) = (transform.translation.x, transform.translation.y);
+        let slot = ((x - lyt.left) / lyt.slot_w).floor();
+        if slot < 0.0 || slot as usize >= n {
+            continue;
+        }
+        let i = slot as usize;
+        // Ignore balls horizontally over a gap — they belong to the floor.
+        if (x - lyt.bar_x(i)).abs() > lyt.bar_w * 0.5 + ball.radius {
+            continue;
+        }
+        let top = columns.tops[i];
+        let rise = (columns.tops[i] - columns.prev[i]) / dt;
+        let dist = y - top;
+
+        // Unstick: ball center sits inside the column → lift it onto the top and
+        // carry it up at least as fast as the column is rising.
+        if dist < -ball.radius {
+            transform.translation.y = top + ball.radius;
+            let up = rise.max(0.0).max(120.0);
+            vel.0.y = vel.0.y.max(up);
+            continue;
+        }
+
+        // Otherwise launch only when resting in the contact band and rising.
+        if dist > ball.radius + 4.0 || rise <= 0.0 {
+            continue;
+        }
+        let target = rise * settings.bar_push;
+        if target > vel.0.y {
+            vel.0.y = target;
+        }
+    }
+}
+
+/// Switch global gravity by family: downward in box modes; off in circle modes,
+/// where [`planet_forces`] applies radial gravity toward the center instead.
 fn update_gravity_mode(
     mode: Res<DrawingMode>,
     settings: Res<PhysicsSettings>,
