@@ -19,7 +19,7 @@ use crate::cava::{CavaRebuild, CavaSettings};
 use crate::config::{Config, ConfigHandle};
 use crate::vis::physics::PhysicsSettings;
 use crate::vis::{
-    ColorProfile, Direction, DrawingMode, MirrorMode, Theme, VisSettings,
+    ColorProfile, Direction, DrawingMode, MirrorMode, Theme, ToneMap, VisSettings,
 };
 
 /// Editor window state: visibility, the toggle key, the cached profile list,
@@ -299,6 +299,18 @@ fn geometry_section(ui: &mut egui::Ui, vis: &mut VisSettings) {
 /// Color-profile editor: pick the active profile and edit its stops.
 fn colors_section(ui: &mut egui::Ui, vis: &mut VisSettings) {
     ui.label(egui::RichText::new("Colors").strong());
+
+    enum_combo(ui, "Tone mapping", &mut vis.tonemapping, &[
+        (ToneMap::None, "None (hard clip)"),
+        (ToneMap::TonyMcMapface, "Tony McMapface"),
+        (ToneMap::AgX, "AgX"),
+        (ToneMap::BlenderFilmic, "Blender Filmic"),
+        (ToneMap::AcesFitted, "ACES (fitted)"),
+        (ToneMap::Reinhard, "Reinhard"),
+        (ToneMap::ReinhardLuminance, "Reinhard (luminance)"),
+        (ToneMap::SomewhatBoringDisplayTransform, "Neutral"),
+    ]);
+    ui.separator();
 
     if vis.profiles.is_empty() {
         vis.profiles.push(ColorProfile::default());

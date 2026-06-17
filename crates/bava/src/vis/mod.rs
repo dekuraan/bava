@@ -146,6 +146,52 @@ pub enum Direction {
     RightLeft,
 }
 
+/// HDR → display tone-mapping curve applied by the camera. The HDR camera lets
+/// amplitude-boosted colors run past 1.0 so peaks bloom; the tone mapper decides
+/// how those out-of-range values land on screen. `None` hard-clips per channel
+/// (punchy neon blowout); the filmic curves roll highlights off smoothly.
+///
+/// Mirrors [`bevy::core_pipeline::tonemapping::Tonemapping`]. The `AgX`,
+/// `TonyMcMapface` and `BlenderFilmic` curves need the `tonemapping_luts` cargo
+/// feature (enabled); the rest are analytic.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum ToneMap {
+    /// No mapping — values are clamped to `[0, 1]` per channel (hard highlight clip).
+    None,
+    /// Simple Reinhard `c / (1 + c)` per channel; desaturates highlights.
+    Reinhard,
+    /// Reinhard applied to luminance only; preserves hue better than [`Self::Reinhard`].
+    ReinhardLuminance,
+    /// Fitted ACES filmic curve; contrasty, slightly crushed blacks.
+    AcesFitted,
+    /// AgX filmic curve (needs LUTs); gentle, film-like highlight rolloff.
+    AgX,
+    /// A neutral display transform; minimal look, mostly for reference.
+    SomewhatBoringDisplayTransform,
+    /// TonyMcMapface (needs LUTs); Bevy's default — natural, hue-preserving rolloff.
+    #[default]
+    TonyMcMapface,
+    /// Blender's Filmic curve (needs LUTs).
+    BlenderFilmic,
+}
+
+impl From<ToneMap> for bevy::core_pipeline::tonemapping::Tonemapping {
+    fn from(t: ToneMap) -> Self {
+        use bevy::core_pipeline::tonemapping::Tonemapping as B;
+        match t {
+            ToneMap::None => B::None,
+            ToneMap::Reinhard => B::Reinhard,
+            ToneMap::ReinhardLuminance => B::ReinhardLuminance,
+            ToneMap::AcesFitted => B::AcesFitted,
+            ToneMap::AgX => B::AgX,
+            ToneMap::SomewhatBoringDisplayTransform => B::SomewhatBoringDisplayTransform,
+            ToneMap::TonyMcMapface => B::TonyMcMapface,
+            ToneMap::BlenderFilmic => B::BlenderFilmic,
+        }
+    }
+}
+
 /// Light/dark association of a [`ColorProfile`] (Cavalier `Theme`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -257,6 +303,8 @@ pub struct VisSettings {
     pub background: ImageLayer,
     /// Foreground picture overlay (masked by the visualization shape).
     pub foreground: ImageLayer,
+    /// HDR → display tone-mapping curve applied by the camera.
+    pub tonemapping: ToneMap,
 }
 
 impl Default for VisSettings {
@@ -280,6 +328,7 @@ impl Default for VisSettings {
             active_profile: 0,
             background: ImageLayer::default(),
             foreground: ImageLayer::default(),
+            tonemapping: ToneMap::default(),
         }
     }
 }

@@ -17,6 +17,7 @@
 //! antialiased stroke mesh, hidden while a blocky shape is active. All shapes
 //! share the [`Cava`] resource and the monstercat neighbour-spreading pass.
 
+use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
 use bevy::render::view::Hdr;
@@ -64,7 +65,9 @@ impl Plugin for BarsPlugin {
         app.add_systems(Startup, setup)
             // Reconcile the sprite pool first so a live bar-count change (editor
             // "Apply" / profile load) is reflected the same frame it converges.
-            .add_systems(Update, (reconcile_bars, update_bars, update_box_lines).chain());
+            .add_systems(Update, (reconcile_bars, update_bars, update_box_lines).chain())
+            // Keep the camera's tone mapper in sync with the live editor setting.
+            .add_systems(Update, apply_tonemapping);
     }
 }
 
@@ -75,6 +78,7 @@ impl Plugin for BarsPlugin {
 fn setup(
     mut commands: Commands,
     settings: Res<CavaSettings>,
+    vis: Res<VisSettings>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
 ) {
@@ -82,6 +86,8 @@ fn setup(
         Camera2d,
         Hdr,
         Msaa::Sample8,
+        // Map the HDR (amplitude-boosted) colors to the display per [`VisSettings::tonemapping`].
+        Tonemapping::from(vis.tonemapping),
         // NATURAL bloom, nudged up a touch for a punchier neon glow.
         Bloom {
             intensity: 0.25,
@@ -108,6 +114,24 @@ fn setup(
         BoxLineStroke,
     ));
     commands.insert_resource(BoxLineHandles { mesh: line_mesh });
+}
+
+/// Push the live [`VisSettings::tonemapping`] choice onto the camera whenever it
+/// changes (editor edit / profile load), so the tone mapper updates the same
+/// frame without a restart.
+fn apply_tonemapping(
+    vis: Res<VisSettings>,
+    mut cameras: Query<&mut Tonemapping, With<Camera2d>>,
+) {
+    if !vis.is_changed() {
+        return;
+    }
+    let wanted = Tonemapping::from(vis.tonemapping);
+    for mut tm in &mut cameras {
+        if *tm != wanted {
+            *tm = wanted;
+        }
+    }
 }
 
 /// Spawn a single bar as its own (initially empty) rounded-rect mesh, carrying

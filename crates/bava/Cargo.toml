@@ -9,16 +9,49 @@ default-run = "bava"
 
 [dependencies]
 cavacore-rs.workspace = true
-bevy = "0.18"
+
+# Bevy, tree-shaken to what a 2D visualizer actually touches. Default features
+# pull in all of 3D (PBR/glTF/lighting/meshlets/anti-alias), the audio decoder
+# stack, scene loading, and the picking backends — none of which we use. We opt
+# into just the 2D + UI render pipelines (which transitively give the app/asset/
+# window/text layers and HDR+bloom), windowing on Wayland/X11, and keyboard/mouse
+# input. Adds back: 3D, `audio`, `scene`, `picking`, gamepad, sysinfo — if needed.
+bevy = { version = "0.18", default-features = false, features = [
+    "2d_bevy_render",  # sprite + core pipeline + post-process (bloom) + gizmos (avian F3 debug)
+    "ui_bevy_render",  # bevy_ui for the HUD; transitively pulls default_app (asset/window/state/input_focus)
+    "tonemapping_luts", # LUTs for the AgX / TonyMcMapface / BlenderFilmic tone mappers (see [vis] tonemapping)
+    "std",
+    "multi_threaded",
+    "bevy_winit",
+    "wayland",
+    "x11",
+    "default_font",    # embedded font so HUD text renders without shipping one
+    "keyboard",        # Space / F3 / configurable GUI toggle
+    "mouse",           # egui editor interaction
+] }
 
 # 2D physics: ECS-native rigid bodies/colliders for the ball + bar simulation.
-avian2d = "0.6"
+# Drop avian's default `bevy_scene` + `bevy_picking` (unused) and `xpbd_joints`
+# (no joints); keep `debug-plugin` for the F3 collider gizmos.
+avian2d = { version = "0.6", default-features = false, features = [
+    "2d",
+    "f32",
+    "parry-f32",
+    "parallel",
+    "debug-plugin",
+] }
 
 # Tiny, dep-free RNG for randomizing spawned ball properties.
 fastrand = "2"
 
-# In-app settings editor (immediate-mode GUI overlay).
-bevy_egui = "0.39"
+# In-app settings editor (immediate-mode GUI overlay). Drop egui's default
+# `picking` (we have no bevy_picking backend) and `open_url` (no hyperlinks).
+bevy_egui = { version = "0.39", default-features = false, features = [
+    "render",
+    "bevy_ui",
+    "default_fonts",
+    "manage_clipboard",
+] }
 
 # Audio capture (PulseAudio simple API, works through pipewire-pulse).
 libpulse-binding = "2"

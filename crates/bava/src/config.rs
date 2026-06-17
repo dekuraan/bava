@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::cava::CavaSettings;
 use crate::vis::physics::PhysicsSettings;
 use crate::vis::{
-    ColorProfile, Direction, DrawingMode, ImageLayer, MirrorMode, Theme, VisSettings,
+    ColorProfile, Direction, DrawingMode, ImageLayer, MirrorMode, Theme, ToneMap, VisSettings,
 };
 
 /// Command-line arguments. Anything provided here overrides the config file.
@@ -196,6 +196,11 @@ pub struct VisConfig {
     pub background: ImageConfig,
     /// Foreground picture overlay (masked by the visualization shape).
     pub foreground: ImageConfig,
+    /// HDR → display tone-mapping curve: `"none"`, `"reinhard"`,
+    /// `"reinhard_luminance"`, `"aces_fitted"`, `"ag_x"`,
+    /// `"somewhat_boring_display_transform"`, `"tony_mc_mapface"` or
+    /// `"blender_filmic"`.
+    pub tonemapping: ToneMap,
 }
 
 /// `[[vis.profile]]` — a named color scheme.
@@ -353,6 +358,7 @@ impl Config {
                 profiles: vis.profiles.iter().map(ColorProfileConfig::from).collect(),
                 background: ImageConfig::from(&vis.background),
                 foreground: ImageConfig::from(&vis.foreground),
+                tonemapping: vis.tonemapping,
             },
             physics: PhysicsConfig {
                 enabled: physics.enabled,
@@ -591,6 +597,7 @@ impl Config {
             profiles,
             background: ImageLayer::from(&v.background),
             foreground: ImageLayer::from(&v.foreground),
+            tonemapping: v.tonemapping,
         }
     }
 
