@@ -32,6 +32,7 @@ use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
 use crate::cava::Cava;
+use crate::gui::EditorState;
 use crate::vis::circle::blob_ring;
 use crate::vis::{gradient_color, spread_monstercat, DrawingMode, VisFamily, VisSettings};
 
@@ -316,13 +317,15 @@ fn spawn_ball_on_click(
     mode: Res<DrawingMode>,
     settings: Res<PhysicsSettings>,
     vis: Res<VisSettings>,
+    editor: Res<EditorState>,
     mut counter: ResMut<BallCounter>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
     windows: Query<&Window>,
     cameras: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
 ) {
-    if !settings.enabled || !mouse.just_pressed(MouseButton::Left) {
+    // Skip when the click lands on the egui settings window.
+    if !settings.enabled || editor.capture_pointer || !mouse.just_pressed(MouseButton::Left) {
         return;
     }
     let Some(window) = windows.iter().next() else {
@@ -616,11 +619,15 @@ fn update_gravity_mode(
     if !settings.enabled {
         return;
     }
-    gravity.0 = if mode.family() == VisFamily::Box {
+    let target = if mode.family() == VisFamily::Box {
         Vec2::NEG_Y * settings.gravity
     } else {
         Vec2::ZERO
     };
+    // Only write when it actually changes, to avoid per-frame change-detection churn.
+    if gravity.0 != target {
+        gravity.0 = target;
+    }
 }
 
 /// Rebuild the planet blob collider from the rendered [`blob_ring`], cache its

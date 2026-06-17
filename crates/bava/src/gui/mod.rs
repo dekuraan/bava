@@ -32,6 +32,9 @@ pub struct EditorState {
     /// True while egui holds keyboard focus (e.g. a text field), so the rest of
     /// the app can suppress its own key handling (the Space mode-cycle).
     pub capture_keyboard: bool,
+    /// True while egui wants the pointer (cursor over a window/widget), so the
+    /// rest of the app can suppress click handling (ball spawning).
+    pub capture_pointer: bool,
     /// Last action result, shown at the bottom of the window.
     status: String,
     /// "Save as profile" name field.
@@ -50,6 +53,7 @@ impl Default for EditorState {
             open: false,
             toggle_key: KeyCode::KeyP,
             capture_keyboard: false,
+            capture_pointer: false,
             status: String::new(),
             new_profile_name: String::new(),
             profiles: Vec::new(),
@@ -99,6 +103,7 @@ fn editor_ui(
     // Toggle with the configured key (ignored while a text field has focus);
     // Escape closes.
     editor.capture_keyboard = ctx.wants_keyboard_input();
+    editor.capture_pointer = ctx.wants_pointer_input();
     if keys.just_pressed(editor.toggle_key) && !editor.capture_keyboard {
         editor.open = !editor.open;
     }
