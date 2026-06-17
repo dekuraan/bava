@@ -1,15 +1,20 @@
-//! The cavacore subsystem: captures audio on a background thread, runs it
-//! through [`cavacore_rs`], and publishes the latest bar values into the
-//! [`Cava`] resource for visualizers to read.
+//! The cavacore subsystem.
+//!
+//! A background thread captures audio into a ring buffer; a Bevy system drains
+//! that buffer and calls `cava_execute` **once per rendered frame**, so cavacore
+//! runs at the render rate. Its framerate-adaptive smoothing then produces
+//! native, low-latency motion at whatever FPS the window runs — no interpolation
+//! needed. The result is published into the [`Cava`] resource for visualizers.
 
 pub mod capture;
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
 use bevy::prelude::*;
-use cavacore_rs::CavaConfig;
+use cavacore_rs::{CavaConfig, CavaPlan};
 
 use capture::pulse::PulseCapture;
 use capture::AudioCapture;
@@ -24,8 +29,10 @@ pub struct CavaSettings {
     pub channels: usize,
     /// Capture sample rate (Hz).
     pub rate: u32,
-    /// Samples per channel read per cavacore execution. Lower = higher frame
-    /// rate / lower latency; 512 @ 44100 ≈ 86 Hz.
+    /// Samples per channel per capture read. This is just the feed granularity:
+    /// smaller chunks fill the ring more finely so each rendered frame gets a
+    /// roughly even slice of fresh audio (cava execute rate follows the render
+    /// rate, not this). 128 @ 44100 ≈ 2.9 ms/read.
     pub frame_samples: usize,
     /// Auto-scale output into 0..1.
     pub autosens: bool,
@@ -47,7 +54,7 @@ impl Default for CavaSettings {
             bars_per_channel: 24,
             channels: 2,
             rate: 44_100,
-            frame_samples: 512,
+            frame_samples: 128,
             autosens: true,
             noise_reduction: 0.77,
             low_cutoff_freq: 50,
@@ -109,64 +116,96 @@ impl Cava {
     }
 }
 
-/// Double-buffered hand-off from the capture thread to the Bevy world.
-struct SharedBars {
-    bars: Vec<f32>,
-    generation: u64,
-}
-
-/// Handle shared with the capture thread; lives as a Bevy resource so the thread
-/// can be told to stop on exit.
+/// Ring buffer of captured interleaved samples, shared between the capture
+/// thread (producer) and the per-frame [`feed_cava`] system (consumer).
 #[derive(Resource, Clone)]
-struct CavaLink {
-    shared: Arc<Mutex<SharedBars>>,
+struct AudioRing {
+    buf: Arc<Mutex<VecDeque<f64>>>,
     running: Arc<AtomicBool>,
+    /// Maximum backlog; a render stall can't grow the buffer past this.
+    cap: usize,
 }
 
-/// Drives audio capture → cavacore → the [`Cava`] resource.
+impl AudioRing {
+    fn new(rate: u32, channels: usize) -> Self {
+        // Bound the backlog to ~250 ms so latency stays low even if rendering
+        // pauses (e.g. window minimized); oldest samples are dropped first.
+        let cap = (rate as usize / 4).max(1) * channels.max(1);
+        Self {
+            buf: Arc::new(Mutex::new(VecDeque::with_capacity(cap))),
+            running: Arc::new(AtomicBool::new(true)),
+            cap,
+        }
+    }
+}
+
+/// cavacore state. Held as a **NonSend** resource because [`CavaPlan`] is `Send`
+/// but not `Sync`; it is executed exclusively on the main thread, once per frame.
+struct CavaState {
+    plan: CavaPlan,
+    /// Reused buffer for the samples drained each frame.
+    scratch: Vec<f64>,
+}
+
+/// Drives audio capture → cavacore (at render rate) → the [`Cava`] resource.
 pub struct CavaPlugin;
 
 impl Plugin for CavaPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<CavaSettings>()
-            .init_resource::<Cava>()
-            .add_systems(Startup, start_capture)
-            .add_systems(Update, pull_bars)
+        app.init_resource::<CavaSettings>().init_resource::<Cava>();
+        let settings = app.world().resource::<CavaSettings>().clone();
+
+        // Size the Cava resource up front.
+        {
+            let mut cava = app.world_mut().resource_mut::<Cava>();
+            cava.bars = vec![0.0; settings.bars_per_channel * settings.channels];
+            cava.bars_per_channel = settings.bars_per_channel;
+            cava.channels = settings.channels;
+        }
+
+        // Build the cavacore plan on the main thread and keep it there.
+        let cfg = CavaConfig {
+            bars: settings.bars_per_channel as u32,
+            rate: settings.rate,
+            channels: settings.channels as u32,
+            autosens: settings.autosens,
+            noise_reduction: settings.noise_reduction,
+            low_cutoff_freq: settings.low_cutoff_freq,
+            high_cutoff_freq: settings.high_cutoff_freq,
+        };
+        match cfg.build() {
+            Ok(plan) => {
+                info!(
+                    "bava: cavacore ready — {} bars/ch @ {} Hz, driven at render rate",
+                    plan.bars(),
+                    settings.rate
+                );
+                app.insert_non_send_resource(CavaState {
+                    plan,
+                    scratch: Vec::new(),
+                });
+            }
+            Err(e) => error!("bava: cavacore init failed: {e}; visualizer will be idle"),
+        }
+
+        // Spawn the audio reader thread feeding the ring.
+        let ring = AudioRing::new(settings.rate, settings.channels);
+        let reader_ring = ring.clone();
+        let reader_settings = settings.clone();
+        thread::Builder::new()
+            .name("bava-capture".into())
+            .spawn(move || capture_reader(reader_settings, reader_ring))
+            .expect("failed to spawn capture thread");
+        app.insert_resource(ring);
+
+        app.add_systems(Update, feed_cava)
             .add_systems(Last, stop_on_exit);
     }
 }
 
-/// Startup: size the [`Cava`] resource and spawn the capture thread.
-fn start_capture(mut commands: Commands, settings: Res<CavaSettings>, mut cava: ResMut<Cava>) {
-    let settings = settings.clone();
-    let output_len = settings.bars_per_channel * settings.channels;
-
-    cava.bars = vec![0.0; output_len];
-    cava.bars_per_channel = settings.bars_per_channel;
-    cava.channels = settings.channels;
-
-    let shared = Arc::new(Mutex::new(SharedBars {
-        bars: vec![0.0; output_len],
-        generation: 0,
-    }));
-    let running = Arc::new(AtomicBool::new(true));
-
-    let link = CavaLink {
-        shared: shared.clone(),
-        running: running.clone(),
-    };
-
-    thread::Builder::new()
-        .name("bava-capture".into())
-        .spawn(move || capture_loop(settings, shared, running))
-        .expect("failed to spawn capture thread");
-
-    commands.insert_resource(link);
-}
-
-/// Background capture + analysis loop. All PulseAudio/cavacore state lives here
-/// so nothing non-`Send` ever crosses into Bevy.
-fn capture_loop(settings: CavaSettings, shared: Arc<Mutex<SharedBars>>, running: Arc<AtomicBool>) {
+/// Pure audio reader: pulls small chunks from PulseAudio and appends them to the
+/// ring. No cavacore here — analysis happens on the render thread.
+fn capture_reader(settings: CavaSettings, ring: AudioRing) {
     let mut capture = match PulseCapture::open(
         settings.source.as_deref(),
         settings.rate,
@@ -179,42 +218,17 @@ fn capture_loop(settings: CavaSettings, shared: Arc<Mutex<SharedBars>>, running:
         }
     };
 
-    let cfg = CavaConfig {
-        bars: settings.bars_per_channel as u32,
-        rate: capture.rate(),
-        channels: capture.channels(),
-        autosens: settings.autosens,
-        noise_reduction: settings.noise_reduction,
-        low_cutoff_freq: settings.low_cutoff_freq,
-        high_cutoff_freq: settings.high_cutoff_freq,
-    };
-    let mut plan = match cfg.build() {
-        Ok(p) => p,
-        Err(e) => {
-            error!("bava: cavacore init failed: {e}");
-            return;
-        }
-    };
-
     info!(
-        "bava: capturing {} ch @ {} Hz, {} bars/ch",
+        "bava: capturing {} ch @ {} Hz",
         capture.channels(),
-        capture.rate(),
-        plan.bars()
+        capture.rate()
     );
 
-    let frame_len = settings.frame_samples * settings.channels;
-    let mut samples = vec![0.0f64; frame_len];
+    let chunk = settings.frame_samples.max(1) * settings.channels.max(1);
+    let mut buf = vec![0.0f64; chunk];
 
-    // With debug enabled, log the raw input peak and the analyzed output peak
-    // ~1×/s, which distinguishes a silent capture (input≈0) from a
-    // processing/render issue (input>0 but bars≈0).
-    let debug = settings.debug;
-    let mut frame_count = 0u64;
-    let frames_per_log = (capture.rate() as usize / settings.frame_samples.max(1)).max(1) as u64;
-
-    while running.load(Ordering::Relaxed) {
-        match capture.read(&mut samples) {
+    while ring.running.load(Ordering::Relaxed) {
+        match capture.read(&mut buf) {
             Ok(0) => break, // end of stream
             Ok(_) => {}
             Err(e) => {
@@ -222,42 +236,78 @@ fn capture_loop(settings: CavaSettings, shared: Arc<Mutex<SharedBars>>, running:
                 continue;
             }
         }
-
-        let bars = plan.execute(&samples);
-
-        if debug {
-            frame_count += 1;
-            if frame_count % frames_per_log == 0 {
-                let in_peak = samples.iter().fold(0.0f64, |m, &s| m.max(s.abs()));
-                let out_peak = bars.iter().fold(0.0f64, |m, &b| m.max(b));
-                info!("bava: input peak={in_peak:.4}  output peak bar={out_peak:.4}");
+        if let Ok(mut q) = ring.buf.lock() {
+            q.extend(buf.iter().copied());
+            while q.len() > ring.cap {
+                q.pop_front();
             }
-        }
-
-        if let Ok(mut guard) = shared.lock() {
-            guard.bars.clear();
-            guard.bars.extend(bars.iter().map(|&v| v as f32));
-            guard.generation = guard.generation.wrapping_add(1);
         }
     }
 }
 
-/// Each frame: copy the latest bars from the capture thread into [`Cava`].
-fn pull_bars(link: Res<CavaLink>, mut cava: ResMut<Cava>, mut last_gen: Local<u64>) {
-    if let Ok(guard) = link.shared.lock() {
-        if guard.generation != *last_gen {
-            *last_gen = guard.generation;
-            cava.bars.clear();
-            cava.bars.extend_from_slice(&guard.bars);
+/// Once per rendered frame: drain all audio captured since the last frame, run a
+/// single `cava_execute`, and publish the bars. Calling cava at the render rate
+/// lets its framerate-adaptive smoothing produce native, low-latency motion.
+fn feed_cava(
+    ring: Res<AudioRing>,
+    state: Option<NonSendMut<CavaState>>,
+    mut cava: ResMut<Cava>,
+    settings: Res<CavaSettings>,
+    mut dbg: Local<FeedStats>,
+) {
+    let Some(mut state) = state else {
+        return; // cavacore failed to init; leave bars at zero
+    };
+    let state = &mut *state;
+
+    // Drain everything captured since the previous frame (≈ rate / fps samples).
+    state.scratch.clear();
+    if let Ok(mut q) = ring.buf.lock() {
+        state.scratch.extend(q.drain(..));
+    }
+
+    // Feeding 0 new samples is valid and just advances the smoothing filters.
+    let bars = state.plan.execute(&state.scratch);
+
+    cava.bars.clear();
+    cava.bars.extend(bars.iter().map(|&v| v as f32));
+
+    // Aggregate over a ~1s window so the stats reflect every frame, not a single
+    // sampled one (which can repeatedly land on an empty-ring frame).
+    if settings.debug {
+        dbg.frames += 1;
+        dbg.total_samples += state.scratch.len() as u64;
+        dbg.max_in = dbg
+            .max_in
+            .max(state.scratch.iter().fold(0.0f64, |m, &s| m.max(s.abs())));
+        dbg.max_out = dbg.max_out.max(bars.iter().fold(0.0f64, |m, &b| m.max(b)));
+        if dbg.frames >= 240 {
+            info!(
+                "bava: {} frames | avg new_samples/frame={:.0} | max input={:.3} | max bar={:.3}",
+                dbg.frames,
+                dbg.total_samples as f64 / dbg.frames as f64,
+                dbg.max_in,
+                dbg.max_out,
+            );
+            *dbg = FeedStats::default();
         }
     }
+}
+
+/// Rolling debug accumulator for [`feed_cava`].
+#[derive(Default)]
+struct FeedStats {
+    frames: u64,
+    total_samples: u64,
+    max_in: f64,
+    max_out: f64,
 }
 
 /// Signal the capture thread to stop when the app is exiting.
-fn stop_on_exit(mut exit: MessageReader<AppExit>, link: Option<Res<CavaLink>>) {
+fn stop_on_exit(mut exit: MessageReader<AppExit>, ring: Option<Res<AudioRing>>) {
     if exit.read().next().is_some() {
-        if let Some(link) = link {
-            link.running.store(false, Ordering::Relaxed);
+        if let Some(ring) = ring {
+            ring.running.store(false, Ordering::Relaxed);
         }
     }
 }
