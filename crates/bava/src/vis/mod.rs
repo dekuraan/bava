@@ -1,11 +1,25 @@
-//! Visualizers. Each reads the shared [`Cava`](crate::cava::Cava) resource, so
-//! 2D bar styles, 3D scenes and (later) shader effects all consume the same
-//! analyzed audio. [`VisPlugin`] wires up the default 2D bars style.
-
 pub mod bars;
+pub mod circle;
 pub mod hud;
 
 use bevy::prelude::*;
+
+/// Which visualizer is currently drawn. Toggle live with the space bar.
+#[derive(Resource, Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum VisStyle {
+    #[default]
+    Bars,
+    Circle,
+}
+
+impl VisStyle {
+    fn next(self) -> Self {
+        match self {
+            VisStyle::Bars => VisStyle::Circle,
+            VisStyle::Circle => VisStyle::Bars,
+        }
+    }
+}
 
 /// Tunables for the visualizers. Insert your own before adding [`VisPlugin`].
 #[derive(Resource, Clone, Debug)]
@@ -21,6 +35,10 @@ pub struct VisSettings {
     pub color_lo: Color,
     /// …and at full amplitude. Bars lerp between the two by height.
     pub color_hi: Color,
+    /// Circle visualizer: fill the ring's interior with a translucent blob.
+    pub fill: bool,
+    /// Line/outline thickness in pixels (circle ring, etc.).
+    pub line_width: f32,
 }
 
 impl Default for VisSettings {
@@ -30,16 +48,68 @@ impl Default for VisSettings {
             mirror: false,
             color_lo: Color::srgb(0.13, 0.55, 0.95),
             color_hi: Color::srgb(0.98, 0.35, 0.70),
+            fill: false,
+            line_width: 6.0,
         }
     }
 }
 
-/// Selects and installs the active visualizer(s) and HUD.
+/// Monstercat neighbour spreading shared by the visualizers: each bar raises the
+/// others to at least `value / factor^distance`. Sources are the unsmoothed
+/// values so the spread is order-independent. `factor <= 1` is a no-op.
+pub(crate) fn spread_monstercat(values: &mut [f32], factor: f32) {
+    if factor <= 1.0 {
+        return;
+    }
+    let n = values.len();
+    let src: Vec<f32> = values.to_vec();
+    for z in 0..n {
+        let peak = src[z];
+        if peak <= 0.0 {
+            continue;
+        }
+        for (m, out) in values.iter_mut().enumerate() {
+            if m == z {
+                continue;
+            }
+            let dist = (z as i32 - m as i32).unsigned_abs() as f32;
+            let spread = peak / factor.powf(dist);
+            if spread > *out {
+                *out = spread;
+            }
+        }
+    }
+}
+
+/// Linear gradient color by amplitude `t` (0..1) between two `VisSettings` ends.
+pub(crate) fn gradient_color(lo: Color, hi: Color, t: f32) -> Color {
+    let a = lo.to_srgba();
+    let b = hi.to_srgba();
+    let t = t.clamp(0.0, 1.0);
+    Color::srgba(
+        a.red + (b.red - a.red) * t,
+        a.green + (b.green - a.green) * t,
+        a.blue + (b.blue - a.blue) * t,
+        0.95,
+    )
+}
+
+/// Selects and installs the visualizers and HUD.
 pub struct VisPlugin;
 
 impl Plugin for VisPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<VisSettings>()
-            .add_plugins((bars::BarsPlugin, hud::HudPlugin));
+            .init_resource::<VisStyle>()
+            .add_systems(Update, cycle_style)
+            .add_plugins((bars::BarsPlugin, circle::CirclePlugin, hud::HudPlugin));
+    }
+}
+
+/// Space bar cycles the active visualizer.
+fn cycle_style(keys: Res<ButtonInput<KeyCode>>, mut style: ResMut<VisStyle>) {
+    if keys.just_pressed(KeyCode::Space) {
+        *style = style.next();
+        info!("bava: vis style → {:?}", *style);
     }
 }

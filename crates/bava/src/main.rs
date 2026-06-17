@@ -40,6 +40,7 @@ fn main() {
 
     let settings = config.to_cava_settings(cli.debug);
     let vis_settings = config.to_vis_settings();
+    let vis_style = config.vis_style();
 
     let mut app = App::new();
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
@@ -55,6 +56,7 @@ fn main() {
     // `init_resource` defaults don't override them.
     .insert_resource(settings)
     .insert_resource(vis_settings)
+    .insert_resource(vis_style)
     .add_plugins((CavaPlugin, MprisPlugin, VisPlugin));
 
     // `--debug` also enables frame-time diagnostics, logging FPS/frame time ~1×/s.

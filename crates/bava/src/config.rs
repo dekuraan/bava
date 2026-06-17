@@ -10,7 +10,7 @@ use clap::Parser;
 use serde::{Deserialize, Serialize};
 
 use crate::cava::CavaSettings;
-use crate::vis::VisSettings;
+use crate::vis::{VisSettings, VisStyle};
 
 /// Command-line arguments. Anything provided here overrides the config file.
 #[derive(Parser, Debug)]
@@ -82,6 +82,8 @@ pub struct CavaConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct VisConfig {
+    /// Active visualizer: `"bars"` or `"circle"` (toggle live with space).
+    pub style: String,
     /// Monstercat neighbour-spread factor (1.5 ≈ smooth waves, higher = tighter,
     /// `<= 1` disables).
     pub monstercat: f32,
@@ -91,6 +93,10 @@ pub struct VisConfig {
     pub color_low: [f32; 3],
     /// Foreground gradient `[r, g, b]` (0..1) at full amplitude.
     pub color_high: [f32; 3],
+    /// Circle: fill the ring interior with a translucent blob.
+    pub fill: bool,
+    /// Outline thickness in pixels.
+    pub line_width: f32,
 }
 
 impl Default for Config {
@@ -115,10 +121,13 @@ impl Default for Config {
                 high_cutoff_freq: s.high_cutoff_freq,
             },
             vis: VisConfig {
+                style: "bars".into(),
                 monstercat: v.monstercat,
                 mirror: v.mirror,
                 color_low: [lo.red, lo.green, lo.blue],
                 color_high: [hi.red, hi.green, hi.blue],
+                fill: v.fill,
+                line_width: v.line_width,
             },
         }
     }
@@ -223,6 +232,16 @@ impl Config {
             mirror: self.vis.mirror,
             color_lo: Color::srgb(lo[0], lo[1], lo[2]),
             color_hi: Color::srgb(hi[0], hi[1], hi[2]),
+            fill: self.vis.fill,
+            line_width: self.vis.line_width,
+        }
+    }
+
+    /// The initial [`VisStyle`] from `[vis] style`.
+    pub fn vis_style(&self) -> VisStyle {
+        match self.vis.style.to_ascii_lowercase().as_str() {
+            "circle" => VisStyle::Circle,
+            _ => VisStyle::Bars,
         }
     }
 }

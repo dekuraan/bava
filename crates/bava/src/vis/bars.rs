@@ -1,15 +1,14 @@
 //! 2D bars / monstercat-style visualizer.
 //!
-//! Spawns one sprite per bar and, every frame, resizes them from the [`Cava`]
-//! resource. The signature "monstercat" look comes from a neighbour-spreading
-//! pass: each bar lifts the bars around it with exponential falloff, so a single
-//! loud frequency becomes a smooth wave rather than an isolated spike. Bars are
-//! rendered as near-white over the album-art backdrop.
+//! One sprite per bar, resized every frame from the [`Cava`] resource. The
+//! monstercat neighbour-spreading pass turns spikes into smooth waves; bars are
+//! filled with an amplitude gradient and can grow from the bottom or mirror from
+//! the center. Hidden while the circle style is active.
 
 use bevy::prelude::*;
 
 use crate::cava::{Cava, CavaSettings};
-use crate::vis::VisSettings;
+use crate::vis::{gradient_color, spread_monstercat, VisSettings, VisStyle};
 
 /// Fraction of window height a full-scale bar occupies.
 const MAX_HEIGHT_FRAC: f32 = 0.9;
@@ -43,40 +42,22 @@ fn setup(mut commands: Commands, settings: Res<CavaSettings>) {
     }
 }
 
-/// Monstercat neighbour spreading: each bar raises the others to at least
-/// `value / factor^distance`, taking the max. Sources are the unsmoothed heights
-/// (`src`) so the spread is order-independent. `factor <= 1` is a no-op.
-fn spread_monstercat(values: &mut [f32], factor: f32) {
-    if factor <= 1.0 {
-        return;
-    }
-    let n = values.len();
-    let src: Vec<f32> = values.to_vec();
-    for z in 0..n {
-        let peak = src[z];
-        if peak <= 0.0 {
-            continue;
-        }
-        for (m, out) in values.iter_mut().enumerate() {
-            if m == z {
-                continue;
-            }
-            let dist = (z as i32 - m as i32).unsigned_abs() as f32;
-            let spread = peak / factor.powf(dist);
-            if spread > *out {
-                *out = spread;
-            }
-        }
-    }
-}
-
 /// Resize each bar from the latest analyzed audio (with monstercat spreading).
 fn update_bars(
+    style: Res<VisStyle>,
     cava: Res<Cava>,
     vis: Res<VisSettings>,
     windows: Query<&Window>,
-    mut bars: Query<(&Bar, &mut Sprite, &mut Transform)>,
+    mut bars: Query<(&Bar, &mut Sprite, &mut Transform, &mut Visibility)>,
 ) {
+    let show = *style == VisStyle::Bars;
+    if !show {
+        for (_, _, _, mut vis_) in &mut bars {
+            *vis_ = Visibility::Hidden;
+        }
+        return;
+    }
+
     let Some(window) = windows.iter().next() else {
         return;
     };
@@ -97,13 +78,10 @@ fn update_bars(
     let floor = -h / 2.0;
     let left = -w / 2.0;
 
-    // Gradient endpoints, resolved once per frame.
-    let lo = vis.color_lo.to_srgba();
-    let hi = vis.color_hi.to_srgba();
+    for (bar, mut sprite, mut transform, mut visibility) in &mut bars {
+        *visibility = Visibility::Visible;
 
-    for (bar, mut sprite, mut transform) in &mut bars {
         let v = values.get(bar.0).copied().unwrap_or(0.0).clamp(0.0, 1.5);
-        let t = v.min(1.0);
         let x = left + slot_w * (bar.0 as f32 + 0.5);
 
         let bar_h = (v * max_h).max(1.0);
@@ -117,12 +95,6 @@ fn update_bars(
             sprite.custom_size = Some(Vec2::new(bar_w, bar_h));
         }
 
-        // Foreground gradient: lerp lo→hi by amplitude.
-        sprite.color = Color::srgba(
-            lo.red + (hi.red - lo.red) * t,
-            lo.green + (hi.green - lo.green) * t,
-            lo.blue + (hi.blue - lo.blue) * t,
-            0.95,
-        );
+        sprite.color = gradient_color(vis.color_lo, vis.color_hi, v.min(1.0));
     }
 }
