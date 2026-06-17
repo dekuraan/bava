@@ -366,11 +366,13 @@ fn despawn_escaped_balls(
     let Some(window) = windows.iter().next() else {
         return;
     };
-    // A generous margin past the edges so balls mid-bounce aren't culled.
+    // Generous margins on the sides/top so balls mid-bounce aren't culled, but a
+    // tight floor margin: nothing should ever be below it, so anything there
+    // tunneled the bottom wall and should go.
     let margin = 0.5 * window.height().max(window.width());
     let (max_x, min_y, max_y) = (
         window.width() / 2.0 + margin,
-        -window.height() / 2.0 - margin,
+        -window.height() / 2.0 - 40.0,
         window.height() / 2.0 + margin,
     );
     for (entity, transform) in &balls {
@@ -482,15 +484,17 @@ fn update_surface(
 }
 
 /// Push balls **perpendicular to the local surface slope** when the surface is
-/// rising into them. Direction is the heightfield normal `n = (-dh/dx, 1)`; speed
-/// is the column's rise rate `dh/dt` projected onto `n`, scaled by `bar_push`.
+/// rising into them, and **unstick** any ball the surface has swallowed (a loud
+/// column can shoot up past a resting ball, trapping it between the surface and
+/// the floor where gravity can't free it). Direction is the heightfield normal
+/// `n = (-dh/dx, 1)`; speed is the column rise rate `dh/dt`, scaled by `bar_push`.
 fn push_balls(
     mode: Res<DrawingMode>,
     settings: Res<PhysicsSettings>,
     time: Res<Time>,
     windows: Query<&Window>,
     surface: Res<Surface>,
-    mut balls: Query<(&Transform, &mut LinearVelocity, &Ball)>,
+    mut balls: Query<(&mut Transform, &mut LinearVelocity, &Ball)>,
 ) {
     if !settings.enabled || mode.family() != VisFamily::Box {
         return;
@@ -505,7 +509,7 @@ fn push_balls(
     let w = window.width();
     let dx = w / (SAMPLES - 1) as f32;
 
-    for (transform, mut vel, ball) in &mut balls {
+    for (mut transform, mut vel, ball) in &mut balls {
         let (x, y) = (transform.translation.x, transform.translation.y);
         // Map x to a column index with neighbours for the slope.
         let f = (x + w / 2.0) / w * (SAMPLES - 1) as f32;
@@ -514,16 +518,22 @@ fn push_balls(
         }
         let i = f.round() as usize;
         let surf_y = surface.heights[i];
-
-        // Only act on balls in contact with / just above the surface.
         let dist = y - surf_y;
-        if dist < -ball.radius || dist > ball.radius + 4.0 {
-            continue;
-        }
 
         // Surface rise speed at this column.
         let rise = (surface.heights[i] - surface.prev[i]) / dt;
-        if rise <= 0.0 {
+
+        // Unstick: the whole ball is below the surface → lift it back on top and
+        // carry it upward at least as fast as the surface is rising.
+        if dist < -ball.radius {
+            transform.translation.y = surf_y + ball.radius;
+            let up = rise.max(0.0).max(120.0);
+            vel.0.y = vel.0.y.max(up);
+            continue;
+        }
+
+        // Otherwise, launch only when in the contact band and the surface rises.
+        if dist > ball.radius + 4.0 || rise <= 0.0 {
             continue;
         }
 
