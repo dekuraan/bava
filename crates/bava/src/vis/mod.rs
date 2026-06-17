@@ -12,6 +12,7 @@ pub mod bars;
 pub mod circle;
 pub mod hud;
 pub mod physics;
+mod stroke;
 
 use std::path::PathBuf;
 
@@ -27,10 +28,10 @@ pub enum VisFamily {
     Circle,
 }
 
-/// The per-bar shape / algorithm, independent of layout family. Part of the
-/// forward-looking mode model; not every shape has a renderer yet.
+/// The per-bar shape / algorithm, independent of layout family. The box family
+/// renders all six distinctly; the circle family renders Wave/Levels/Particles/
+/// Bars/Spine via the shared circle renderer.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-#[allow(dead_code)]
 pub enum VisShape {
     /// Smooth Bézier waveform.
     Wave,
@@ -85,7 +86,6 @@ impl DrawingMode {
     ];
 
     /// The shape/algorithm of this mode.
-    #[allow(dead_code)]
     pub fn shape(self) -> VisShape {
         use DrawingMode::*;
         match self {
@@ -332,17 +332,28 @@ pub(crate) fn spread_monstercat(values: &mut [f32], factor: f32) {
     }
 }
 
-/// Linear gradient color by amplitude `t` (0..1) between two endpoints.
+/// Extra brightness applied to full-amplitude colors, pushing them past 1.0 into
+/// HDR range so the camera's bloom makes peaks glow. `0.0` disables the glow.
+const GLOW_GAIN: f32 = 1.8;
+
+/// Linear gradient color by amplitude `t` (0..1) between two endpoints, boosted
+/// into HDR range as `t` rises so loud bars bloom (see [`GLOW_GAIN`]). At `t = 0`
+/// the color is unchanged.
 pub(crate) fn gradient_color(lo: Color, hi: Color, t: f32) -> Color {
     let a = lo.to_srgba();
     let b = hi.to_srgba();
     let t = t.clamp(0.0, 1.0);
-    Color::srgba(
+    let base = Color::srgba(
         a.red + (b.red - a.red) * t,
         a.green + (b.green - a.green) * t,
         a.blue + (b.blue - a.blue) * t,
         0.95,
-    )
+    );
+    // Scale linear RGB by an amplitude-driven gain; values > 1 bloom. Alpha is
+    // left untouched so translucent fills stay translucent.
+    let lin = base.to_linear();
+    let glow = 1.0 + t * GLOW_GAIN;
+    Color::linear_rgba(lin.red * glow, lin.green * glow, lin.blue * glow, lin.alpha)
 }
 
 /// Selects and installs the visualizers and HUD.

@@ -72,7 +72,7 @@ fn main() {
     .insert_resource(vis_mode)
     // Where the editor saves/reloads, and whether it starts open.
     .insert_resource(ConfigHandle { path })
-    .insert_resource(EditorState::opened(cli.gui))
+    .insert_resource(EditorState::new(cli.gui, config.gui_toggle_key()))
     .add_plugins((CavaPlugin, MprisPlugin, VisPlugin, GuiPlugin));
 
     // `--debug` also enables frame-time diagnostics, logging FPS/frame time ~1×/s.

@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-use bevy::prelude::{Color, Resource, Vec2};
+use bevy::prelude::{Color, KeyCode, Resource, Vec2};
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 
@@ -28,7 +28,8 @@ pub struct Cli {
     #[arg(long, value_name = "NAME")]
     pub profile: Option<String>,
 
-    /// Open the settings editor on startup (also toggled live with the `` ` `` key).
+    /// Open the settings editor on startup (also toggled live with the
+    /// `[gui] toggle_key`, default `p`).
     #[arg(long)]
     pub gui: bool,
 
@@ -94,6 +95,26 @@ pub struct Config {
     pub cava: CavaConfig,
     pub vis: VisConfig,
     pub physics: PhysicsConfig,
+    pub gui: GuiConfig,
+}
+
+/// `[gui]` — settings-editor preferences.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GuiConfig {
+    /// Key that toggles the settings editor. Accepts a single letter (`"p"`,
+    /// `"a".."z"`), a digit, a function key (`"f1".."f12"`), or a named key
+    /// (`"backquote"`/`"grave"`, `"tab"`, `"space"`, `"escape"`, …). Unknown
+    /// names fall back to the default.
+    pub toggle_key: String,
+}
+
+impl Default for GuiConfig {
+    fn default() -> Self {
+        Self {
+            toggle_key: DEFAULT_TOGGLE_KEY.into(),
+        }
+    }
 }
 
 /// `[audio]` — capture parameters.
@@ -340,7 +361,29 @@ impl Config {
                 bar_push: physics.bar_push,
                 central_gravity: physics.central_gravity,
             },
+            // The editor hotkey isn't derived from the runtime settings; callers
+            // that have a live key (the editor's "Save") override it afterward
+            // via [`set_gui_toggle_key`](Self::set_gui_toggle_key).
+            gui: GuiConfig::default(),
         }
+    }
+
+    /// The settings-editor toggle key, parsed from `[gui] toggle_key` (falling
+    /// back to the default on an unknown name).
+    pub fn gui_toggle_key(&self) -> KeyCode {
+        parse_key(&self.gui.toggle_key).unwrap_or_else(|| {
+            eprintln!(
+                "bava: unknown [gui] toggle_key {:?}; using {DEFAULT_TOGGLE_KEY:?}",
+                self.gui.toggle_key
+            );
+            parse_key(DEFAULT_TOGGLE_KEY).expect("default toggle key must parse")
+        })
+    }
+
+    /// Store `key` back into `[gui] toggle_key` as a name, so the editor's
+    /// "Save" round-trips the current hotkey instead of resetting it.
+    pub fn set_gui_toggle_key(&mut self, key: KeyCode) {
+        self.gui.toggle_key = key_to_name(key).unwrap_or(DEFAULT_TOGGLE_KEY).to_string();
     }
 
     /// Default config path: `~/.config/bava/config.toml`.
@@ -406,15 +449,30 @@ impl Config {
 
     /// Load the config at `path`, creating it with defaults if it doesn't exist.
     ///
-    /// On a read or parse error, logs a warning and falls back to defaults so the
-    /// app always starts.
+    /// On a read error, logs a warning and falls back to defaults so the app
+    /// always starts. On a *parse* error the broken file is moved aside to
+    /// `<name>.bak` and a fresh default is written in its place, so a stale or
+    /// hand-broken config self-heals instead of silently using defaults forever
+    /// (the old contents stay recoverable in the backup).
     pub fn load_or_create(path: &PathBuf) -> Self {
         match std::fs::read_to_string(path) {
             Ok(text) => match toml::from_str::<Config>(&text) {
                 Ok(cfg) => cfg,
                 Err(e) => {
-                    eprintln!("bava: failed to parse {}: {e}; using defaults", path.display());
-                    Config::default()
+                    let backup = path.with_extension("toml.bak");
+                    let where_to = match std::fs::rename(path, &backup) {
+                        Ok(()) => format!("backed up to {}", backup.display()),
+                        Err(be) => format!("could not back it up: {be}"),
+                    };
+                    eprintln!(
+                        "bava: {} failed to parse ({e}); {where_to}, writing fresh defaults",
+                        path.display()
+                    );
+                    let cfg = Config::default();
+                    if let Err(we) = cfg.write(path) {
+                        eprintln!("bava: could not write fresh config to {}: {we}", path.display());
+                    }
+                    cfg
                 }
             },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -559,6 +617,52 @@ pub struct ConfigHandle {
     pub path: PathBuf,
 }
 
+/// Default settings-editor toggle key name. Must appear in [`KEY_NAMES`].
+const DEFAULT_TOGGLE_KEY: &str = "p";
+
+/// Lower-case key name ⇄ [`KeyCode`] table for the configurable editor hotkey.
+/// The first entry for a given [`KeyCode`] is its canonical name (used when
+/// writing the config back); later duplicates are accepted aliases.
+const KEY_NAMES: &[(&str, KeyCode)] = &[
+    ("a", KeyCode::KeyA), ("b", KeyCode::KeyB), ("c", KeyCode::KeyC), ("d", KeyCode::KeyD),
+    ("e", KeyCode::KeyE), ("f", KeyCode::KeyF), ("g", KeyCode::KeyG), ("h", KeyCode::KeyH),
+    ("i", KeyCode::KeyI), ("j", KeyCode::KeyJ), ("k", KeyCode::KeyK), ("l", KeyCode::KeyL),
+    ("m", KeyCode::KeyM), ("n", KeyCode::KeyN), ("o", KeyCode::KeyO), ("p", KeyCode::KeyP),
+    ("q", KeyCode::KeyQ), ("r", KeyCode::KeyR), ("s", KeyCode::KeyS), ("t", KeyCode::KeyT),
+    ("u", KeyCode::KeyU), ("v", KeyCode::KeyV), ("w", KeyCode::KeyW), ("x", KeyCode::KeyX),
+    ("y", KeyCode::KeyY), ("z", KeyCode::KeyZ),
+    ("0", KeyCode::Digit0), ("1", KeyCode::Digit1), ("2", KeyCode::Digit2),
+    ("3", KeyCode::Digit3), ("4", KeyCode::Digit4), ("5", KeyCode::Digit5),
+    ("6", KeyCode::Digit6), ("7", KeyCode::Digit7), ("8", KeyCode::Digit8),
+    ("9", KeyCode::Digit9),
+    ("f1", KeyCode::F1), ("f2", KeyCode::F2), ("f3", KeyCode::F3), ("f4", KeyCode::F4),
+    ("f5", KeyCode::F5), ("f6", KeyCode::F6), ("f7", KeyCode::F7), ("f8", KeyCode::F8),
+    ("f9", KeyCode::F9), ("f10", KeyCode::F10), ("f11", KeyCode::F11), ("f12", KeyCode::F12),
+    ("backquote", KeyCode::Backquote), ("grave", KeyCode::Backquote), ("tilde", KeyCode::Backquote),
+    ("tab", KeyCode::Tab),
+    ("space", KeyCode::Space),
+    ("escape", KeyCode::Escape), ("esc", KeyCode::Escape),
+    ("enter", KeyCode::Enter), ("return", KeyCode::Enter),
+    ("backslash", KeyCode::Backslash),
+    ("minus", KeyCode::Minus),
+    ("equal", KeyCode::Equal),
+    ("comma", KeyCode::Comma),
+    ("period", KeyCode::Period),
+    ("slash", KeyCode::Slash),
+    ("semicolon", KeyCode::Semicolon),
+];
+
+/// Parse a key name (case-insensitive) into a [`KeyCode`], or `None` if unknown.
+fn parse_key(name: &str) -> Option<KeyCode> {
+    let n = name.trim().to_ascii_lowercase();
+    KEY_NAMES.iter().find(|(k, _)| *k == n).map(|(_, kc)| *kc)
+}
+
+/// The canonical name for a [`KeyCode`], or `None` if it isn't in [`KEY_NAMES`].
+fn key_to_name(key: KeyCode) -> Option<&'static str> {
+    KEY_NAMES.iter().find(|(_, kc)| *kc == key).map(|(k, _)| *k)
+}
+
 /// Reduce a user-supplied profile name to a safe single-segment file stem:
 /// trims whitespace and keeps only alphanumerics, space, `-` and `_`.
 fn sanitize_profile_name(name: &str) -> String {
@@ -643,11 +747,21 @@ fn nib(h: &str, i: usize) -> Option<u8> {
     Some(v * 17)
 }
 
+/// Quantize a `0.0..=1.0` color channel to a `0..=255` byte (clamped, rounded).
+/// Shared by the hex writer here and the editor's egui color swatches.
+pub(crate) fn channel_to_u8(x: f32) -> u8 {
+    (x.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
 /// Format a [`Color`] as `"#rrggbb"`, or `"#aarrggbb"` when not fully opaque.
 fn color_to_hex(c: Color) -> String {
     let s = c.to_srgba();
-    let q = |x: f32| (x.clamp(0.0, 1.0) * 255.0).round() as u8;
-    let (r, g, b, a) = (q(s.red), q(s.green), q(s.blue), q(s.alpha));
+    let (r, g, b, a) = (
+        channel_to_u8(s.red),
+        channel_to_u8(s.green),
+        channel_to_u8(s.blue),
+        channel_to_u8(s.alpha),
+    );
     if a == 255 {
         format!("#{r:02x}{g:02x}{b:02x}")
     } else {
