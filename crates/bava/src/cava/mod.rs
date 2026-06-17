@@ -228,6 +228,7 @@ fn capture_reader(settings: CavaSettings, ring: AudioRing) {
         settings.source.as_deref(),
         settings.rate,
         settings.channels as u8,
+        settings.frame_samples,
     ) {
         Ok(c) => c,
         Err(e) => {

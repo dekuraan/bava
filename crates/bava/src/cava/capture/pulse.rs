@@ -10,6 +10,7 @@ use std::rc::Rc;
 
 use libpulse_binding::context::introspect::ServerInfo;
 use libpulse_binding::context::{Context, FlagSet as ContextFlagSet, State as ContextState};
+use libpulse_binding::def::BufferAttr;
 use libpulse_binding::mainloop::standard::{IterateResult, Mainloop};
 use libpulse_binding::operation::State as OperationState;
 use libpulse_binding::sample::{Format, Spec};
@@ -29,11 +30,15 @@ pub struct PulseCapture {
 
 impl PulseCapture {
     /// Open a capture stream on `device`, or the default sink's monitor when
-    /// `device` is `None`.
+    /// `device` is `None`. `frame_samples` is the per-channel read size the
+    /// caller will use; it sets the server's record `fragsize` so audio is
+    /// delivered one read at a time at a steady cadence (low latency, no bursty
+    /// freeze-then-jump in the bars).
     pub fn open(
         device: Option<&str>,
         rate: u32,
         channels: u8,
+        frame_samples: usize,
     ) -> Result<Self, CaptureError> {
         let spec = Spec {
             format: Format::F32le,
@@ -56,6 +61,23 @@ impl PulseCapture {
             }
         };
 
+        // Deliver in fragments of exactly one read. With PulseAudio's default
+        // attributes the monitor source is handed over in large bursts, which
+        // at a high render rate shows up as the bars freezing for several frames
+        // and then jumping. A read-sized `fragsize` keeps the cadence steady.
+        // `u32::MAX` (i.e. `(uint32_t)-1`) means "let the server decide".
+        let frag_bytes = frame_samples
+            .saturating_mul(channels as usize)
+            .saturating_mul(std::mem::size_of::<f32>())
+            .max(1);
+        let attr = BufferAttr {
+            maxlength: u32::MAX,
+            tlength: u32::MAX,
+            prebuf: u32::MAX,
+            minreq: u32::MAX,
+            fragsize: frag_bytes.min(u32::MAX as usize) as u32,
+        };
+
         let simple = Simple::new(
             None,             // default server
             "bava",           // application name
@@ -63,8 +85,8 @@ impl PulseCapture {
             device,           // monitor source
             "visualizer",     // stream description
             &spec,
-            None, // default channel map
-            None, // default buffering attributes
+            None,         // default channel map
+            Some(&attr),  // low-latency, steady-cadence buffering
         )
         .map_err(|e| CaptureError::Init(format!("{e} (device={device:?})")))?;
 
