@@ -1,0 +1,21 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/cavacore-sys",
+    "crates/cavacore-rs",
+    "crates/bava",
+]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/dekuraan/bava"
+
+[workspace.dependencies]
+cavacore-sys = { path = "crates/cavacore-sys" }
+cavacore-rs = { path = "crates/cavacore-rs" }
+
+# Compile dependencies with optimizations even in dev builds; Bevy is unusably
+# slow otherwise. Our own crates stay unoptimized for fast iteration.
+[profile.dev.package."*"]
+opt-level = 3
