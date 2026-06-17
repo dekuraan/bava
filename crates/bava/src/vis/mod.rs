@@ -1,6 +1,7 @@
 pub mod bars;
 pub mod circle;
 pub mod hud;
+pub mod physics;
 
 use bevy::prelude::*;
 
@@ -102,7 +103,12 @@ impl Plugin for VisPlugin {
         app.init_resource::<VisSettings>()
             .init_resource::<VisStyle>()
             .add_systems(Update, cycle_style)
-            .add_plugins((bars::BarsPlugin, circle::CirclePlugin, hud::HudPlugin));
+            .add_plugins((
+                bars::BarsPlugin,
+                circle::CirclePlugin,
+                hud::HudPlugin,
+                physics::PhysicsPlugin,
+            ));
     }
 }
 

@@ -10,6 +10,7 @@ use clap::Parser;
 use serde::{Deserialize, Serialize};
 
 use crate::cava::CavaSettings;
+use crate::vis::physics::PhysicsSettings;
 use crate::vis::{VisSettings, VisStyle};
 
 /// Command-line arguments. Anything provided here overrides the config file.
@@ -45,6 +46,7 @@ pub struct Config {
     pub audio: AudioConfig,
     pub cava: CavaConfig,
     pub vis: VisConfig,
+    pub physics: PhysicsConfig,
 }
 
 /// `[audio]` — capture parameters.
@@ -99,11 +101,38 @@ pub struct VisConfig {
     pub line_width: f32,
 }
 
+/// `[physics]` — ball/bar simulation tunables.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PhysicsConfig {
+    /// Enable the physics playground (click to spawn balls, bars bounce them).
+    pub enabled: bool,
+    /// Downward acceleration in px/s² (Box mode). ~980 ≈ earth at 100 px/m.
+    pub gravity: f32,
+    /// Default ball restitution (bounciness), 0..1.
+    pub restitution: f32,
+    /// Default ball air resistance (linear damping).
+    pub air_resistance: f32,
+    /// Default ball mass.
+    pub mass: f32,
+    /// Default ball radius, in pixels.
+    pub radius: f32,
+    /// Maximum live balls; oldest are evicted past this.
+    pub max_balls: usize,
+    /// Randomize each spawned ball's properties around the defaults.
+    pub randomize: bool,
+    /// Bar-platform smoothing time constant, in seconds (larger = smoother).
+    pub bar_smoothing: f32,
+    /// Restitution of the bar platforms.
+    pub bar_restitution: f32,
+}
+
 impl Default for Config {
     fn default() -> Self {
         // Mirror the pipeline/vis defaults so the generated file documents them.
         let s = CavaSettings::default();
         let v = VisSettings::default();
+        let p = PhysicsSettings::default();
         let lo = v.color_lo.to_srgba();
         let hi = v.color_hi.to_srgba();
         Self {
@@ -129,6 +158,18 @@ impl Default for Config {
                 fill: v.fill,
                 line_width: v.line_width,
             },
+            physics: PhysicsConfig {
+                enabled: p.enabled,
+                gravity: p.gravity,
+                restitution: p.restitution,
+                air_resistance: p.air_resistance,
+                mass: p.mass,
+                radius: p.radius,
+                max_balls: p.max_balls,
+                randomize: p.randomize,
+                bar_smoothing: p.bar_smoothing,
+                bar_restitution: p.bar_restitution,
+            },
         }
     }
 }
@@ -148,6 +189,12 @@ impl Default for CavaConfig {
 impl Default for VisConfig {
     fn default() -> Self {
         Config::default().vis
+    }
+}
+
+impl Default for PhysicsConfig {
+    fn default() -> Self {
+        Config::default().physics
     }
 }
 
@@ -234,6 +281,23 @@ impl Config {
             color_hi: Color::srgb(hi[0], hi[1], hi[2]),
             fill: self.vis.fill,
             line_width: self.vis.line_width,
+        }
+    }
+
+    /// Convert into the runtime [`PhysicsSettings`] resource.
+    pub fn to_physics_settings(&self) -> PhysicsSettings {
+        let p = &self.physics;
+        PhysicsSettings {
+            enabled: p.enabled,
+            gravity: p.gravity,
+            restitution: p.restitution,
+            air_resistance: p.air_resistance,
+            mass: p.mass,
+            radius: p.radius,
+            max_balls: p.max_balls,
+            randomize: p.randomize,
+            bar_smoothing: p.bar_smoothing,
+            bar_restitution: p.bar_restitution,
         }
     }
 
