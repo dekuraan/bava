@@ -17,9 +17,6 @@ use std::thread;
 use bevy::prelude::*;
 use cavacore_rs::{CavaConfig, CavaPlan};
 
-use capture::pulse::PulseCapture;
-use capture::AudioCapture;
-
 /// Tunables for the cavacore pipeline. Insert your own before adding
 /// [`CavaPlugin`] to override the defaults.
 #[derive(Resource, Clone, Debug)]
@@ -222,10 +219,11 @@ impl Plugin for CavaPlugin {
     }
 }
 
-/// Pure audio reader: pulls small chunks from PulseAudio and appends them to the
-/// ring. No cavacore here — analysis happens on the render thread.
+/// Pure audio reader: pulls small chunks from the platform capture backend and
+/// appends them to the ring. No cavacore here — analysis happens on the render
+/// thread.
 fn capture_reader(settings: CavaSettings, ring: AudioRing) {
-    let mut capture = match PulseCapture::open(
+    let mut capture = match capture::open(
         settings.source.as_deref(),
         settings.rate,
         settings.channels as u8,
@@ -248,17 +246,13 @@ fn capture_reader(settings: CavaSettings, ring: AudioRing) {
     let mut buf = vec![0.0f64; chunk];
 
     while ring.running.load(Ordering::Relaxed) {
-        match capture.read(&mut buf) {
-            Ok(0) => break, // end of stream
-            Ok(_) => {}
-            Err(e) => {
-                // Back off before retrying: if the server died or the source was
-                // removed, read() errors immediately every call, which would spin
-                // a core at 100% and flood the log without this pause.
-                error!("bava: {e}");
-                thread::sleep(std::time::Duration::from_millis(100));
-                continue;
-            }
+        if let Err(e) = capture.read(&mut buf) {
+            // Back off before retrying: if the server died or the source was
+            // removed, read() errors immediately every call, which would spin
+            // a core at 100% and flood the log without this pause.
+            error!("bava: {e}");
+            thread::sleep(std::time::Duration::from_millis(100));
+            continue;
         }
         if let Ok(mut q) = ring.buf.lock() {
             q.extend(buf.iter().copied());

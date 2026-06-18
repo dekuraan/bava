@@ -53,18 +53,10 @@ bevy_egui = { version = "0.39", default-features = false, features = [
     "manage_clipboard",
 ] }
 
-# Audio capture (PulseAudio simple API, works through pipewire-pulse).
-libpulse-binding = "2"
-libpulse-simple-binding = "2"
-
-# Now-playing metadata + album art over MPRIS / D-Bus.
-mpris = "2"
-
-# Album-art fetching and decoding.
-ureq = "2"
+# Album-art decoding (both platforms decode in-memory image bytes).
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 
-# Lock-free-ish hand-off from the audio/mpris threads to Bevy systems.
+# Lock-free-ish hand-off from the audio/now-playing threads to Bevy systems.
 crossbeam-channel = "0.5"
 
 # Configuration: CLI args (clap) layered over a TOML config file.
@@ -72,3 +64,55 @@ clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 toml = "1"
 dirs = "6"
+
+# --- Linux backends: PulseAudio capture + MPRIS now-playing over D-Bus. ---
+[target.'cfg(target_os = "linux")'.dependencies]
+# Audio capture (PulseAudio simple API, works through pipewire-pulse).
+libpulse-binding = "2"
+libpulse-simple-binding = "2"
+# Now-playing metadata + album art over MPRIS / D-Bus.
+mpris = "2"
+# HTTP fetch for remote album art (e.g. spotifyd's http artUrl).
+ureq = "2"
+
+# --- Windows backends: WASAPI loopback capture + GSMTC now-playing. ---
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62", features = [
+    "Foundation",
+    "Media_Control",
+    "Storage_Streams",
+    "Win32_Foundation",
+    "Win32_Media_Audio",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
+] }
+
+# --- macOS backends: Core Audio process-tap capture + mediaremote-adapter
+# now-playing. The objc2-* crates are the safe-Rust bindings to the CoreAudio /
+# Foundation frameworks; process taps need macOS 14.2+. The adapter is driven as
+# a subprocess emitting JSON (serde_json) with base64 album art (base64). ---
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+# Parse the mediaremote-adapter JSON stream + its base64 `artworkData`.
+serde_json = "1"
+base64 = "0.22"
+# CoreAudio bindings: process taps, aggregate devices, IO procs. `AudioHardware`
+# turns on the CFDictionary-based aggregate-device API; the default features
+# already enable objc2 + objc2-foundation + objc2-core-audio-types + block2.
+objc2-core-audio = { version = "0.3", features = ["AudioHardware"] }
+objc2-core-audio-types = "0.3"
+# Foundation collections used to describe the tap + aggregate device.
+objc2-foundation = { version = "0.3", features = [
+    "NSArray",
+    "NSDictionary",
+    "NSString",
+    "NSValue",
+    "NSObject",
+] }
+# CoreFoundation types the CoreAudio property/aggregate APIs hand back / expect.
+objc2-core-foundation = { version = "0.3", features = [
+    "CFBase",
+    "CFString",
+    "CFDictionary",
+] }

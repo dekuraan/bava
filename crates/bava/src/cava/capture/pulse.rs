@@ -101,7 +101,7 @@ impl PulseCapture {
 }
 
 impl AudioCapture for PulseCapture {
-    fn read(&mut self, buf: &mut [f64]) -> Result<usize, CaptureError> {
+    fn read(&mut self, buf: &mut [f64]) -> Result<(), CaptureError> {
         // Read exactly enough bytes to fill `buf` worth of f32 samples.
         let want_bytes = buf.len() * std::mem::size_of::<f32>();
         if self.byte_buf.len() != want_bytes {
@@ -118,7 +118,7 @@ impl AudioCapture for PulseCapture {
             let sample = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
             buf[i] = sample as f64;
         }
-        Ok(buf.len())
+        Ok(())
     }
 
     fn rate(&self) -> u32 {

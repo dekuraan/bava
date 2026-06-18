@@ -1,25 +1,74 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Audio capture backends.
 //!
-//! cavacore needs a stream of interleaved PCM samples. On Linux the natural
-//! source is the *monitor* of the default output sink, which carries whatever is
-//! currently playing (spotifyd, browsers, etc.). [`AudioCapture`] abstracts over
-//! the capture mechanism so additional backends (e.g. native PipeWire) can be
-//! added later; today only [`pulse`] is implemented.
+//! Shared utilities used by WASAPI and Core Audio backends:
+//!
+//! cavacore needs a stream of interleaved PCM samples. The natural source is
+//! whatever is currently playing on the default output: on Linux the *monitor*
+//! of the default sink (via PulseAudio), on Windows a WASAPI *loopback* capture
+//! of the default render endpoint, on macOS a Core Audio *process tap* of the
+//! system mix. [`AudioCapture`] abstracts over the mechanism; [`open`] selects
+//! the backend for the current platform.
 
+#[cfg(target_os = "linux")]
 pub mod pulse;
+
+#[cfg(target_os = "windows")]
+pub mod wasapi;
+
+#[cfg(target_os = "macos")]
+pub mod coreaudio;
+
+/// Open the platform's default capture backend as a boxed [`AudioCapture`].
+///
+/// `device` optionally pins a source (a PulseAudio source name on Linux; ignored
+/// on Windows, which always loops back the default render endpoint). `rate` /
+/// `channels` are the format cavacore was planned for; backends that cannot force
+/// a format (WASAPI shared loopback) resample/convert to match. `frame_samples`
+/// is the per-channel read size the caller will use.
+pub fn open(
+    device: Option<&str>,
+    rate: u32,
+    channels: u8,
+    frame_samples: usize,
+) -> Result<Box<dyn AudioCapture>, CaptureError> {
+    #[cfg(target_os = "linux")]
+    {
+        let cap = pulse::PulseCapture::open(device, rate, channels, frame_samples)?;
+        Ok(Box::new(cap))
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = device;
+        let cap = wasapi::WasapiCapture::open(rate, channels, frame_samples)?;
+        Ok(Box::new(cap))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = device;
+        let cap = coreaudio::CoreAudioCapture::open(rate, channels, frame_samples)?;
+        Ok(Box::new(cap))
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+    {
+        let _ = (device, rate, channels, frame_samples);
+        Err(CaptureError::Init(
+            "no audio capture backend for this platform".into(),
+        ))
+    }
+}
 
 /// A blocking source of interleaved PCM audio for cavacore.
 ///
 /// Implementations are moved onto a dedicated capture thread, so they only need
 /// to be [`Send`].
 pub trait AudioCapture: Send {
-    /// Block until at least one frame is available, then fill `buf` with as many
-    /// interleaved `f64` samples as possible and return how many were written.
-    ///
-    /// Returns `Ok(0)` only on end-of-stream. Errors are transient by
-    /// convention; the caller may log and retry.
-    fn read(&mut self, buf: &mut [f64]) -> Result<usize, CaptureError>;
+    /// Fill the **entire** `buf` with interleaved `f64` samples, blocking as
+    /// needed. Backends capturing a live stream (PulseAudio monitor, WASAPI
+    /// loopback) never end, so there is no end-of-stream signal; an idle source
+    /// must pad with silence to keep a steady cadence rather than short-read.
+    /// Errors are transient by convention; the caller may log and retry.
+    fn read(&mut self, buf: &mut [f64]) -> Result<(), CaptureError>;
 
     /// Sample rate of the captured stream, in Hz.
     fn rate(&self) -> u32;
@@ -47,3 +96,69 @@ impl std::fmt::Display for CaptureError {
 }
 
 impl std::error::Error for CaptureError {}
+
+// Used by the WASAPI (Windows) and Core Audio (macOS) backends. Compiled
+// unconditionally so rust-analyzer type-checks it on Linux; the dead_code lint
+// is suppressed only where it is actually unreachable.
+#[cfg_attr(
+    not(any(target_os = "windows", target_os = "macos")),
+    allow(dead_code)
+)]
+pub(super) struct LinearResampler {
+    target_channels: usize,
+    /// Previous device-rate frame (already down/up-mixed to target_channels).
+    prev: Vec<f64>,
+    has_prev: bool,
+    /// Fractional position within the current input interval [0, 1).
+    frac: f64,
+}
+
+#[cfg_attr(
+    not(any(target_os = "windows", target_os = "macos")),
+    allow(dead_code)
+)]
+impl LinearResampler {
+    pub(super) fn new(target_channels: usize) -> Self {
+        Self {
+            target_channels,
+            prev: vec![0.0; target_channels],
+            has_prev: false,
+            frac: 0.0,
+        }
+    }
+
+    /// Clear interpolation state (call after a device format/rate change).
+    pub(super) fn reset(&mut self) {
+        self.has_prev = false;
+        self.frac = 0.0;
+    }
+
+    /// Feed one device-rate mixed frame and push zero or more target-rate
+    /// frames into `pending`.
+    ///
+    /// `step = device_rate as f64 / target_rate as f64`; pass `1.0` when
+    /// rates are equal to skip interpolation entirely.
+    pub(super) fn push(
+        &mut self,
+        step: f64,
+        cur: &[f64],
+        pending: &mut std::collections::VecDeque<f64>,
+    ) {
+        if step == 1.0 {
+            pending.extend(cur.iter().copied());
+            return;
+        }
+        if self.has_prev {
+            while self.frac < 1.0 {
+                for c in 0..self.target_channels {
+                    pending.push_back(self.prev[c] + (cur[c] - self.prev[c]) * self.frac);
+                }
+                self.frac += step;
+            }
+            self.frac -= 1.0;
+        }
+        self.prev.clear();
+        self.prev.extend_from_slice(cur);
+        self.has_prev = true;
+    }
+}

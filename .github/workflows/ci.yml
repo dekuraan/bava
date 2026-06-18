@@ -1,0 +1,121 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  # ── Linux: full build + tests ──────────────────────────────────────────────
+  linux:
+    name: Linux (x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libpulse-dev \
+            libasound2-dev \
+            libfftw3-dev \
+            libdbus-1-dev \
+            libwayland-dev \
+            libxkbcommon-dev \
+            libx11-dev \
+            libxcursor-dev \
+            libxrandr-dev \
+            libxi-dev \
+            libvulkan-dev
+
+      - name: Build
+        run: cargo build --release -p bava
+
+      - name: Test (cavacore-rs)
+        run: cargo test -p cavacore-rs
+
+  # ── Windows: native build (uses the real windows crate + MSVC toolchain) ──
+  windows:
+    name: Windows (x86_64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # fftw3 is vendored/provided by the build.rs; on Windows it falls back to
+      # -lfftw3 if available, otherwise the user must supply it. For CI we
+      # download a pre-built fftw3 and put it where the linker can find it.
+      - name: Install fftw3 (Windows)
+        shell: pwsh
+        run: |
+          $url = "https://fftw.org/pub/fftw/fftw-3.3.5-dll64.zip"
+          Invoke-WebRequest -Uri $url -OutFile fftw.zip
+          Expand-Archive fftw.zip -DestinationPath fftw
+          Copy-Item fftw\*.lib $env:CARGO_HOME\.. -ErrorAction SilentlyContinue
+          echo "LIB=${{ github.workspace }}\fftw;$env:LIB" >> $env:GITHUB_ENV
+          echo "INCLUDE=${{ github.workspace }}\fftw;$env:INCLUDE" >> $env:GITHUB_ENV
+
+      - name: Build
+        run: cargo build --release -p bava
+
+  # ── macOS: native build (Core Audio process taps need the Apple SDK) ───────
+  macos:
+    name: macOS (aarch64)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install fftw3
+        run: brew install fftw
+
+      - name: Build
+        run: cargo build --release -p bava --target aarch64-apple-darwin
+
+  # ── Windows cross-check from Linux (fast type-check, no link) ─────────────
+  windows-check:
+    name: Windows type-check (cross)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            gcc-mingw-w64-x86-64 \
+            libfftw3-dev
+
+      - name: Stage fftw3.h for mingw
+        run: |
+          mkdir -p /tmp/fftwinc
+          cp /usr/include/fftw3.h /tmp/fftwinc/
+
+      - name: Check Windows target
+        run: >
+          CFLAGS_x86_64_pc_windows_gnu=-I/tmp/fftwinc
+          cargo check --target x86_64-pc-windows-gnu -p bava
