@@ -39,7 +39,7 @@ use crate::cava::Cava;
 use crate::gui::EditorState;
 use crate::vis::bars::{column_geom, Layout, LEVEL_STEPS, MAX_HEIGHT_FRAC};
 use crate::vis::circle::blob_ring;
-use crate::vis::stroke::{apply_stroke, empty_stroke_mesh, stroke_material, STROKE_FEATHER};
+use crate::vis::stroke::{apply_stroke_tapered, empty_stroke_mesh, stroke_material, STROKE_FEATHER};
 use crate::vis::{
     gradient_color, spread_monstercat, DrawingMode, MirrorMode, VisFamily, VisSettings, VisShape,
 };
@@ -1053,7 +1053,9 @@ fn update_trails(
             .map(|(i, &p)| (p, trail.color.with_alpha((i + 1) as f32 / m as f32)))
             .collect();
         if let Some(mesh) = meshes.get_mut(&mesh2d.0) {
-            apply_stroke(mesh, &pts, trail.half_width, STROKE_FEATHER, false);
+            // Taper the stroke to a point at the tail and full width at the head
+            // (the ball end), so the trail reads as a triangle / comet tail.
+            apply_stroke_tapered(mesh, &pts, 0.0, trail.half_width, STROKE_FEATHER, false);
         }
     }
 }

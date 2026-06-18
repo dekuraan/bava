@@ -119,6 +119,21 @@ pub(crate) fn apply_stroke(
     feather: f32,
     closed: bool,
 ) {
+    apply_stroke_tapered(mesh, pts, hw, hw, feather, closed);
+}
+
+/// Like [`apply_stroke`], but the core half-width ramps linearly from `hw_start`
+/// at the first point to `hw_end` at the last, giving a tapered (triangular /
+/// comet) stroke. Always treated as open. The `feather` ramp is added outside the
+/// (varying) core, so the stroke stays antialiased even where it narrows to a point.
+pub(crate) fn apply_stroke_tapered(
+    mesh: &mut Mesh,
+    pts: &[(Vec2, Color)],
+    hw_start: f32,
+    hw_end: f32,
+    feather: f32,
+    closed: bool,
+) {
     let n = pts.len();
     if n < 2 {
         mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, Vec::<[f32; 3]>::new());
@@ -127,9 +142,6 @@ pub(crate) fn apply_stroke(
         return;
     }
 
-    // Four lanes per centerline point: outer+ (a=0), core+ (a=1), core- (a=1),
-    // outer- (a=0). Offsets are along the point's normal.
-    let lanes = [(hw + feather, 0.0), (hw, 1.0), (-hw, 1.0), (-(hw + feather), 0.0)];
     let mut positions = Vec::with_capacity(n * 4);
     let mut colors = Vec::with_capacity(n * 4);
 
@@ -152,6 +164,13 @@ pub(crate) fn apply_stroke(
         }
         let tan = tan.normalize();
         let nrm = Vec2::new(-tan.y, tan.x);
+
+        // Core half-width for this point, lerped start→end along the stroke.
+        let t = i as f32 / (n - 1) as f32;
+        let hw = hw_start + (hw_end - hw_start) * t;
+        // Four lanes per centerline point: outer+ (a=0), core+ (a=1), core- (a=1),
+        // outer- (a=0). Offsets are along the point's normal.
+        let lanes = [(hw + feather, 0.0), (hw, 1.0), (-hw, 1.0), (-(hw + feather), 0.0)];
 
         let lin = pts[i].1.to_linear();
         for (off, edge) in lanes {
