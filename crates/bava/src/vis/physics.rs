@@ -261,9 +261,16 @@ fn wave_active(mode: DrawingMode) -> bool {
     mode == DrawingMode::WaveBox
 }
 
+/// Whether the **planet** blob drives physics this frame. The smooth WaveCircle
+/// rim is the only circle shape with a continuous collider; the other circle
+/// shapes render as discrete spokes/dots, so the blob would be invisible there.
+fn planet_active(mode: DrawingMode) -> bool {
+    mode == DrawingMode::WaveCircle
+}
+
 /// Whether physics is supported at all in this mode (otherwise: inert).
 fn physics_supported(mode: DrawingMode, vis: &VisSettings) -> bool {
-    mode.family() == VisFamily::Circle || columns_active(mode, vis) || wave_active(mode)
+    planet_active(mode) || columns_active(mode, vis) || wave_active(mode)
 }
 
 /// Spawn the boundary walls, the kinematic Wave heightfield, and the planet body.
@@ -440,9 +447,9 @@ fn spawn_ball_on_click(
     let id = counter.0;
     counter.0 += 1;
 
-    // In circle modes, launch tangentially for a near-circular orbit; otherwise
-    // drop it in (gravity takes over).
-    let velocity = if mode.family() == VisFamily::Circle {
+    // In planet (WaveCircle) mode, launch tangentially for a near-circular orbit;
+    // otherwise drop it in (gravity takes over).
+    let velocity = if planet_active(*mode) {
         let r = world.length();
         if r > 1.0 {
             let radial = world / r;
@@ -858,8 +865,9 @@ fn push_columns(
     }
 }
 
-/// Switch global gravity by family: downward in box modes; off in circle modes,
-/// where [`planet_forces`] applies radial gravity toward the center instead.
+/// Switch global gravity by mode: off in planet (WaveCircle) mode, where
+/// [`planet_forces`] applies radial gravity toward the center instead; downward
+/// everywhere else (box modes, and the inert non-Wave circle shapes).
 fn update_gravity_mode(
     mode: Res<DrawingMode>,
     settings: Res<PhysicsSettings>,
@@ -868,10 +876,10 @@ fn update_gravity_mode(
     if !settings.enabled {
         return;
     }
-    let target = if mode.family() == VisFamily::Box {
-        Vec2::NEG_Y * settings.gravity
-    } else {
+    let target = if planet_active(*mode) {
         Vec2::ZERO
+    } else {
+        Vec2::NEG_Y * settings.gravity
     };
     // Only write when it actually changes, to avoid per-frame change-detection churn.
     if gravity.0 != target {
@@ -897,7 +905,7 @@ fn update_planet(
     let Ok((mut collider, mut transform)) = body.single_mut() else {
         return;
     };
-    if mode.family() != VisFamily::Circle {
+    if !planet_active(*mode) {
         transform.translation = Vec3::new(PARKED, PARKED, 0.0);
         return;
     }
@@ -946,7 +954,7 @@ fn planet_forces(
     planet: Res<Planet>,
     mut balls: Query<(&mut Transform, &mut LinearVelocity, &Ball)>,
 ) {
-    if !settings.enabled || mode.family() != VisFamily::Circle {
+    if !settings.enabled || !planet_active(*mode) {
         return;
     }
     let dt = time.delta_secs();
