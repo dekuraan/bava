@@ -61,12 +61,14 @@ jobs:
       - name: Install fftw3 (Windows)
         shell: pwsh
         run: |
-          $url = "https://fftw.org/pub/fftw/fftw-3.3.5-dll64.zip"
-          Invoke-WebRequest -Uri $url -OutFile fftw.zip
+          Invoke-WebRequest -Uri "https://fftw.org/pub/fftw/fftw-3.3.5-dll64.zip" -OutFile fftw.zip
           Expand-Archive fftw.zip -DestinationPath fftw
-          Copy-Item fftw\*.lib $env:CARGO_HOME\.. -ErrorAction SilentlyContinue
-          echo "LIB=${{ github.workspace }}\fftw;$env:LIB" >> $env:GITHUB_ENV
-          echo "INCLUDE=${{ github.workspace }}\fftw;$env:INCLUDE" >> $env:GITHUB_ENV
+          # The zip ships libfftw3-3.lib; cargo links 'fftw3' → MSVC looks for fftw3.lib.
+          $lib = Get-ChildItem fftw -Recurse -Filter "libfftw3-3.lib" | Select-Object -First 1
+          Copy-Item $lib.FullName (Join-Path $lib.DirectoryName "fftw3.lib")
+          $fftwDir = $lib.DirectoryName
+          echo "LIB=$fftwDir;$env:LIB" >> $env:GITHUB_ENV
+          echo "INCLUDE=$fftwDir;$env:INCLUDE" >> $env:GITHUB_ENV
 
       - name: Build
         run: cargo build --release -p bava

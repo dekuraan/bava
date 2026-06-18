@@ -130,6 +130,7 @@ impl LinearResampler {
     }
 
     /// Clear interpolation state (call after a device format/rate change).
+    #[allow(dead_code)]
     pub(super) fn reset(&mut self) {
         self.has_prev = false;
         self.frac = 0.0;
