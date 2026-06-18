@@ -1,14 +1,33 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! On-screen HUD: a dimmed album-art backdrop and a centered now-playing label,
-//! both driven by the [`now_playing`](crate::now_playing) resources.
+//! On-screen HUD: a dimmed album-art backdrop, user-configured background /
+//! foreground image overlays, and a centered now-playing label.
+
+use std::path::PathBuf;
 
 use bevy::prelude::*;
 
 use crate::now_playing::{AlbumArt, NowPlaying};
+use crate::vis::VisSettings;
 
-/// Full-window album-art backdrop sprite.
+/// Full-window album-art backdrop sprite (driven by now-playing metadata).
 #[derive(Component)]
 struct ArtBackground;
+
+/// User-configured background image sprite (from `[vis.background]`).
+#[derive(Component)]
+struct UserBackground;
+
+/// User-configured foreground image sprite (from `[vis.foreground]`).
+#[derive(Component)]
+struct UserForeground;
+
+/// Tracks the last-known paths for the user image layers so we only reload
+/// when the path actually changes.
+#[derive(Resource, Default)]
+struct UserImageState {
+    bg_path: Option<PathBuf>,
+    fg_path: Option<PathBuf>,
+}
 
 /// Now-playing text label (title line).
 #[derive(Component)]
@@ -18,18 +37,26 @@ struct NowPlayingTitle;
 #[derive(Component)]
 struct NowPlayingSub;
 
-/// Album-art backdrop + now-playing label.
+/// Album-art backdrop, user image overlays, and now-playing label.
 pub struct HudPlugin;
 
 impl Plugin for HudPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, setup_hud)
-            .add_systems(Update, (update_background, update_label));
+        app.init_resource::<UserImageState>()
+            .add_systems(Startup, setup_hud)
+            .add_systems(Update, (update_background, update_user_images, update_label));
     }
 }
 
 fn setup_hud(mut commands: Commands) {
-    // Backdrop sits behind the bars (negative Z). Hidden until art arrives.
+    // User background image — behind album art and bars.
+    commands.spawn((
+        Sprite { color: Color::NONE, ..default() },
+        Transform::from_xyz(0.0, 0.0, -12.0),
+        UserBackground,
+    ));
+
+    // Album-art backdrop sits behind the bars. Hidden until art arrives.
     commands.spawn((
         Sprite {
             color: Color::NONE,
@@ -37,6 +64,13 @@ fn setup_hud(mut commands: Commands) {
         },
         Transform::from_xyz(0.0, 0.0, -10.0),
         ArtBackground,
+    ));
+
+    // User foreground image — above bars, below HUD text.
+    commands.spawn((
+        Sprite { color: Color::NONE, ..default() },
+        Transform::from_xyz(0.0, 0.0, 2.0),
+        UserForeground,
     ));
 
     // Centered now-playing block, pinned to the top of the screen. A full-width
@@ -135,5 +169,81 @@ fn update_label(
     }
     for mut t in &mut subs {
         t.0 = sub.clone();
+    }
+}
+
+/// Load and display user-configured background / foreground images from
+/// [`VisSettings::background`] and [`VisSettings::foreground`]. Reloads only
+/// when the path changes; scale and alpha update every frame.
+fn update_user_images(
+    vis: Res<VisSettings>,
+    mut state: ResMut<UserImageState>,
+    asset_server: Res<AssetServer>,
+    images: Res<Assets<Image>>,
+    windows: Query<&Window>,
+    mut bg: Query<(&mut Sprite, &mut Visibility), (With<UserBackground>, Without<UserForeground>)>,
+    mut fg: Query<(&mut Sprite, &mut Visibility), (With<UserForeground>, Without<UserBackground>)>,
+) {
+    let Some(window) = windows.iter().next() else {
+        return;
+    };
+    let (ww, wh) = (window.width(), window.height());
+
+    // --- Background ---
+    if vis.background.path != state.bg_path {
+        state.bg_path = vis.background.path.clone();
+    }
+    for (mut sprite, mut visibility) in &mut bg {
+        match &state.bg_path {
+            Some(path) => {
+                let handle: Handle<Image> = asset_server.load(path.clone());
+                // Cover-fit to window when dimensions are known.
+                if let Some(img) = images.get(&handle) {
+                    let (iw, ih) = (img.width() as f32, img.height() as f32);
+                    if iw > 0.0 && ih > 0.0 {
+                        let scale = (ww / iw).max(wh / ih) * vis.background.scale;
+                        sprite.custom_size = Some(Vec2::new(iw * scale, ih * scale));
+                    }
+                } else {
+                    // Image not yet loaded; fill window at the configured scale.
+                    sprite.custom_size = Some(Vec2::new(ww, wh) * vis.background.scale);
+                }
+                sprite.image = handle;
+                sprite.color = Color::srgba(1.0, 1.0, 1.0, vis.background.alpha);
+                *visibility = Visibility::Visible;
+            }
+            None => {
+                sprite.color = Color::NONE;
+                *visibility = Visibility::Hidden;
+            }
+        }
+    }
+
+    // --- Foreground ---
+    if vis.foreground.path != state.fg_path {
+        state.fg_path = vis.foreground.path.clone();
+    }
+    for (mut sprite, mut visibility) in &mut fg {
+        match &state.fg_path {
+            Some(path) => {
+                let handle: Handle<Image> = asset_server.load(path.clone());
+                if let Some(img) = images.get(&handle) {
+                    let (iw, ih) = (img.width() as f32, img.height() as f32);
+                    if iw > 0.0 && ih > 0.0 {
+                        let scale = (ww / iw).max(wh / ih) * vis.foreground.scale;
+                        sprite.custom_size = Some(Vec2::new(iw * scale, ih * scale));
+                    }
+                } else {
+                    sprite.custom_size = Some(Vec2::new(ww, wh) * vis.foreground.scale);
+                }
+                sprite.image = handle;
+                sprite.color = Color::srgba(1.0, 1.0, 1.0, vis.foreground.alpha);
+                *visibility = Visibility::Visible;
+            }
+            None => {
+                sprite.color = Color::NONE;
+                *visibility = Visibility::Hidden;
+            }
+        }
     }
 }

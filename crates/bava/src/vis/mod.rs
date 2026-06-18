@@ -305,6 +305,11 @@ pub struct VisSettings {
     pub foreground: ImageLayer,
     /// HDR → display tone-mapping curve applied by the camera.
     pub tonemapping: ToneMap,
+    /// Bloom intensity on the HDR camera (0 = no bloom, 0.25 = subtle glow).
+    pub bloom_intensity: f32,
+    /// HDR glow multiplier: how far past 1.0 loud bars are pushed before tone
+    /// mapping. `0.0` disables the per-amplitude brightness boost entirely.
+    pub glow_gain: f32,
 }
 
 impl Default for VisSettings {
@@ -320,7 +325,7 @@ impl Default for VisSettings {
             items_offset: 0.1,
             items_roundness: 0.5,
             hearts: false,
-            inner_radius: 0.5,
+            inner_radius: 0.38,
             rotation: 0.0,
             area_margin: 0.0,
             area_offset: Vec2::ZERO,
@@ -329,6 +334,8 @@ impl Default for VisSettings {
             background: ImageLayer::default(),
             foreground: ImageLayer::default(),
             tonemapping: ToneMap::default(),
+            bloom_intensity: 0.25,
+            glow_gain: 1.8,
         }
     }
 }
@@ -382,14 +389,10 @@ pub(crate) fn spread_monstercat(values: &mut [f32], factor: f32) {
     }
 }
 
-/// Extra brightness applied to full-amplitude colors, pushing them past 1.0 into
-/// HDR range so the camera's bloom makes peaks glow. `0.0` disables the glow.
-const GLOW_GAIN: f32 = 1.8;
-
 /// Linear gradient color by amplitude `t` (0..1) between two endpoints, boosted
-/// into HDR range as `t` rises so loud bars bloom (see [`GLOW_GAIN`]). At `t = 0`
-/// the color is unchanged.
-pub(crate) fn gradient_color(lo: Color, hi: Color, t: f32) -> Color {
+/// into HDR range as `t` rises so loud bars bloom. `glow_gain` scales how far past
+/// 1.0 the color is pushed; `0.0` disables HDR glow.
+pub(crate) fn gradient_color(lo: Color, hi: Color, t: f32, glow_gain: f32) -> Color {
     let a = lo.to_srgba();
     let b = hi.to_srgba();
     let t = t.clamp(0.0, 1.0);
@@ -399,10 +402,8 @@ pub(crate) fn gradient_color(lo: Color, hi: Color, t: f32) -> Color {
         a.blue + (b.blue - a.blue) * t,
         0.95,
     );
-    // Scale linear RGB by an amplitude-driven gain; values > 1 bloom. Alpha is
-    // left untouched so translucent fills stay translucent.
     let lin = base.to_linear();
-    let glow = 1.0 + t * GLOW_GAIN;
+    let glow = 1.0 + t * glow_gain;
     Color::linear_rgba(lin.red * glow, lin.green * glow, lin.blue * glow, lin.alpha)
 }
 

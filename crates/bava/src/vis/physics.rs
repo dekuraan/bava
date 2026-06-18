@@ -251,14 +251,18 @@ impl Plugin for PhysicsPlugin {
 /// Whether the spectrum **column** pool drives physics this frame: the
 /// floor-anchored, un-mirrored Bars/Levels box modes.
 fn columns_active(mode: DrawingMode, vis: &VisSettings) -> bool {
+    use crate::vis::Direction;
     mode.family() == VisFamily::Box
         && matches!(mode.shape(), VisShape::Bars | VisShape::Levels)
         && vis.mirror == MirrorMode::Off
+        // Physics column colliders are floor-anchored (BottomTop only).
+        && vis.direction == Direction::BottomTop
 }
 
 /// Whether the **Wave** heightfield drives physics this frame.
-fn wave_active(mode: DrawingMode) -> bool {
-    mode == DrawingMode::WaveBox
+fn wave_active(mode: DrawingMode, vis: &VisSettings) -> bool {
+    use crate::vis::Direction;
+    mode == DrawingMode::WaveBox && vis.direction == Direction::BottomTop
 }
 
 /// Whether the **planet** blob drives physics this frame. The smooth WaveCircle
@@ -270,7 +274,7 @@ fn planet_active(mode: DrawingMode) -> bool {
 
 /// Whether physics is supported at all in this mode (otherwise: inert).
 fn physics_supported(mode: DrawingMode, vis: &VisSettings) -> bool {
-    planet_active(mode) || columns_active(mode, vis) || wave_active(mode)
+    planet_active(mode) || columns_active(mode, vis) || wave_active(mode, vis)
 }
 
 /// Spawn the boundary walls, the kinematic Wave heightfield, and the planet body.
@@ -443,7 +447,7 @@ fn spawn_ball_on_click(
         (settings.radius, settings.restitution, settings.air_resistance, settings.mass, 0.5)
     };
 
-    let color = gradient_color(vis.fg_lo(), vis.fg_hi(), tint);
+    let color = gradient_color(vis.fg_lo(), vis.fg_hi(), tint, vis.glow_gain);
     let id = counter.0;
     counter.0 += 1;
 
@@ -587,7 +591,7 @@ fn update_surface(
     let (w, h) = (window.width(), window.height());
     let floor = -h / 2.0;
     let dt = time.delta_secs();
-    let active = wave_active(*mode);
+    let active = wave_active(*mode, &vis);
 
     // Save last frame's heights for the velocity field, then compute targets.
     // Reborrow so the two fields can be split-borrowed past `ResMut`'s Deref.
@@ -636,12 +640,13 @@ fn update_surface(
 fn push_balls(
     mode: Res<DrawingMode>,
     settings: Res<PhysicsSettings>,
+    vis: Res<VisSettings>,
     time: Res<Time>,
     windows: Query<&Window>,
     surface: Res<Surface>,
     mut balls: Query<(&mut Transform, &mut LinearVelocity, &Ball)>,
 ) {
-    if !settings.enabled || !wave_active(*mode) {
+    if !settings.enabled || !wave_active(*mode, &vis) {
         return;
     }
     let dt = time.delta_secs();
@@ -920,7 +925,7 @@ fn update_planet(
         return;
     }
     spread_monstercat(&mut values, vis.monstercat);
-    let ring = blob_ring(&values, extent);
+    let ring = blob_ring(&values, extent, vis.inner_radius, vis.rotation);
     let n = ring.len();
     if n < 3 {
         return;

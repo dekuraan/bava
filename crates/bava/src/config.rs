@@ -201,6 +201,10 @@ pub struct VisConfig {
     /// `"somewhat_boring_display_transform"`, `"tony_mc_mapface"` or
     /// `"blender_filmic"`.
     pub tonemapping: ToneMap,
+    /// HDR camera bloom intensity (0 = off, 0.25 = subtle glow).
+    pub bloom_intensity: f32,
+    /// HDR glow multiplier applied to loud bars (0 = no boost, 1.8 = default).
+    pub glow_gain: f32,
 }
 
 /// `[[vis.profile]]` — a named color scheme.
@@ -359,6 +363,8 @@ impl Config {
                 background: ImageConfig::from(&vis.background),
                 foreground: ImageConfig::from(&vis.foreground),
                 tonemapping: vis.tonemapping,
+                bloom_intensity: vis.bloom_intensity,
+                glow_gain: vis.glow_gain,
             },
             physics: PhysicsConfig {
                 enabled: physics.enabled,
@@ -598,6 +604,8 @@ impl Config {
             background: ImageLayer::from(&v.background),
             foreground: ImageLayer::from(&v.foreground),
             tonemapping: v.tonemapping,
+            bloom_intensity: v.bloom_intensity,
+            glow_gain: v.glow_gain,
         }
     }
 

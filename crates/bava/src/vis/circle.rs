@@ -37,10 +37,18 @@ use crate::vis::{
 
 /// Segments around the ring. Higher = smoother curve.
 const SEGMENTS: usize = 256;
-/// Resting radius as a fraction of the smaller window dimension.
-const BASE_FRAC: f32 = 0.16;
-/// How far peaks push outward, as a fraction of the smaller window dimension.
-const AMP_FRAC: f32 = 0.26;
+/// Maximum visual radius of the circle visualizer as a fraction of the smaller
+/// window dimension. The inner-ring position and peak amplitude both draw from
+/// this budget, controlled by [`VisSettings::inner_radius`].
+const MAX_RADIUS_FRAC: f32 = 0.42;
+
+/// Resolve `base` (inner ring radius) and `amp` (peak outward reach) from the
+/// `inner_radius` setting (0 = bars from center, 1 = no space for bars).
+fn circle_radii(extent: f32, inner_radius: f32) -> (f32, f32) {
+    let r = inner_radius.clamp(0.0, 0.95);
+    let total = extent * MAX_RADIUS_FRAC;
+    (total * r, total * (1.0 - r))
+}
 
 /// Handles for the fill mesh/material so they can be updated each frame.
 #[derive(Resource)]
@@ -206,8 +214,9 @@ fn update_circle_bars(
     }
     spread_monstercat(&mut values, vis.monstercat);
 
-    let (base, amp) = (extent * BASE_FRAC, extent * AMP_FRAC);
+    let (base, amp) = circle_radii(extent, vis.inner_radius);
     let (lo, hi) = (vis.fg_lo(), vis.fg_hi());
+    let glow = vis.glow_gain;
     // Tangential slot width from the base-ring circumference, minus the gap.
     let slot_w = (TAU * base / n as f32).max(1.0);
     let bar_w = (slot_w - BAR_GAP).max(1.0);
@@ -219,11 +228,11 @@ fn update_circle_bars(
         }
         *visibility = Visibility::Visible;
         let v = values[bar.0].clamp(0.0, 1.5);
-        let ang = bar.0 as f32 / n as f32 * TAU - FRAC_PI_2; // start at the top
+        // Apply vis.rotation to the starting angle.
+        let ang = bar.0 as f32 / n as f32 * TAU - FRAC_PI_2 + vis.rotation;
         let (cos, sin) = (ang.cos(), ang.sin());
 
         // Each shape resolves to (radius of the rect center, half extents, rotation).
-        // For spokes, local +y is radial (length) and +x tangential (width).
         let (radius, half, rot) = match bar_shape {
             VisShape::Bars => {
                 let len = (amp * v).max(1.0);
@@ -235,12 +244,10 @@ fn update_circle_bars(
                 (base + len * 0.5, Vec2::new(bar_w * 0.5, len * 0.5), ang - FRAC_PI_2)
             }
             VisShape::Particles => {
-                // A small square floating at the bar's radial level.
                 let dot = bar_w.max(2.0);
                 (base + amp * v, Vec2::splat(dot * 0.5), 0.0)
             }
             VisShape::Spine => {
-                // A square on the base ring, side growing with the level.
                 let side = (bar_w * (0.35 + v)).clamp(2.0, amp.max(2.0));
                 (base, Vec2::splat(side * 0.5), 0.0)
             }
@@ -252,7 +259,7 @@ fn update_circle_bars(
 
         if let Some(mesh) = meshes.get_mut(&mesh2d.0) {
             let round = vis.items_roundness.clamp(0.0, 1.0) * half.x.min(half.y);
-            let color = gradient_color(lo, hi, v.min(1.0));
+            let color = gradient_color(lo, hi, v.min(1.0), glow);
             apply_rounded_rect(mesh, half, round, STROKE_FEATHER, color);
         }
     }
@@ -298,19 +305,21 @@ fn sample(values: &[f32], t: f32) -> f32 {
 }
 
 /// The blob ring vertices for `values` (already monstercat-spread), matching the
-/// rendered outline/fill. `extent` is the smaller window dimension. Exposed so
-/// the physics planet collider can track the visual shape exactly.
-pub(crate) fn blob_ring(values: &[f32], extent: f32) -> Vec<Vec2> {
-    let (base, amp) = (extent * BASE_FRAC, extent * AMP_FRAC);
-    (0..SEGMENTS).map(|k| ring_point(values, k, base, amp).0).collect()
+/// rendered outline/fill. `extent` is the smaller window dimension,
+/// `inner_radius` and `rotation` mirror the live [`VisSettings`] so the physics
+/// collider tracks the visual exactly.
+pub(crate) fn blob_ring(values: &[f32], extent: f32, inner_radius: f32, rotation: f32) -> Vec<Vec2> {
+    let (base, amp) = circle_radii(extent, inner_radius);
+    (0..SEGMENTS).map(|k| ring_point(values, k, base, amp, rotation).0).collect()
 }
 
-/// Position of ring point `k` for a given spectrum, base radius and amplitude.
-fn ring_point(values: &[f32], k: usize, base: f32, amp: f32) -> (Vec2, f32) {
+/// Position of ring point `k` for a given spectrum, base radius, amplitude and
+/// angular offset.
+fn ring_point(values: &[f32], k: usize, base: f32, amp: f32, rotation: f32) -> (Vec2, f32) {
     let t = k as f32 / SEGMENTS as f32;
     let v = sample(values, t).clamp(0.0, 1.5);
     let r = base + amp * v;
-    let ang = t * TAU - FRAC_PI_2; // start at the top
+    let ang = t * TAU - FRAC_PI_2 + rotation;
     (Vec2::new(ang.cos() * r, ang.sin() * r), v)
 }
 
@@ -348,18 +357,19 @@ fn update_ring(
         return;
     }
     spread_monstercat(&mut values, vis.monstercat);
-    let (base, amp) = (extent * BASE_FRAC, extent * AMP_FRAC);
+    let (base, amp) = circle_radii(extent, vis.inner_radius);
+    let rot = vis.rotation;
 
     let (lo, hi) = (vis.fg_lo(), vis.fg_hi());
+    let glow = vis.glow_gain;
     let pts: Vec<(Vec2, Color)> = (0..SEGMENTS)
         .map(|k| {
-            let (pos, v) = ring_point(&values, k, base, amp);
-            (pos, gradient_color(lo, hi, v.min(1.0)))
+            let (pos, v) = ring_point(&values, k, base, amp, rot);
+            (pos, gradient_color(lo, hi, v.min(1.0), glow))
         })
         .collect();
 
     if let Some(mesh) = meshes.get_mut(&ring.mesh) {
-        // `closed` joins the ring; half-width follows the line-thickness setting.
         apply_stroke(mesh, &pts, vis.line_thickness * 0.5, STROKE_FEATHER, true);
     }
 }
@@ -396,14 +406,15 @@ fn update_fill(
         return;
     }
     spread_monstercat(&mut values, vis.monstercat);
-    let (base, amp) = (extent * BASE_FRAC, extent * AMP_FRAC);
+    let (base, amp) = circle_radii(extent, vis.inner_radius);
+    let rot = vis.rotation;
 
     if let Some(mesh) = meshes.get_mut(&fill.mesh) {
         let mut positions = Vec::with_capacity(SEGMENTS + 1);
         positions.push([0.0, 0.0, 0.0]); // center
         let mut peak = 0.0f32;
         for k in 0..SEGMENTS {
-            let (pos, v) = ring_point(&values, k, base, amp);
+            let (pos, v) = ring_point(&values, k, base, amp, rot);
             peak = peak.max(v);
             positions.push([pos.x, pos.y, 0.0]);
         }
@@ -411,7 +422,7 @@ fn update_fill(
 
         // Tint the fill by loudness; keep it translucent so art shows through.
         if let Some(mat) = materials.get_mut(&fill.material) {
-            mat.color = gradient_color(vis.fg_lo(), vis.fg_hi(), peak).with_alpha(0.28);
+            mat.color = gradient_color(vis.fg_lo(), vis.fg_hi(), peak, vis.glow_gain).with_alpha(0.28);
         }
     }
 }

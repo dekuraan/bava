@@ -146,6 +146,10 @@ fn editor_ui(
                 ui.separator();
                 colors_section(ui, &mut vis);
                 ui.separator();
+                image_section(ui, &mut vis);
+                ui.separator();
+                physics_section(ui, &mut physics);
+                ui.separator();
                 audio_section(ui, &mut cava, &mut rebuild, &mut editor.status);
             });
             if !editor.status.is_empty() {
@@ -245,6 +249,32 @@ fn persistence_section(
             }
         });
     });
+
+    ui.collapsing("GUI settings", |ui| {
+        enum_combo(ui, "Toggle key", &mut editor.toggle_key, &[
+            (KeyCode::KeyP, "P"),
+            (KeyCode::KeyO, "O"),
+            (KeyCode::KeyI, "I"),
+            (KeyCode::KeyG, "G"),
+            (KeyCode::KeyH, "H"),
+            (KeyCode::KeyJ, "J"),
+            (KeyCode::KeyK, "K"),
+            (KeyCode::KeyM, "M"),
+            (KeyCode::KeyU, "U"),
+            (KeyCode::F1, "F1"),
+            (KeyCode::F2, "F2"),
+            (KeyCode::F5, "F5"),
+            (KeyCode::F6, "F6"),
+            (KeyCode::Tab, "Tab"),
+            (KeyCode::Backquote, "`"),
+            (KeyCode::Insert, "Insert"),
+        ]);
+        ui.label(
+            egui::RichText::new("Change takes effect immediately. Save to persist.")
+                .weak()
+                .small(),
+        );
+    });
 }
 
 /// Drawing-mode selector.
@@ -310,6 +340,16 @@ fn colors_section(ui: &mut egui::Ui, vis: &mut VisSettings) {
         (ToneMap::ReinhardLuminance, "Reinhard (luminance)"),
         (ToneMap::SomewhatBoringDisplayTransform, "Neutral"),
     ]);
+    ui.add(
+        egui::Slider::new(&mut vis.bloom_intensity, 0.0..=2.0)
+            .text("bloom intensity")
+            .step_by(0.01),
+    );
+    ui.add(
+        egui::Slider::new(&mut vis.glow_gain, 0.0..=6.0)
+            .text("glow gain (HDR)")
+            .step_by(0.05),
+    );
     ui.separator();
 
     if vis.profiles.is_empty() {
@@ -430,6 +470,138 @@ fn audio_section(
                 .small(),
         );
     });
+}
+
+/// Image overlay controls: user-supplied background and foreground images.
+fn image_section(ui: &mut egui::Ui, vis: &mut VisSettings) {
+    ui.label(egui::RichText::new("Images").strong());
+
+    ui.collapsing("Background image", |ui| {
+        let mut path_str = vis
+            .background
+            .path
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        ui.horizontal(|ui| {
+            ui.label("path");
+            if ui.text_edit_singleline(&mut path_str).changed() {
+                vis.background.path = if path_str.trim().is_empty() {
+                    None
+                } else {
+                    Some(std::path::PathBuf::from(path_str.trim()))
+                };
+            }
+        });
+        if vis.background.path.is_some() && ui.button("Clear").clicked() {
+            vis.background.path = None;
+        }
+        ui.label(egui::RichText::new("Absolute path or relative to working dir.").weak().small());
+        ui.add(egui::Slider::new(&mut vis.background.scale, 0.1..=4.0).text("scale"));
+        ui.add(egui::Slider::new(&mut vis.background.alpha, 0.0..=1.0).text("alpha"));
+    });
+
+    ui.collapsing("Foreground overlay", |ui| {
+        let mut path_str = vis
+            .foreground
+            .path
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        ui.horizontal(|ui| {
+            ui.label("path");
+            if ui.text_edit_singleline(&mut path_str).changed() {
+                vis.foreground.path = if path_str.trim().is_empty() {
+                    None
+                } else {
+                    Some(std::path::PathBuf::from(path_str.trim()))
+                };
+            }
+        });
+        if vis.foreground.path.is_some() && ui.button("Clear").clicked() {
+            vis.foreground.path = None;
+        }
+        ui.label(egui::RichText::new("Rendered above bars, below HUD text.").weak().small());
+        ui.add(egui::Slider::new(&mut vis.foreground.scale, 0.1..=4.0).text("scale"));
+        ui.add(egui::Slider::new(&mut vis.foreground.alpha, 0.0..=1.0).text("alpha"));
+    });
+}
+
+/// Physics playground tunables.
+fn physics_section(ui: &mut egui::Ui, physics: &mut PhysicsSettings) {
+    ui.label(egui::RichText::new("Physics").strong());
+    ui.checkbox(&mut physics.enabled, "Enabled");
+
+    if !physics.enabled {
+        return;
+    }
+
+    ui.add(
+        egui::Slider::new(&mut physics.gravity, 0.0..=5000.0)
+            .text("gravity (px/s²)")
+            .step_by(10.0),
+    );
+    ui.add(
+        egui::Slider::new(&mut physics.restitution, 0.0..=1.0)
+            .text("ball restitution")
+            .step_by(0.01),
+    );
+    ui.add(
+        egui::Slider::new(&mut physics.air_resistance, 0.0..=5.0)
+            .text("air resistance")
+            .step_by(0.01),
+    );
+    ui.add(egui::Slider::new(&mut physics.mass, 0.1..=10.0).text("ball mass").step_by(0.1));
+    ui.add(egui::Slider::new(&mut physics.radius, 2.0..=80.0).text("ball radius (px)"));
+
+    let mut max = physics.max_balls as u32;
+    if ui
+        .add(egui::Slider::new(&mut max, 1..=2000).text("max balls"))
+        .changed()
+    {
+        physics.max_balls = max as usize;
+    }
+
+    ui.checkbox(&mut physics.randomize, "Randomize per ball");
+
+    ui.collapsing("Surface / wave", |ui| {
+        ui.add(
+            egui::Slider::new(&mut physics.bar_smoothing, 0.005..=1.0)
+                .text("smoothing (s)")
+                .step_by(0.005),
+        );
+        ui.add(
+            egui::Slider::new(&mut physics.bar_restitution, 0.0..=2.0)
+                .text("surface restitution")
+                .step_by(0.01),
+        );
+        ui.add(
+            egui::Slider::new(&mut physics.bar_push, 0.0..=10.0)
+                .text("launch gain")
+                .step_by(0.05),
+        );
+    });
+
+    ui.add(
+        egui::Slider::new(&mut physics.central_gravity, 0.0..=5000.0)
+            .text("central gravity (circle)")
+            .step_by(10.0),
+    );
+
+    ui.collapsing("Trails", |ui| {
+        ui.checkbox(&mut physics.trails, "Ball trails");
+        if physics.trails {
+            let mut tlen = physics.trail_length as u32;
+            if ui
+                .add(egui::Slider::new(&mut tlen, 1..=120).text("trail length"))
+                .changed()
+            {
+                physics.trail_length = tlen as usize;
+            }
+        }
+    });
+
+    ui.checkbox(&mut physics.debug_draw, "Debug colliders (F3)");
 }
 
 // --- Small UI helpers -------------------------------------------------------
