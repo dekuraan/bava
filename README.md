@@ -1,80 +1,116 @@
 # bava
 
-A [Bevy](https://bevyengine.org/) music visualizer for Linux, driven by
-[cavacore](https://github.com/karlstav/cava) (the analysis engine from CAVA),
-with now-playing metadata and album art over MPRIS (e.g. spotifyd).
+A cross-platform music visualizer built with [Bevy](https://bevyengine.org/),
+driven by [cavacore](https://github.com/karlstav/cava) (the DSP engine from CAVA).
+Loopback audio capture feeds the analyzer, which publishes smoothed frequency bars
+into a Bevy resource every frame; visualizers read that resource and render in
+real-time. Now-playing metadata and album art are pulled from the OS media session.
 
-## Status
+| Platform | Audio capture | Now-playing |
+|---|---|---|
+| Linux | PulseAudio monitor (works via pipewire-pulse) | MPRIS over D-Bus |
+| Windows | WASAPI shared-mode loopback | GlobalSystemMediaTransportControls (GSMTC) |
+| macOS 14.2+ | Core Audio process tap (no extra install) | MediaRemote adapter |
 
-Working vertical slice:
+## Features
 
-- **Audio → cavacore → `Cava` resource**: PulseAudio captures the default sink's
-  monitor (works through pipewire-pulse), cavacore turns it into smoothed,
-  log-spaced frequency bars, published into a Bevy resource every frame.
-- **2D bars / monstercat visualizer**: one sprite per bar, growing from the
-  bottom with a cyan→magenta amplitude-lit gradient.
-- **MPRIS**: a background thread tracks the active player, surfacing title /
-  artist / album in a HUD label and fetching + decoding album art into a dimmed
-  full-window backdrop.
+- **11 visualizer modes** — Space cycles: Bars, Levels, Particles, Spine, Wave,
+  Splitter (box family) and Circle variants. All modes support mirror/direction
+  and a configurable color theme with HDR bloom.
+- **Physics mode** — avian2d rigid bodies react to the frequency bars; balls
+  spawn, collide, and fade with color trails.
+- **In-app settings editor** — press `p` (configurable) for a live egui overlay
+  covering all vis, DSP, and color options. Changes apply instantly; DSP/source
+  changes need an explicit Apply.
+- **Album art + now-playing HUD** — title, artist, and album art as a dimmed
+  full-window backdrop. Degrades gracefully when no player is active.
+- **Config file + profiles** — `~/.config/bava/config.toml` (auto-created on
+  first run), with named profile snapshots under `~/.config/bava/profiles/`.
+  CLI flags override file values. Load a profile with `--profile NAME`.
 
-Everything degrades gracefully: no audio server, no MPRIS player, or no album
-art just leaves the corresponding piece idle — the app still runs.
+## Build & run
+
+Requires [Rust stable](https://rustup.rs/) and fftw3 on all platforms.
+
+### Linux
+
+```sh
+# Arch/CachyOS
+sudo pacman -S fftw libpulse dbus libxkbcommon wayland libx11 vulkan-icd-loader
+
+cargo run -p bava
+# If the shell lacks a Wayland socket: WAYLAND_DISPLAY=wayland-1 cargo run -p bava
+```
+
+### Windows
+
+Install [fftw3 pre-built DLLs](https://fftw.org/install/windows.html) and put
+them on `PATH`/`LIB`, then:
+
+```sh
+cargo build --release -p bava
+```
+
+### macOS (14.2+)
+
+```sh
+brew install fftw
+
+# The mediaremote-adapter is required for now-playing metadata. Install it and
+# set BAVA_MEDIAREMOTE_ADAPTER_DIR to its directory before running:
+# https://github.com/ungive/mediaremote-adapter
+export BAVA_MEDIAREMOTE_ADAPTER_DIR=/path/to/adapter
+cargo run -p bava
+```
+
+The first launch prompts for the **Audio Recording** permission (needed for the
+Core Audio process tap). Without it the app runs without audio capture.
+
+### Tests
+
+```sh
+cargo test -p cavacore-rs   # ~20 DSP safety and correctness tests
+```
 
 ## Workspace layout
 
 ```
 crates/
-  cavacore-sys/   # raw FFI + build.rs compiling vendored upstream cavacore.c (links fftw3)
-  cavacore-rs/    # safe wrapper: CavaConfig -> CavaPlan, validated, Send, no-UB; rigorous tests
-  bava/           # the Bevy app
-    src/cava/     # CavaPlugin, Cava resource, capture thread
-    src/cava/capture/  # AudioCapture trait + PulseAudio backend (trait-abstracted for future PipeWire)
-    src/mpris/    # MprisPlugin: NowPlaying + AlbumArt resources
-    src/vis/      # VisPlugin: bars visualizer + HUD
+  cavacore-sys/        # FFI + build.rs compiling vendored cavacore.c (links fftw3)
+  cavacore-rs/         # safe CavaConfig → CavaPlan wrapper; rigorous test suite
+  bava/
+    src/cava/          # CavaPlugin, Cava resource, capture thread, feed_cava system
+    src/cava/capture/  # AudioCapture trait; backends: pulse.rs / wasapi.rs / coreaudio.rs
+    src/mpris/         # NowPlaying + AlbumArt resources; backends: linux / windows / macos
+    src/vis/           # VisPlugin: all visualizer modes, HUD, physics, stroke mesh helpers
+    src/gui/           # in-app settings editor (bevy_egui)
+    src/config.rs      # config.toml ↔ runtime *Settings resources; CLI via clap
 ```
 
-## Build & run
+## Key bindings
 
-Requires (all present on a typical Arch/CachyOS desktop): a C compiler, `fftw3`,
-`libpulse`, `dbus`, and the usual Bevy Linux deps (`alsa`, `udev`, Vulkan).
+| Key | Action |
+|---|---|
+| Space | Cycle visualizer mode |
+| p | Toggle settings editor (configurable via `[gui] toggle_key`) |
+| F3 | Toggle avian2d collider debug overlay |
 
-```sh
-cargo run -p bava        # or just `cargo run`
-cargo test -p cavacore-rs # 20 safety + DSP tests
-```
+## Extending
 
-Play something (Spotify via spotifyd, a browser, anything that hits the default
-output) and the bars react. Album art and track info appear when an MPRIS player
-is active.
-
-## Configuration
-
-Insert a `CavaSettings` resource before adding `CavaPlugin` to override defaults
-(bars-per-channel, channels, sample rate, frame size, noise reduction, cut-off
-band, or a pinned capture source).
-
-## Extending: 2D, 3D and shader visualizers
-
-Every visualizer reads the same `Cava` resource, so new styles are independent
-plugins:
+Every visualizer reads the same `Cava` resource:
 
 ```rust
-fn my_vis(cava: Res<bava::cava::Cava>, /* your query */) {
-    let bars = cava.mono();      // Vec<f32>, per-bar magnitude (≈0..1)
-    let left = cava.left();      // &[f32]   left channel
-    let right = cava.right();    // &[f32]   right channel (empty in mono)
+fn my_vis(cava: Res<bava::cava::Cava>) {
+    let mono  = cava.mono();   // &[f32]  average of left+right
+    let left  = cava.left();   // &[f32]  left channel
+    let right = cava.right();  // &[f32]  right channel (empty in mono mode)
     // drive meshes, transforms, materials, or shader uniforms from these
 }
 ```
 
-Planned directions (the architecture already supports them):
-
-- **3D scenes**: spawn a 3D camera + meshes in a plugin and modulate transforms /
-  emissive materials from `Cava`.
-- **Shader visualizers**: feed the bars into a custom `Material` / uniform buffer
-  and render a fullscreen quad.
-- **Native PipeWire capture**: add a second `AudioCapture` impl alongside the
-  PulseAudio one and select by config.
+New visualizer plugins are independent: spawn their own camera/mesh entities and
+add a system that reads `Cava`. The existing modes in `vis/` are self-contained
+examples.
 
 ## License
 
@@ -83,12 +119,5 @@ bava is licensed under the **GNU General Public License v3.0 or later**
 (GPL-2.0-or-later) via cavacore, so distributed binaries are a combined work
 conveyed under the GPL.
 
-The project's own source could stand alone under a permissive license, but the
-FFTW linkage makes the shipped program copyleft. If you need a permissive
-binary, swap FFTW for a non-GPL FFT (e.g. PFFFT/KISS FFT or `rustfft`).
-
-## Credits
-
 Vendors `cavacore.c` / `cavacore.h` from [karlstav/cava](https://github.com/karlstav/cava)
-(MIT, see `crates/cavacore-sys/vendor/cava/LICENSE`) — MIT is GPL-compatible, so
-its terms are preserved within this GPL-licensed work.
+(MIT, GPL-compatible; terms preserved in `crates/cavacore-sys/vendor/cava/LICENSE`).
