@@ -3,9 +3,10 @@
 //!
 //! A background thread polls the active media session — MPRIS over D-Bus on
 //! Linux ([`linux`]), the System Media Transport Controls on Windows
-//! ([`windows`]) — publishing track metadata into the [`NowPlaying`] resource and
-//! decoded album art into the [`AlbumArt`] resource. The Bevy systems here only
-//! drain a channel, so the platform APIs never block the render loop.
+//! ([`windows`]), or the MediaRemote adapter on macOS ([`macos`]) — publishing
+//! track metadata into the [`NowPlaying`] resource and decoded album art into the
+//! [`AlbumArt`] resource. The Bevy systems here only drain a channel, so the
+//! platform APIs never block the render loop.
 
 use std::thread;
 

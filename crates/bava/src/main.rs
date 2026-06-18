@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! bava — a Bevy music visualizer driven by cavacore, MPRIS and spotifyd.
+//! bava — a cross-platform music visualizer driven by cavacore.
 //!
-//! Pipeline: PulseAudio monitor capture → cavacore analysis → the [`Cava`]
-//! resource → visualizers. MPRIS supplies now-playing metadata and album art.
+//! Pipeline: loopback audio capture (PulseAudio / WASAPI / Core Audio) →
+//! cavacore analysis → the [`Cava`] resource → visualizers. OS media session
+//! integration (MPRIS / GSMTC / MediaRemote) supplies now-playing metadata and
+//! album art.
 //!
 //! [`Cava`]: cava::Cava
 
