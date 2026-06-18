@@ -83,6 +83,8 @@ pub enum CaptureError {
     /// The backend could not be initialized (no server, bad device, ...).
     Init(String),
     /// A read failed; usually transient.
+    // Only constructed by the PulseAudio backend; retained for completeness.
+    #[allow(dead_code)]
     Read(String),
 }
 

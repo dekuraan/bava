@@ -44,7 +44,8 @@ pub struct NowPlaying {
     pub title: Option<String>,
     pub artist: Option<String>,
     pub album: Option<String>,
-    /// Raw `mpris:artUrl`, retained for debugging.
+    /// Raw `mpris:artUrl`, retained for debugging; read only on Linux.
+    #[allow(dead_code)]
     pub art_url: Option<String>,
 }
 
