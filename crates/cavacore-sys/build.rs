@@ -29,7 +29,11 @@ fn main() {
     if pkg_config::link_lib("fftw3").is_err() {
         println!("cargo:rustc-link-lib=fftw3");
     }
-    println!("cargo:rustc-link-lib=m");
+    // libm is a separate library on Unix; on Windows the math functions are
+    // part of the C runtime so there is no m.lib to link against.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        println!("cargo:rustc-link-lib=m");
+    }
 }
 
 // Minimal inline pkg-config shim so we don't pull a dependency just for the
