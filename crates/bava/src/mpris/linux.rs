@@ -6,6 +6,7 @@
 //! YouTube thumbnail fallback for players that expose no art URL.
 
 use std::io::Read;
+use std::os::unix::ffi::OsStrExt;
 use std::thread;
 use std::time::Duration;
 
@@ -99,9 +100,36 @@ fn youtube_thumbnail(page_url: &str) -> Option<String> {
     Some(format!("https://i.ytimg.com/vi/{id}/hqdefault.jpg"))
 }
 
+/// Percent-decode a URL path (`%20` → space, etc.) into raw bytes. Music library
+/// `file://` art URLs routinely contain encoded spaces / non-ASCII; passing the
+/// literal path to `fs::read` would otherwise always miss.
+fn percent_decode(s: &str) -> Vec<u8> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(h), Some(l)) =
+                ((bytes[i + 1] as char).to_digit(16), (bytes[i + 2] as char).to_digit(16))
+        {
+            out.push((h * 16 + l) as u8);
+            i += 3;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    out
+}
+
 /// Fetch album art from an `http(s)://` or `file://` URL and decode to RGBA8.
 fn fetch_and_decode_art(url: &str) -> Option<DecodedArt> {
     let bytes = if let Some(path) = url.strip_prefix("file://") {
+        // Percent-decode and drop any `localhost`/empty authority before the path.
+        let path = path.strip_prefix("localhost").unwrap_or(path);
+        let decoded = percent_decode(path);
+        let path = std::path::Path::new(std::ffi::OsStr::from_bytes(&decoded));
         std::fs::read(path).ok()?
     } else if url.starts_with("http://") || url.starts_with("https://") {
         let resp = ureq::get(url).call().ok()?;

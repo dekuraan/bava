@@ -247,7 +247,11 @@ fn capture_reader(settings: CavaSettings, ring: AudioRing) {
 
     while ring.running.load(Ordering::Relaxed) {
         if let Err(e) = capture.read(&mut buf) {
+            // Back off before retrying: if the server died or the source was
+            // removed, read() errors immediately every call, which would spin
+            // a core at 100% and flood the log without this pause.
             error!("bava: {e}");
+            thread::sleep(std::time::Duration::from_millis(100));
             continue;
         }
         if let Ok(mut q) = ring.buf.lock() {

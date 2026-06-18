@@ -1,12 +1,24 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Smooth circular visualizer.
+//! Circular ([`VisFamily::Circle`]) visualizers.
 //!
-//! Draws a closed ring whose radius is modulated by the spectrum. The spectrum
-//! is folded by angle about the vertical axis (so the ring is left/right
-//! symmetric) and smoothstep-interpolated across many segments, giving a
-//! continuously deforming smooth blob. The outline is drawn with gizmos; an
-//! optional translucent fill is a deforming triangle-fan [`Mesh2d`]. Both are
-//! rebuilt from the [`Cava`] resource every frame.
+//! Renders every circle-family [`DrawingMode`] as a *distinct* shape, switching
+//! on [`DrawingMode::shape`]:
+//!
+//! - **Wave** — a closed ring whose radius is modulated by the spectrum (the
+//!   spectrum is folded by angle about the vertical axis so the ring is
+//!   left/right symmetric and smoothstep-interpolated across many segments,
+//!   giving a continuously deforming smooth blob). The outline is a
+//!   feather-antialiased stroke [`Mesh2d`]; an optional translucent fill is a
+//!   deforming triangle-fan [`Mesh2d`].
+//! - **Bars** — radial spectrum spokes growing outward from a base ring.
+//! - **Levels** — radial spokes whose length snaps to discrete VU steps.
+//! - **Particles** — one small square per bar floating at its radial level.
+//! - **Spine** — squares on the base ring, growing with level.
+//!
+//! Bars/Levels/Particles/Spine reuse a one-mesh-per-bar pool of rounded-rect
+//! [`Mesh2d`]s (kept in sync with the live bar count by [`reconcile_circle_bars`],
+//! analogous to the box bar pool); Wave uses the ring stroke + fill, hidden while
+//! a blocky shape is active. All are rebuilt from the [`Cava`] resource each frame.
 
 use std::f32::consts::{FRAC_PI_2, TAU};
 
@@ -14,9 +26,14 @@ use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
-use crate::cava::Cava;
-use crate::vis::stroke::{apply_stroke, empty_stroke_mesh, stroke_material, STROKE_FEATHER};
-use crate::vis::{gradient_color, spread_monstercat, DrawingMode, VisFamily, VisSettings};
+use crate::cava::{Cava, CavaSettings};
+use crate::vis::bars::{BAR_GAP, LEVEL_STEPS};
+use crate::vis::stroke::{
+    apply_rounded_rect, apply_stroke, empty_stroke_mesh, stroke_material, STROKE_FEATHER,
+};
+use crate::vis::{
+    gradient_color, spread_monstercat, DrawingMode, VisFamily, VisSettings, VisShape,
+};
 
 /// Segments around the ring. Higher = smoother curve.
 const SEGMENTS: usize = 256;
@@ -46,22 +63,45 @@ struct FillBlob;
 #[derive(Component)]
 struct RingStroke;
 
-/// Smooth circular visualizer plugin.
+/// Marks a radial bar mesh and records which Cava bar index it renders (for the
+/// Bars/Levels/Particles/Spine circle shapes).
+#[derive(Component)]
+struct CircleBar(usize);
+
+/// Shared blend material for the radial bar meshes (per-vertex color supplies the
+/// hue), mirroring the box bar pool.
+#[derive(Resource)]
+struct CircleBarMaterial(Handle<ColorMaterial>);
+
+/// Circular visualizer plugin.
 pub struct CirclePlugin;
 
 impl Plugin for CirclePlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, setup_circle)
-            .add_systems(Update, (update_ring, update_fill));
+        app.add_systems(Startup, setup_circle).add_systems(
+            Update,
+            // Reconcile the radial pool first so a live bar-count change is
+            // reflected the same frame, then draw each shape.
+            (reconcile_circle_bars, update_circle_bars, update_ring, update_fill),
+        );
     }
 }
 
-/// Spawn the (hidden) fill blob and ring-outline stroke entities.
+/// Spawn the (hidden) fill blob, ring-outline stroke, and the radial bar pool.
 fn setup_circle(
     mut commands: Commands,
+    settings: Res<CavaSettings>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
 ) {
+    // One shared blend material for the radial bars; each carries per-vertex color.
+    let bar_material = materials.add(stroke_material());
+    let n = settings.bars_per_channel.max(1);
+    for i in 0..n {
+        spawn_circle_bar(&mut commands, &mut meshes, &bar_material, i);
+    }
+    commands.insert_resource(CircleBarMaterial(bar_material));
+
     let mesh = meshes.add(fan_mesh());
     let material = materials.add(ColorMaterial::from(Color::NONE));
     commands.spawn((
@@ -85,6 +125,137 @@ fn setup_circle(
         RingStroke,
     ));
     commands.insert_resource(RingHandles { mesh: ring_mesh });
+}
+
+/// Spawn a single radial bar as its own (initially empty) rounded-rect mesh,
+/// carrying its Cava bar index and sharing the blend material.
+fn spawn_circle_bar(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    material: &Handle<ColorMaterial>,
+    i: usize,
+) {
+    commands.spawn((
+        Mesh2d(meshes.add(empty_stroke_mesh())),
+        MeshMaterial2d(material.clone()),
+        Transform::from_xyz(0.0, 0.0, 0.5),
+        Visibility::Hidden,
+        CircleBar(i),
+    ));
+}
+
+/// Grow or shrink the radial bar pool to match the live [`Cava::bars_per_channel`]
+/// (the settings editor can change it at runtime), keeping indices contiguous
+/// `0..target` so [`update_circle_bars`] addresses them safely.
+fn reconcile_circle_bars(
+    mut commands: Commands,
+    cava: Res<Cava>,
+    material: Res<CircleBarMaterial>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    bars: Query<(Entity, &CircleBar)>,
+) {
+    let target = cava.bars_per_channel.max(1);
+    let current = bars.iter().count();
+    if current < target {
+        for i in current..target {
+            spawn_circle_bar(&mut commands, &mut meshes, &material.0, i);
+        }
+    } else if current > target {
+        for (entity, bar) in &bars {
+            if bar.0 >= target {
+                commands.entity(entity).despawn();
+            }
+        }
+    }
+}
+
+/// Draw the radial bar pool for the blocky circle shapes (Bars/Levels/Particles/
+/// Spine), or hide it when Wave (the smooth blob) or a box mode is active.
+fn update_circle_bars(
+    mode: Res<DrawingMode>,
+    cava: Res<Cava>,
+    vis: Res<VisSettings>,
+    windows: Query<&Window>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut bars: Query<(&CircleBar, &Mesh2d, &mut Transform, &mut Visibility)>,
+) {
+    let shape = (mode.family() == VisFamily::Circle).then(|| mode.shape());
+    let bar_shape = match shape {
+        Some(s @ (VisShape::Bars | VisShape::Levels | VisShape::Particles | VisShape::Spine)) => s,
+        // Wave (handled by the ring/fill) or a box mode: hide the radial pool.
+        _ => {
+            for (_, _, _, mut v) in &mut bars {
+                *v = Visibility::Hidden;
+            }
+            return;
+        }
+    };
+
+    let Some(window) = windows.iter().next() else {
+        return;
+    };
+    let extent = window.width().min(window.height());
+
+    let mut values = cava.mono();
+    let n = values.len();
+    if n == 0 {
+        for (_, _, _, mut v) in &mut bars {
+            *v = Visibility::Hidden;
+        }
+        return;
+    }
+    spread_monstercat(&mut values, vis.monstercat);
+
+    let (base, amp) = (extent * BASE_FRAC, extent * AMP_FRAC);
+    let (lo, hi) = (vis.fg_lo(), vis.fg_hi());
+    // Tangential slot width from the base-ring circumference, minus the gap.
+    let slot_w = (TAU * base / n as f32).max(1.0);
+    let bar_w = (slot_w - BAR_GAP).max(1.0);
+
+    for (bar, mesh2d, mut transform, mut visibility) in &mut bars {
+        if bar.0 >= n {
+            *visibility = Visibility::Hidden;
+            continue;
+        }
+        *visibility = Visibility::Visible;
+        let v = values[bar.0].clamp(0.0, 1.5);
+        let ang = bar.0 as f32 / n as f32 * TAU - FRAC_PI_2; // start at the top
+        let (cos, sin) = (ang.cos(), ang.sin());
+
+        // Each shape resolves to (radius of the rect center, half extents, rotation).
+        // For spokes, local +y is radial (length) and +x tangential (width).
+        let (radius, half, rot) = match bar_shape {
+            VisShape::Bars => {
+                let len = (amp * v).max(1.0);
+                (base + len * 0.5, Vec2::new(bar_w * 0.5, len * 0.5), ang - FRAC_PI_2)
+            }
+            VisShape::Levels => {
+                let stepped = (v * LEVEL_STEPS).round() / LEVEL_STEPS;
+                let len = (amp * stepped).max(1.0);
+                (base + len * 0.5, Vec2::new(bar_w * 0.5, len * 0.5), ang - FRAC_PI_2)
+            }
+            VisShape::Particles => {
+                // A small square floating at the bar's radial level.
+                let dot = bar_w.max(2.0);
+                (base + amp * v, Vec2::splat(dot * 0.5), 0.0)
+            }
+            VisShape::Spine => {
+                // A square on the base ring, side growing with the level.
+                let side = (bar_w * (0.35 + v)).clamp(2.0, amp.max(2.0));
+                (base, Vec2::splat(side * 0.5), 0.0)
+            }
+            _ => unreachable!("bar_shape is constrained above"),
+        };
+
+        transform.translation = Vec3::new(cos * radius, sin * radius, 0.5);
+        transform.rotation = Quat::from_rotation_z(rot);
+
+        if let Some(mesh) = meshes.get_mut(&mesh2d.0) {
+            let round = vis.items_roundness.clamp(0.0, 1.0) * half.x.min(half.y);
+            let color = gradient_color(lo, hi, v.min(1.0));
+            apply_rounded_rect(mesh, half, round, STROKE_FEATHER, color);
+        }
+    }
 }
 
 /// A triangle fan: vertex 0 is the center, 1..=SEGMENTS are the ring. Positions
@@ -154,8 +325,9 @@ fn update_ring(
     mut meshes: ResMut<Assets<Mesh>>,
     mut q: Query<&mut Visibility, With<RingStroke>>,
 ) {
-    // The circle renderer stands in for every radial (circle) mode for now.
-    let active = mode.family() == VisFamily::Circle;
+    // The ring outline is the Wave circle shape only; the other circle shapes
+    // use the radial bar pool.
+    let active = mode.family() == VisFamily::Circle && mode.shape() == VisShape::Wave;
     for mut v in &mut q {
         *v = if active {
             Visibility::Visible
@@ -203,7 +375,7 @@ fn update_fill(
     mut materials: ResMut<Assets<ColorMaterial>>,
     mut q: Query<&mut Visibility, With<FillBlob>>,
 ) {
-    let active = mode.family() == VisFamily::Circle && vis.filling;
+    let active = mode.family() == VisFamily::Circle && mode.shape() == VisShape::Wave && vis.filling;
     for mut v in &mut q {
         *v = if active {
             Visibility::Visible
