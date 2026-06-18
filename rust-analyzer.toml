@@ -1,0 +1,8 @@
+# Run cargo check against both the native target and Windows so rust-analyzer
+# type-checks platform-specific code (wasapi.rs, mpris/windows.rs) on Linux.
+# macOS backends (coreaudio.rs) require the Apple SDK and cannot be checked here.
+[check]
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "x86_64-pc-windows-gnu",
+]

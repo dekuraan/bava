@@ -21,7 +21,7 @@ use windows::Win32::System::Com::{
 };
 use windows::core::GUID;
 
-use super::{AudioCapture, CaptureError};
+use super::{AudioCapture, CaptureError, LinearResampler};
 
 /// `wFormatTag` for raw IEEE float samples.
 const WAVE_FORMAT_IEEE_FLOAT: u16 = 0x0003;
@@ -44,7 +44,9 @@ enum SampleKind {
     I16,
     /// 24-bit signed PCM, packed in 3 bytes little-endian.
     I24,
-    /// 32-bit signed PCM (also covers 24-bit-in-32-bit-container formats).
+    /// 32-bit signed PCM. Also covers 24-in-32 EXTENSIBLE containers: Windows
+    /// mandates MSB-justified (left-aligned) packing, so `i32 / 2^31` is correct
+    /// for both (the 24-bit value occupies the top 24 bits of the 32-bit word).
     I32,
 }
 
@@ -94,12 +96,8 @@ pub struct WasapiCapture {
 
     /// Converted, target-rate interleaved samples awaiting consumption.
     pending: VecDeque<f64>,
-    /// Linear-resampler state: the previous target-channel frame, whether it has
-    /// been seeded, and the fractional position toward the next incoming frame.
-    /// `prev`/`frame` are reused across frames to avoid per-frame allocation.
-    prev: Vec<f64>,
-    has_prev: bool,
-    frac: f64,
+    /// Linear resampler (shared impl with Core Audio backend).
+    resampler: LinearResampler,
     /// Scratch holding one converted device frame, reused across frames.
     frame: Vec<f64>,
 }
@@ -130,9 +128,7 @@ impl WasapiCapture {
             target_rate,
             target_channels,
             pending: VecDeque::new(),
-            prev: vec![0.0; target_channels],
-            has_prev: false,
-            frac: 0.0,
+            resampler: LinearResampler::new(target_channels),
             frame: vec![0.0; target_channels],
         })
     }
@@ -207,8 +203,7 @@ impl WasapiCapture {
                     let _ = self.stream.client.Stop();
                 }
                 self.stream = stream;
-                self.has_prev = false;
-                self.frac = 0.0;
+                self.resampler.reset();
                 true
             }
             Err(_) => false,
@@ -219,6 +214,11 @@ impl WasapiCapture {
     /// channel layout and sample rate.
     fn pump(&mut self) -> PumpStatus {
         let mut status = PumpStatus::Idle;
+        let step = if self.stream.device_rate == self.target_rate {
+            1.0
+        } else {
+            self.stream.device_rate as f64 / self.target_rate as f64
+        };
         unsafe {
             loop {
                 let frames = match self.stream.capture.GetNextPacketSize() {
@@ -259,7 +259,7 @@ impl WasapiCapture {
                     } else {
                         self.fill_frame(data.add(f * frame_bytes));
                     }
-                    self.resample_push();
+                    self.resampler.push(step, &self.frame, &mut self.pending);
                 }
 
                 let _ = self.stream.capture.ReleaseBuffer(n_frames);
@@ -306,28 +306,6 @@ impl WasapiCapture {
         }
     }
 
-    /// Streaming linear resampler: convert the current `self.frame` (one
-    /// device-rate frame) into zero or more target-rate frames in `pending`.
-    fn resample_push(&mut self) {
-        if self.stream.device_rate == self.target_rate {
-            self.pending.extend(self.frame.iter().copied());
-            return;
-        }
-        let step = self.stream.device_rate as f64 / self.target_rate as f64;
-        if self.has_prev {
-            while self.frac < 1.0 {
-                for c in 0..self.target_channels {
-                    let v = self.prev[c] + (self.frame[c] - self.prev[c]) * self.frac;
-                    self.pending.push_back(v);
-                }
-                self.frac += step;
-            }
-            self.frac -= 1.0;
-        }
-        self.prev.clear();
-        self.prev.extend_from_slice(&self.frame);
-        self.has_prev = true;
-    }
 }
 
 impl Drop for WasapiCapture {
@@ -357,9 +335,10 @@ impl AudioCapture for WasapiCapture {
                     std::thread::sleep(Duration::from_millis(3));
                 }
                 PumpStatus::Lost => {
-                    // Give up this chunk (→ silence) if we can't rebind yet;
-                    // the next read() retries, so this self-rate-limits.
                     if !self.reopen() {
+                        // Back off so read() doesn't spin at 100% CPU while
+                        // the device is disconnected and no replacement exists.
+                        std::thread::sleep(Duration::from_millis(100));
                         break;
                     }
                 }
@@ -395,10 +374,13 @@ unsafe fn parse_format(mix: *const WAVEFORMATEX) -> (u32, usize, Option<SampleKi
         let ext = unsafe { (mix as *const WAVEFORMATEXTENSIBLE).read_unaligned() };
         // Copy out of the packed struct before comparing (no refs to fields).
         let subformat = ext.SubFormat;
+        // wValidBitsPerSample names the true data depth for PCM containers; for
+        // floats it equals wBitsPerSample (32). We keep `bits` as the container
+        // size (wBitsPerSample) because Windows mandates MSB-justified packing —
+        // 24-in-32 puts data in the top 24 bits, so i32/2^31 stays correct.
         tag = if subformat == SUBTYPE_IEEE_FLOAT {
             WAVE_FORMAT_IEEE_FLOAT
         } else {
-            // Anything non-float we treat as PCM below, keyed on bit depth.
             WAVE_FORMAT_PCM
         };
     }

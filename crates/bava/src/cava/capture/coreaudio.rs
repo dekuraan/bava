@@ -40,17 +40,18 @@ use objc2_core_audio_types::{kAudioFormatFlagIsFloat, AudioBufferList, AudioStre
 use objc2_core_foundation::{CFDictionary, CFString};
 use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSString};
 
-use super::{AudioCapture, CaptureError};
+use super::{AudioCapture, CaptureError, LinearResampler};
 
 /// Shared hand-off between the realtime IO proc (producer) and `read` (consumer).
 ///
 /// Holds device-format interleaved `f32` (one value per channel per frame, at the
-/// tap's own rate). The IO proc must stay realtime-safe, so it only locks briefly
-/// to append; all format conversion happens on the consumer side.
+/// tap's own rate). The IO proc uses `try_lock` — never blocking on a realtime
+/// thread — so a missed lock drops the current callback's samples rather than
+/// priority-inverting on the consumer.
 struct Shared {
     queue: Mutex<VecDeque<f32>>,
-    /// Hard cap on buffered samples (~a few seconds) so a stalled consumer can't
-    /// grow the queue without bound; oldest samples are dropped past the cap.
+    /// Hard cap on buffered samples (~4 s of device-rate audio) so a stalled
+    /// consumer can't grow the queue without bound; oldest samples are dropped.
     cap: usize,
 }
 
@@ -70,10 +71,10 @@ pub struct CoreAudioCapture {
     target_rate: u32,
     target_channels: usize,
 
-    /// Linear-resampler state: previous target-channel frame and the fractional
-    /// position between it and the next incoming frame.
-    prev: Option<Vec<f64>>,
-    frac: f64,
+    /// Resampler (shared impl, avoids per-frame allocation).
+    resampler: LinearResampler,
+    /// Scratch buffer for one down/up-mixed frame (reused across frames).
+    mixed: Vec<f64>,
     /// Converted, target-rate interleaved samples awaiting consumption.
     pending: VecDeque<f64>,
 }
@@ -128,10 +129,8 @@ impl CoreAudioCapture {
                 let device_rate = asbd.mSampleRate as u32;
                 let device_channels = asbd.mChannelsPerFrame.max(1) as usize;
 
-                // 4. Wrap the tap in a private aggregate device. The description is
-                //    an NSDictionary (toll-free-bridged to CFDictionary):
-                //      { uid: <our-uuid>, private: 1, tapautostart: 1,
-                //        taps: [ { uid: <tap-uid> } ] }
+                // 4. Wrap the tap in a private aggregate device. Include the PID in
+                //    the UID so a crashed prior instance never collides with us.
                 let agg = create_aggregate(&uid)?;
 
                 // 5. Register the IO proc and start IO. The client pointer is the
@@ -176,8 +175,8 @@ impl CoreAudioCapture {
                     device_channels,
                     target_rate,
                     target_channels,
-                    prev: None,
-                    frac: 0.0,
+                    resampler: LinearResampler::new(target_channels),
+                    mixed: vec![0.0; target_channels],
                     pending: VecDeque::new(),
                 })
             })();
@@ -205,44 +204,33 @@ impl CoreAudioCapture {
         if frames.is_empty() {
             return false;
         }
+        let step = if self.device_rate == self.target_rate {
+            1.0
+        } else {
+            self.device_rate as f64 / self.target_rate as f64
+        };
         for frame in frames.chunks_exact(self.device_channels) {
-            let mixed = self.downmix(frame);
-            self.resample_push(&mixed);
+            self.downmix_into(frame);
+            // resampler, mixed, and pending are distinct fields; NLL permits
+            // disjoint mutable + immutable borrows of separate struct fields.
+            self.resampler.push(step, &self.mixed, &mut self.pending);
         }
         true
     }
 
-    /// Map one device frame (interleaved `f32`) to a `target_channels` frame.
-    fn downmix(&self, frame: &[f32]) -> Vec<f64> {
+    /// Down/up-mix one device frame (`f32` interleaved) into `self.mixed`
+    /// (`f64`, `target_channels` long). Reuses the allocation across frames.
+    fn downmix_into(&mut self, frame: &[f32]) {
+        self.mixed.clear();
         let dc = self.device_channels;
         if self.target_channels == 1 {
             let sum: f64 = frame.iter().map(|&s| s as f64).sum();
-            return vec![sum / dc as f64];
-        }
-        (0..self.target_channels)
-            .map(|c| frame[c.min(dc - 1)] as f64)
-            .collect()
-    }
-
-    /// Streaming linear resampler: feed one device-rate frame, emit zero or more
-    /// target-rate frames into `pending`. (Identical scheme to the WASAPI backend.)
-    fn resample_push(&mut self, cur: &[f64]) {
-        if self.device_rate == self.target_rate {
-            self.pending.extend(cur.iter().copied());
-            return;
-        }
-        let step = self.device_rate as f64 / self.target_rate as f64;
-        if let Some(prev) = self.prev.take() {
-            while self.frac < 1.0 {
-                for c in 0..self.target_channels {
-                    self.pending
-                        .push_back(prev[c] + (cur[c] - prev[c]) * self.frac);
-                }
-                self.frac += step;
+            self.mixed.push(sum / dc as f64);
+        } else {
+            for c in 0..self.target_channels {
+                self.mixed.push(frame[c.min(dc - 1)] as f64);
             }
-            self.frac -= 1.0;
         }
-        self.prev = Some(cur.to_vec());
     }
 }
 
@@ -292,9 +280,10 @@ impl AudioCapture for CoreAudioCapture {
 
 /// The realtime IO proc: append the tap's input frames to the shared queue.
 ///
-/// Runs on a Core Audio realtime thread, so it does the minimum: interleave (the
-/// tap may hand back planar buffers) into `f32` and push under a short-held lock.
-/// All resampling/mixing happens later in [`CoreAudioCapture::pump`].
+/// Runs on a Core Audio realtime thread. Uses `try_lock` — never blocking — so
+/// a busy consumer causes this callback to drop the current buffer rather than
+/// priority-inverting on the consumer thread. All resampling/mixing happens
+/// later in [`CoreAudioCapture::pump`].
 unsafe extern "C-unwind" fn io_proc(
     _device: AudioObjectID,
     _now: NonNull<objc2_core_audio_types::AudioTimeStamp>,
@@ -317,16 +306,24 @@ unsafe extern "C-unwind" fn io_proc(
     let buffers =
         unsafe { std::slice::from_raw_parts(list.mBuffers.as_ptr(), n_buffers) };
 
-    let mut q = match shared.queue.lock() {
+    // try_lock so we never block on a realtime thread; drop this callback's
+    // samples if the consumer is mid-drain.
+    let mut q = match shared.queue.try_lock() {
         Ok(q) => q,
         Err(_) => return 0,
     };
 
     if n_buffers == 1 {
         // One interleaved buffer: copy its f32 samples straight through.
+        // Null mData signals silence; push zeros to preserve frame timing,
+        // matching the zero-fill the planar path does per channel.
         let b = &buffers[0];
-        if !b.mData.is_null() {
-            let count = b.mDataByteSize as usize / std::mem::size_of::<f32>();
+        let count = b.mDataByteSize as usize / std::mem::size_of::<f32>();
+        if b.mData.is_null() {
+            for _ in 0..count {
+                q.push_back(0.0);
+            }
+        } else {
             let data = b.mData as *const f32;
             for i in 0..count {
                 q.push_back(unsafe { data.add(i).read_unaligned() });
@@ -433,8 +430,12 @@ unsafe fn create_aggregate(tap_uid: &NSString) -> Result<AudioObjectID, CaptureE
     let tap_list: Retained<NSArray<NSDictionary<NSString, NSString>>> =
         NSArray::from_slice(&[&*sub_tap]);
 
-    // A unique UID for our aggregate device, plus a shared boolean value.
-    let agg_uid = NSString::from_str("com.bava.system-capture.aggregate");
+    // Include the PID in the aggregate device UID so that a crashed prior instance
+    // (which leaves the device registered in the HAL) can never collide with us.
+    let agg_uid = NSString::from_str(&format!(
+        "com.bava.system-capture.aggregate.{}",
+        std::process::id()
+    ));
     let one = NSNumber::numberWithBool(true);
 
     let k_uid = key(kAudioAggregateDeviceUIDKey);

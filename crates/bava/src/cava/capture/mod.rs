@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Audio capture backends.
 //!
+//! Shared utilities used by WASAPI and Core Audio backends:
+//!
 //! cavacore needs a stream of interleaved PCM samples. The natural source is
 //! whatever is currently playing on the default output: on Linux the *monitor*
 //! of the default sink (via PulseAudio), on Windows a WASAPI *loopback* capture
@@ -94,3 +96,69 @@ impl std::fmt::Display for CaptureError {
 }
 
 impl std::error::Error for CaptureError {}
+
+// Used by the WASAPI (Windows) and Core Audio (macOS) backends. Compiled
+// unconditionally so rust-analyzer type-checks it on Linux; the dead_code lint
+// is suppressed only where it is actually unreachable.
+#[cfg_attr(
+    not(any(target_os = "windows", target_os = "macos")),
+    allow(dead_code)
+)]
+pub(super) struct LinearResampler {
+    target_channels: usize,
+    /// Previous device-rate frame (already down/up-mixed to target_channels).
+    prev: Vec<f64>,
+    has_prev: bool,
+    /// Fractional position within the current input interval [0, 1).
+    frac: f64,
+}
+
+#[cfg_attr(
+    not(any(target_os = "windows", target_os = "macos")),
+    allow(dead_code)
+)]
+impl LinearResampler {
+    pub(super) fn new(target_channels: usize) -> Self {
+        Self {
+            target_channels,
+            prev: vec![0.0; target_channels],
+            has_prev: false,
+            frac: 0.0,
+        }
+    }
+
+    /// Clear interpolation state (call after a device format/rate change).
+    pub(super) fn reset(&mut self) {
+        self.has_prev = false;
+        self.frac = 0.0;
+    }
+
+    /// Feed one device-rate mixed frame and push zero or more target-rate
+    /// frames into `pending`.
+    ///
+    /// `step = device_rate as f64 / target_rate as f64`; pass `1.0` when
+    /// rates are equal to skip interpolation entirely.
+    pub(super) fn push(
+        &mut self,
+        step: f64,
+        cur: &[f64],
+        pending: &mut std::collections::VecDeque<f64>,
+    ) {
+        if step == 1.0 {
+            pending.extend(cur.iter().copied());
+            return;
+        }
+        if self.has_prev {
+            while self.frac < 1.0 {
+                for c in 0..self.target_channels {
+                    pending.push_back(self.prev[c] + (cur[c] - self.prev[c]) * self.frac);
+                }
+                self.frac += step;
+            }
+            self.frac -= 1.0;
+        }
+        self.prev.clear();
+        self.prev.extend_from_slice(cur);
+        self.has_prev = true;
+    }
+}
