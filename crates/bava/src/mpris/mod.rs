@@ -17,6 +17,8 @@ use crossbeam_channel::Receiver;
 
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "macos")]
+mod macos;
 #[cfg(target_os = "windows")]
 mod windows;
 
@@ -24,11 +26,13 @@ mod windows;
 /// and sends [`MprisMsg`]s until the process exits.
 #[cfg(target_os = "linux")]
 use linux::run as now_playing_run;
+#[cfg(target_os = "macos")]
+use macos::run as now_playing_run;
 #[cfg(target_os = "windows")]
 use windows::run as now_playing_run;
 
 /// Fallback for platforms without a media-session backend.
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 fn now_playing_run(_tx: crossbeam_channel::Sender<MprisMsg>) {
     warn!("bava: now-playing unsupported on this platform");
 }

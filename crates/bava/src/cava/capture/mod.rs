@@ -4,14 +4,18 @@
 //! cavacore needs a stream of interleaved PCM samples. The natural source is
 //! whatever is currently playing on the default output: on Linux the *monitor*
 //! of the default sink (via PulseAudio), on Windows a WASAPI *loopback* capture
-//! of the default render endpoint. [`AudioCapture`] abstracts over the mechanism;
-//! [`open`] selects the backend for the current platform.
+//! of the default render endpoint, on macOS a Core Audio *process tap* of the
+//! system mix. [`AudioCapture`] abstracts over the mechanism; [`open`] selects
+//! the backend for the current platform.
 
 #[cfg(target_os = "linux")]
 pub mod pulse;
 
 #[cfg(target_os = "windows")]
 pub mod wasapi;
+
+#[cfg(target_os = "macos")]
+pub mod coreaudio;
 
 /// Open the platform's default capture backend as a boxed [`AudioCapture`].
 ///
@@ -37,7 +41,13 @@ pub fn open(
         let cap = wasapi::WasapiCapture::open(rate, channels, frame_samples)?;
         Ok(Box::new(cap))
     }
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    #[cfg(target_os = "macos")]
+    {
+        let _ = device;
+        let cap = coreaudio::CoreAudioCapture::open(rate, channels, frame_samples)?;
+        Ok(Box::new(cap))
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
     {
         let _ = (device, rate, channels, frame_samples);
         Err(CaptureError::Init(
