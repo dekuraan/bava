@@ -51,12 +51,12 @@ pub fn open(
 /// Implementations are moved onto a dedicated capture thread, so they only need
 /// to be [`Send`].
 pub trait AudioCapture: Send {
-    /// Block until at least one frame is available, then fill `buf` with as many
-    /// interleaved `f64` samples as possible and return how many were written.
-    ///
-    /// Returns `Ok(0)` only on end-of-stream. Errors are transient by
-    /// convention; the caller may log and retry.
-    fn read(&mut self, buf: &mut [f64]) -> Result<usize, CaptureError>;
+    /// Fill the **entire** `buf` with interleaved `f64` samples, blocking as
+    /// needed. Backends capturing a live stream (PulseAudio monitor, WASAPI
+    /// loopback) never end, so there is no end-of-stream signal; an idle source
+    /// must pad with silence to keep a steady cadence rather than short-read.
+    /// Errors are transient by convention; the caller may log and retry.
+    fn read(&mut self, buf: &mut [f64]) -> Result<(), CaptureError>;
 
     /// Sample rate of the captured stream, in Hz.
     fn rate(&self) -> u32;

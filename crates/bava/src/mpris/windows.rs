@@ -12,7 +12,10 @@ use std::time::Duration;
 use bevy::prelude::*;
 use crossbeam_channel::Sender;
 use windows::core::HSTRING;
-use windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager as SessionManager;
+use windows::Media::Control::{
+    GlobalSystemMediaTransportControlsSessionManager as SessionManager,
+    GlobalSystemMediaTransportControlsSessionMediaProperties as MediaProperties,
+};
 use windows::Storage::Streams::{DataReader, IRandomAccessStreamReference};
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
 
@@ -37,11 +40,14 @@ pub(super) fn run(tx: Sender<MprisMsg>) {
 
     loop {
         match read_session(&manager) {
-            Some((track, art)) => {
+            Some((track, props)) => {
                 let key = (track.title.clone(), track.artist.clone(), track.album.clone());
                 let _ = tx.send(MprisMsg::Track(track));
+                // Reading + decoding the thumbnail is expensive, so only do it
+                // when the track actually changed, not on every poll.
                 if last_key.as_ref() != Some(&key) {
                     last_key = Some(key);
+                    let art = props.Thumbnail().ok().and_then(read_thumbnail);
                     let _ = tx.send(MprisMsg::Art(art));
                 }
             }
@@ -58,26 +64,22 @@ pub(super) fn run(tx: Sender<MprisMsg>) {
     }
 }
 
-/// Read the current session's metadata + thumbnail. `None` if there is no
-/// current session or its properties can't be read.
-fn read_session(manager: &SessionManager) -> Option<(NowPlaying, Option<DecodedArt>)> {
+/// Read the current session's metadata, returning it alongside the raw
+/// `MediaProperties` so the caller can lazily read the thumbnail only when the
+/// track changed. `None` if there is no current session or it can't be read.
+fn read_session(manager: &SessionManager) -> Option<(NowPlaying, MediaProperties)> {
     let session = manager.GetCurrentSession().ok()?;
-    let props = session
-        .TryGetMediaPropertiesAsync()
-        .ok()?
-        .join()
-        .ok()?;
+    let props = session.TryGetMediaPropertiesAsync().ok()?.join().ok()?;
 
     let track = NowPlaying {
         title: props.Title().ok().and_then(hstring_opt),
         artist: props.Artist().ok().and_then(hstring_opt),
         album: props.AlbumTitle().ok().and_then(hstring_opt),
-        // SMTC exposes no art URL; the thumbnail is read inline instead.
+        // SMTC exposes no art URL; the thumbnail is read separately.
         art_url: None,
     };
 
-    let art = props.Thumbnail().ok().and_then(read_thumbnail);
-    Some((track, art))
+    Some((track, props))
 }
 
 /// Map an `HSTRING` to `Some(String)`, treating empty as absent.

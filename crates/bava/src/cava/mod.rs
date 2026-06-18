@@ -246,13 +246,9 @@ fn capture_reader(settings: CavaSettings, ring: AudioRing) {
     let mut buf = vec![0.0f64; chunk];
 
     while ring.running.load(Ordering::Relaxed) {
-        match capture.read(&mut buf) {
-            Ok(0) => break, // end of stream
-            Ok(_) => {}
-            Err(e) => {
-                error!("bava: {e}");
-                continue;
-            }
+        if let Err(e) = capture.read(&mut buf) {
+            error!("bava: {e}");
+            continue;
         }
         if let Ok(mut q) = ring.buf.lock() {
             q.extend(buf.iter().copied());
