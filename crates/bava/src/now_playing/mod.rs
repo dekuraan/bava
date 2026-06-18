@@ -24,7 +24,7 @@ mod macos;
 mod windows;
 
 /// The platform now-playing poll loop. Each backend owns its own polling cadence
-/// and sends [`MprisMsg`]s until the process exits.
+/// and sends [`NowPlayingMsg`]s until the process exits.
 #[cfg(target_os = "linux")]
 use linux::run as now_playing_run;
 #[cfg(target_os = "macos")]
@@ -34,11 +34,11 @@ use windows::run as now_playing_run;
 
 /// Fallback for platforms without a media-session backend.
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-fn now_playing_run(_tx: crossbeam_channel::Sender<MprisMsg>) {
+fn now_playing_run(_tx: crossbeam_channel::Sender<NowPlayingMsg>) {
     warn!("bava: now-playing unsupported on this platform");
 }
 
-/// Current track metadata from the active MPRIS player.
+/// Current track metadata from the active media session.
 #[derive(Resource, Default, Debug, Clone)]
 pub struct NowPlaying {
     pub title: Option<String>,
@@ -63,26 +63,26 @@ struct DecodedArt {
     height: u32,
 }
 
-/// Messages from the MPRIS thread to the Bevy world.
-enum MprisMsg {
+/// Messages from the now-playing thread to the Bevy world.
+enum NowPlayingMsg {
     Track(NowPlaying),
     Art(Option<DecodedArt>),
 }
 
 /// Bevy-side receiver. crossbeam's `Receiver` is `Send + Sync`.
 #[derive(Resource)]
-struct MprisRx(Receiver<MprisMsg>);
+struct NowPlayingRx(Receiver<NowPlayingMsg>);
 
 /// Polls the platform media session and serves now-playing + album art.
-pub struct MprisPlugin;
+pub struct NowPlayingPlugin;
 
-impl Plugin for MprisPlugin {
+impl Plugin for NowPlayingPlugin {
     fn build(&self, app: &mut App) {
         let (tx, rx) = crossbeam_channel::unbounded();
         app.init_resource::<NowPlaying>()
             .init_resource::<AlbumArt>()
-            .insert_resource(MprisRx(rx))
-            .add_systems(Update, apply_mpris_updates);
+            .insert_resource(NowPlayingRx(rx))
+            .add_systems(Update, apply_now_playing_updates);
 
         thread::Builder::new()
             .name("bava-now-playing".into())
@@ -91,16 +91,16 @@ impl Plugin for MprisPlugin {
     }
 }
 
-/// Drain MPRIS messages and update resources / create art textures.
-fn apply_mpris_updates(
-    rx: Res<MprisRx>,
+/// Drain now-playing messages and update resources / create art textures.
+fn apply_now_playing_updates(
+    rx: Res<NowPlayingRx>,
     mut now_playing: ResMut<NowPlaying>,
     mut album_art: ResMut<AlbumArt>,
     mut images: ResMut<Assets<Image>>,
 ) {
     while let Ok(msg) = rx.0.try_recv() {
         match msg {
-            MprisMsg::Track(track) => {
+            NowPlayingMsg::Track(track) => {
                 if track.title != now_playing.title || track.artist != now_playing.artist {
                     info!(
                         "bava: now playing — {} · {}",
@@ -110,7 +110,7 @@ fn apply_mpris_updates(
                 }
                 *now_playing = track;
             }
-            MprisMsg::Art(Some(art)) => {
+            NowPlayingMsg::Art(Some(art)) => {
                 let image = Image::new(
                     Extent3d {
                         width: art.width,
@@ -125,7 +125,7 @@ fn apply_mpris_updates(
                 album_art.image = Some(images.add(image));
                 album_art.size = Some((art.width, art.height));
             }
-            MprisMsg::Art(None) => {
+            NowPlayingMsg::Art(None) => {
                 album_art.image = None;
                 album_art.size = None;
             }

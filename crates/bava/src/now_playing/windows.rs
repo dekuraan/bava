@@ -19,10 +19,10 @@ use windows::Media::Control::{
 use windows::Storage::Streams::{DataReader, IRandomAccessStreamReference};
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
 
-use super::{decode_art_bytes, DecodedArt, MprisMsg, NowPlaying};
+use super::{decode_art_bytes, DecodedArt, NowPlayingMsg, NowPlaying};
 
 /// Background poll loop. Tolerant of there being no current session.
-pub(super) fn run(tx: Sender<MprisMsg>) {
+pub(super) fn run(tx: Sender<NowPlayingMsg>) {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
     }
@@ -42,20 +42,20 @@ pub(super) fn run(tx: Sender<MprisMsg>) {
         match read_session(&manager) {
             Some((track, props)) => {
                 let key = (track.title.clone(), track.artist.clone(), track.album.clone());
-                let _ = tx.send(MprisMsg::Track(track));
+                let _ = tx.send(NowPlayingMsg::Track(track));
                 // Reading + decoding the thumbnail is expensive, so only do it
                 // when the track actually changed, not on every poll.
                 if last_key.as_ref() != Some(&key) {
                     last_key = Some(key);
                     let art = props.Thumbnail().ok().and_then(read_thumbnail);
-                    let _ = tx.send(MprisMsg::Art(art));
+                    let _ = tx.send(NowPlayingMsg::Art(art));
                 }
             }
             None => {
                 // No session right now; clear state once.
                 if last_key.take().is_some() {
-                    let _ = tx.send(MprisMsg::Track(NowPlaying::default()));
-                    let _ = tx.send(MprisMsg::Art(None));
+                    let _ = tx.send(NowPlayingMsg::Track(NowPlaying::default()));
+                    let _ = tx.send(NowPlayingMsg::Art(None));
                 }
             }
         }

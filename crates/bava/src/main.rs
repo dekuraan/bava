@@ -11,7 +11,7 @@
 mod cava;
 mod config;
 mod gui;
-mod mpris;
+mod now_playing;
 mod vis;
 
 use bevy::prelude::*;
@@ -21,7 +21,7 @@ use clap::Parser;
 use cava::CavaPlugin;
 use config::{Cli, Config, ConfigHandle};
 use gui::{EditorState, GuiPlugin};
-use mpris::MprisPlugin;
+use now_playing::NowPlayingPlugin;
 use vis::VisPlugin;
 
 fn main() {
@@ -76,7 +76,7 @@ fn main() {
     // Where the editor saves/reloads, and whether it starts open.
     .insert_resource(ConfigHandle { path })
     .insert_resource(EditorState::new(cli.gui, config.gui_toggle_key()))
-    .add_plugins((CavaPlugin, MprisPlugin, VisPlugin, GuiPlugin));
+    .add_plugins((CavaPlugin, NowPlayingPlugin, VisPlugin, GuiPlugin));
 
     // `--debug` also enables frame-time diagnostics, logging FPS/frame time ~1×/s.
     if cli.debug {

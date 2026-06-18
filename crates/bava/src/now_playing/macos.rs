@@ -28,7 +28,7 @@ use bevy::prelude::*;
 use crossbeam_channel::Sender;
 use serde::Deserialize;
 
-use super::{decode_art_bytes, MprisMsg, NowPlaying};
+use super::{decode_art_bytes, NowPlayingMsg, NowPlaying};
 
 /// One line of the adapter's `stream` output.
 #[derive(Deserialize)]
@@ -50,7 +50,7 @@ struct Payload {
 }
 
 /// Background loop: spawn the adapter, parse its stream, respawn if it dies.
-pub(super) fn run(tx: Sender<MprisMsg>) {
+pub(super) fn run(tx: Sender<NowPlayingMsg>) {
     let Some((script, framework)) = locate_adapter() else {
         warn!(
             "bava: mediaremote-adapter not found; now-playing disabled. \
@@ -68,15 +68,15 @@ pub(super) fn run(tx: Sender<MprisMsg>) {
             return;
         }
         // Child ended (stream closed). Clear state and retry after a short wait.
-        let _ = tx.send(MprisMsg::Track(NowPlaying::default()));
-        let _ = tx.send(MprisMsg::Art(None));
+        let _ = tx.send(NowPlayingMsg::Track(NowPlaying::default()));
+        let _ = tx.send(NowPlayingMsg::Art(None));
         thread::sleep(Duration::from_secs(2));
     }
 }
 
 /// Run one adapter process to completion, forwarding updates. Returns `false`
 /// only if the process could not be spawned at all.
-fn stream_once(script: &PathBuf, framework: &PathBuf, tx: &Sender<MprisMsg>) -> bool {
+fn stream_once(script: &PathBuf, framework: &PathBuf, tx: &Sender<NowPlayingMsg>) -> bool {
     let mut child = match Command::new("/usr/bin/perl")
         .arg(script)
         .arg(framework)
@@ -126,12 +126,12 @@ fn stream_once(script: &PathBuf, framework: &PathBuf, tx: &Sender<MprisMsg>) -> 
             art_url: None,
         };
         let key = (track.title.clone(), track.artist.clone(), track.album.clone());
-        let _ = tx.send(MprisMsg::Track(track));
+        let _ = tx.send(NowPlayingMsg::Track(track));
 
         if last_key.as_ref() != Some(&key) {
             last_key = Some(key);
             let art = p.artwork_data.as_deref().and_then(decode_artwork);
-            let _ = tx.send(MprisMsg::Art(art));
+            let _ = tx.send(NowPlayingMsg::Art(art));
         }
     }
 

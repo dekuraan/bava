@@ -13,10 +13,10 @@ use std::time::Duration;
 use bevy::prelude::*;
 use crossbeam_channel::Sender;
 
-use super::{decode_art_bytes, DecodedArt, MprisMsg, NowPlaying};
+use super::{decode_art_bytes, DecodedArt, NowPlaying, NowPlayingMsg};
 
 /// Background poll loop. Tolerant of a missing D-Bus / no active player.
-pub(super) fn run(tx: Sender<MprisMsg>) {
+pub(super) fn run(tx: Sender<NowPlayingMsg>) {
     use mpris::PlayerFinder;
 
     let finder = match PlayerFinder::new() {
@@ -36,8 +36,8 @@ pub(super) fn run(tx: Sender<MprisMsg>) {
             Err(_) => {
                 // No player right now; clear state once and wait.
                 if last_art_url.take().is_some() {
-                    let _ = tx.send(MprisMsg::Track(NowPlaying::default()));
-                    let _ = tx.send(MprisMsg::Art(None));
+                    let _ = tx.send(NowPlayingMsg::Track(NowPlaying::default()));
+                    let _ = tx.send(NowPlayingMsg::Art(None));
                 }
                 thread::sleep(Duration::from_millis(750));
                 continue;
@@ -62,17 +62,17 @@ pub(super) fn run(tx: Sender<MprisMsg>) {
             };
 
             let art_url = track.art_url.clone();
-            let _ = tx.send(MprisMsg::Track(track));
+            let _ = tx.send(NowPlayingMsg::Track(track));
 
             // Only refetch art when the URL changes.
             if art_url != last_art_url {
                 last_art_url = art_url.clone();
                 match art_url.as_deref().and_then(fetch_and_decode_art) {
                     Some(art) => {
-                        let _ = tx.send(MprisMsg::Art(Some(art)));
+                        let _ = tx.send(NowPlayingMsg::Art(Some(art)));
                     }
                     None => {
-                        let _ = tx.send(MprisMsg::Art(None));
+                        let _ = tx.send(NowPlayingMsg::Art(None));
                     }
                 }
             }

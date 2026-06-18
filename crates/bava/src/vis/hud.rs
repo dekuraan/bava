@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! On-screen HUD: a dimmed album-art backdrop and a centered now-playing label,
-//! both driven by the [`mpris`](crate::mpris) resources.
+//! both driven by the [`now_playing`](crate::now_playing) resources.
 
 use bevy::prelude::*;
 
-use crate::mpris::{AlbumArt, NowPlaying};
+use crate::now_playing::{AlbumArt, NowPlaying};
 
 /// Full-window album-art backdrop sprite.
 #[derive(Component)]
