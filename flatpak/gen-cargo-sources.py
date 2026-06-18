@@ -37,11 +37,19 @@ def main() -> int:
         lock = tomllib.load(f)
 
     sources: list[dict] = []
+    skipped: list[str] = []
     for pkg in lock.get("package", []):
-        # Only crates.io packages have a registry source + checksum. Local
-        # path crates (cavacore-sys/-rs, bava) have neither and are built
-        # straight from the repo checkout, so skip them here.
-        if pkg.get("source") != CRATES_IO:
+        source = pkg.get("source")
+        # Local path crates (cavacore-sys/-rs, bava) have no source and are
+        # built straight from the repo checkout — skip them silently.
+        if source is None:
+            continue
+        # Only crates.io packages can be vendored by this offline generator.
+        # A git or alternate-registry dependency would be silently dropped,
+        # producing an incomplete cargo-sources.json and an opaque offline
+        # build failure deep in the sandbox. Collect and report these loudly.
+        if source != CRATES_IO:
+            skipped.append(f"{pkg['name']} {pkg['version']} ({source})")
             continue
         name = pkg["name"]
         version = pkg["version"]
@@ -86,6 +94,22 @@ def main() -> int:
             "dest-filename": "config.toml",
         }
     )
+
+    if skipped:
+        print(
+            "ERROR: this generator only vendors crates.io dependencies, but "
+            f"{len(skipped)} package(s) use another source:",
+            file=sys.stderr,
+        )
+        for entry in skipped:
+            print(f"  - {entry}", file=sys.stderr)
+        print(
+            "The offline flatpak build would fail to find these. Use the "
+            "upstream flatpak-cargo-generator.py (it resolves git sources) "
+            "instead of this stand-in.",
+            file=sys.stderr,
+        )
+        return 1
 
     OUT.write_text(json.dumps(sources, indent=4) + "\n")
     crates = sum(1 for s in sources if s["type"] == "archive")

@@ -62,6 +62,14 @@ modules:
       append-path: /usr/lib/sdk/rust-stable/bin
       env:
         CARGO_HOME: /run/build/bava/cargo
+        # cavacore-sys' build.rs compiles vendored cavacore.c, which does
+        # `#include <fftw3.h>` from the *system* path — but the fftw3 module
+        # installs the header under /app/include, which is not on the C
+        # compiler's default search path. cc/gcc honour CPATH; LIBRARY_PATH
+        # mirrors it for the link step. (pkg-config supplies these natively,
+        # but build.rs only consults it for --libs, not --cflags.)
+        CPATH: /app/include
+        LIBRARY_PATH: /app/lib
     build-commands:
       - cargo build --offline --release -p bava
       - install -Dm755 target/release/bava /app/bin/bava
