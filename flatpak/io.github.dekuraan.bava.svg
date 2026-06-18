@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<svg width="128" height="128" viewBox="0 0 128 128" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bar" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0" stop-color="#16e0ff"/>
+      <stop offset="1" stop-color="#ff36c8"/>
+    </linearGradient>
+    <radialGradient id="bg" cx="0.5" cy="0.4" r="0.75">
+      <stop offset="0" stop-color="#1b1030"/>
+      <stop offset="1" stop-color="#0a0612"/>
+    </radialGradient>
+  </defs>
+  <rect width="128" height="128" rx="24" fill="url(#bg)"/>
+  <g fill="url(#bar)">
+    <rect x="20" y="74" width="12" height="34" rx="6"/>
+    <rect x="38" y="52" width="12" height="56" rx="6"/>
+    <rect x="56" y="30" width="12" height="78" rx="6"/>
+    <rect x="74" y="44" width="12" height="64" rx="6"/>
+    <rect x="92" y="64" width="12" height="44" rx="6"/>
+  </g>
+</svg>

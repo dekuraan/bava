@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=bava
+GenericName=Music Visualizer
+Comment=Bevy music visualizer driven by cavacore, MPRIS, and PulseAudio
+Exec=bava
+Icon=io.github.dekuraan.bava
+Terminal=false
+Categories=Audio;AudioVideo;Player;
+Keywords=music;visualizer;audio;spectrum;cava;
