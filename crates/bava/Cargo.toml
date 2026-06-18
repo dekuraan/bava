@@ -53,18 +53,10 @@ bevy_egui = { version = "0.39", default-features = false, features = [
     "manage_clipboard",
 ] }
 
-# Audio capture (PulseAudio simple API, works through pipewire-pulse).
-libpulse-binding = "2"
-libpulse-simple-binding = "2"
-
-# Now-playing metadata + album art over MPRIS / D-Bus.
-mpris = "2"
-
-# Album-art fetching and decoding.
-ureq = "2"
+# Album-art decoding (both platforms decode in-memory image bytes).
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 
-# Lock-free-ish hand-off from the audio/mpris threads to Bevy systems.
+# Lock-free-ish hand-off from the audio/now-playing threads to Bevy systems.
 crossbeam-channel = "0.5"
 
 # Configuration: CLI args (clap) layered over a TOML config file.
@@ -72,3 +64,26 @@ clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 toml = "1"
 dirs = "6"
+
+# --- Linux backends: PulseAudio capture + MPRIS now-playing over D-Bus. ---
+[target.'cfg(target_os = "linux")'.dependencies]
+# Audio capture (PulseAudio simple API, works through pipewire-pulse).
+libpulse-binding = "2"
+libpulse-simple-binding = "2"
+# Now-playing metadata + album art over MPRIS / D-Bus.
+mpris = "2"
+# HTTP fetch for remote album art (e.g. spotifyd's http artUrl).
+ureq = "2"
+
+# --- Windows backends: WASAPI loopback capture + GSMTC now-playing. ---
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62", features = [
+    "Foundation",
+    "Media_Control",
+    "Storage_Streams",
+    "Win32_Foundation",
+    "Win32_Media_Audio",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
+] }
