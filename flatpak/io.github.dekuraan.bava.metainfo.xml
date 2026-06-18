@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<component type="desktop-application">
+  <id>io.github.dekuraan.bava</id>
+
+  <name>bava</name>
+  <summary>Music visualizer driven by cavacore and MPRIS</summary>
+
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+
+  <description>
+    <p>
+      bava is a Linux music visualizer built on the Bevy engine. It captures the
+      default audio output's monitor through PulseAudio (and PipeWire via
+      pipewire-pulse), runs it through cavacore — the analysis engine from CAVA —
+      and renders smoothed, log-spaced frequency bars with HDR bloom.
+    </p>
+    <p>
+      It also reads now-playing metadata over MPRIS, showing the current track's
+      title, artist, and album, and fetching album art into a dimmed backdrop
+      when the player exposes it.
+    </p>
+    <p>Features:</p>
+    <ul>
+      <li>Real-time spectrum analysis with configurable bars, smoothing, and frequency range</li>
+      <li>Eleven Cavalier-style drawing modes (bars, wave, particles, circles, and more)</li>
+      <li>Now-playing track info and album art over MPRIS</li>
+      <li>In-app settings editor with live-reflected changes and named profiles</li>
+    </ul>
+  </description>
+
+  <launchable type="desktop-id">io.github.dekuraan.bava.desktop</launchable>
+
+  <categories>
+    <category>Audio</category>
+    <category>AudioVideo</category>
+  </categories>
+
+  <url type="homepage">https://github.com/dekuraan/bava</url>
+  <url type="bugtracker">https://github.com/dekuraan/bava/issues</url>
+
+  <developer id="io.github.dekuraan">
+    <name>dekuraan</name>
+  </developer>
+
+  <!-- Flathub requires at least one screenshot. Replace this URL with a real
+       raw screenshot once one is committed (e.g. docs/screenshot.png). -->
+  <screenshots>
+    <screenshot type="default">
+      <image>https://raw.githubusercontent.com/dekuraan/bava/main/docs/screenshot.png</image>
+      <caption>Frequency bars reacting to playing audio</caption>
+    </screenshot>
+  </screenshots>
+
+  <content_rating type="oars-1.1"/>
+
+  <releases>
+    <release version="0.1.0" date="2026-06-17">
+      <description>
+        <p>Initial Flatpak release: bars/monstercat visualizer, MPRIS now-playing with album art, and the in-app settings editor.</p>
+      </description>
+    </release>
+  </releases>
+</component>
