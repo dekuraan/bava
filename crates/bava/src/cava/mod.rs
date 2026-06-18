@@ -252,7 +252,11 @@ fn capture_reader(settings: CavaSettings, ring: AudioRing) {
             Ok(0) => break, // end of stream
             Ok(_) => {}
             Err(e) => {
+                // Back off before retrying: if the server died or the source was
+                // removed, read() errors immediately every call, which would spin
+                // a core at 100% and flood the log without this pause.
                 error!("bava: {e}");
+                thread::sleep(std::time::Duration::from_millis(100));
                 continue;
             }
         }

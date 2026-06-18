@@ -180,6 +180,9 @@ struct Columns {
 struct Planet {
     radii: Vec<f32>,
     prev: Vec<f32>,
+    /// Closed-loop polyline indices, cached and rebuilt only when the segment
+    /// count changes (it's a pure function of `n`, identical every frame).
+    indices: Vec<[u32; 2]>,
 }
 
 /// The single kinematic polyline body for the planet blob.
@@ -270,12 +273,15 @@ fn setup_physics(
     mut materials: ResMut<Assets<ColorMaterial>>,
     windows: Query<&Window>,
 ) {
+    // Shared blend material for the ball trails. Inserted unconditionally: the
+    // always-scheduled `spawn_ball_on_click` requires `Res<TrailMaterial>`, and a
+    // missing required resource fails param validation → panic on the first frame
+    // (Bevy 0.18). It just early-returns in its body when physics is disabled.
+    commands.insert_resource(TrailMaterial(materials.add(stroke_material())));
+
     if !settings.enabled {
         return;
     }
-
-    // Shared blend material for the ball trails.
-    commands.insert_resource(TrailMaterial(materials.add(stroke_material())));
 
     // Gravity in our pixel space; Box mode uses it, circle modes zero it.
     commands.insert_resource(Gravity(Vec2::NEG_Y * settings.gravity));
@@ -495,9 +501,12 @@ fn enforce_ball_cap(
     if count <= max {
         return;
     }
+    let over = count - max;
+    // Partition the `over` oldest (smallest id) to the front in O(n) rather than
+    // fully sorting O(n log n) every frame we're at the cap.
     let mut by_age: Vec<(Entity, u64)> = balls.iter().map(|(e, b)| (e, b.id)).collect();
-    by_age.sort_by_key(|(_, id)| *id);
-    for (entity, _) in by_age.into_iter().take(count - max) {
+    by_age.select_nth_unstable_by_key(over - 1, |(_, id)| *id);
+    for (entity, _) in by_age.into_iter().take(over) {
         commands.entity(entity).despawn();
     }
 }
@@ -601,9 +610,14 @@ fn update_surface(
     }
 
     // Rebuild the heightfield collider to match (x spans [-w/2, w/2]); park the
-    // whole body offscreen while Wave isn't the active mode.
+    // whole body offscreen while Wave isn't the active mode. Skip the expensive
+    // collider/BVH rebuild once parked and fully relaxed to the floor — otherwise
+    // every non-Wave mode would reconstruct an unused heightfield ~60×/sec.
     if let Ok((mut collider, mut transform)) = body.single_mut() {
-        *collider = Collider::heightfield(surface.heights.clone(), Vec2::new(w, 1.0));
+        let settled = !active && surface.heights.iter().all(|h| (h - floor).abs() <= 0.5);
+        if !settled {
+            *collider = Collider::heightfield(surface.heights.clone(), Vec2::new(w, 1.0));
+        }
         transform.translation.y = if active { 0.0 } else { -PARKED };
     }
 }
@@ -745,6 +759,10 @@ fn update_columns(
     let mut values = cava.mono();
     let n = values.len();
     if n == 0 {
+        // No audio this frame: keep prev synced to tops so the next non-empty
+        // frame doesn't divide a multi-frame top delta by one frame's dt (which
+        // would fling resting balls upward).
+        columns.prev.copy_from_slice(&columns.tops);
         return;
     }
     spread_monstercat(&mut values, vis.monstercat);
@@ -900,11 +918,13 @@ fn update_planet(
         return;
     }
 
-    // Cache radii (this frame + last) for the radial velocity field.
+    // Cache radii (this frame + last) for the radial velocity field, and the
+    // closed-loop indices (rebuilt only when the segment count changes).
     let planet = planet.into_inner();
     if planet.radii.len() != n {
         planet.radii = ring.iter().map(|p| p.length()).collect();
         planet.prev = planet.radii.clone();
+        planet.indices = (0..n as u32).map(|k| [k, (k + 1) % n as u32]).collect();
     } else {
         planet.prev.copy_from_slice(&planet.radii);
         for (i, p) in ring.iter().enumerate() {
@@ -912,9 +932,9 @@ fn update_planet(
         }
     }
 
-    // Closed-loop polyline matching the rendered blob.
-    let indices: Vec<[u32; 2]> = (0..n as u32).map(|k| [k, (k + 1) % n as u32]).collect();
-    *collider = Collider::polyline(ring, Some(indices));
+    // Closed-loop polyline matching the rendered blob (positions change each
+    // frame, so the BVH rebuild is unavoidable; the index list is reused).
+    *collider = Collider::polyline(ring, Some(planet.indices.clone()));
 }
 
 /// Planet-mode radial forces: pull every ball toward the center, fling balls the

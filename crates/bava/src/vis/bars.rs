@@ -211,6 +211,75 @@ impl Layout {
     }
 }
 
+/// The per-bar display values for the bar pool / line shapes, with the mirror
+/// mode applied. `n` is the pool size (= live bar count). This is a purely visual
+/// horizontal remap — physics reads [`Cava::mono`] directly and is unaffected.
+///
+/// - [`MirrorMode::Off`]: the spectrum as-is.
+/// - [`MirrorMode::Full`]: a left/right-reflected copy of the spectrum (bass
+///   meets at the center, treble at the edges; `reverse_mirror` flips that).
+/// - [`MirrorMode::SplitChannels`]: the left channel on one side, the right
+///   channel mirrored on the other (mono falls back to the same data on both).
+fn mirror_values(cava: &Cava, vis: &VisSettings, n: usize) -> Vec<f32> {
+    let spread = |mut v: Vec<f32>| {
+        spread_monstercat(&mut v, vis.monstercat);
+        v
+    };
+    match vis.mirror {
+        MirrorMode::Off => spread(cava.mono()),
+        MirrorMode::Full => fold_symmetric(&spread(cava.mono()), n, vis.reverse_mirror),
+        MirrorMode::SplitChannels => {
+            let left = spread(cava.left().to_vec());
+            let right = if cava.right().is_empty() {
+                left.clone()
+            } else {
+                spread(cava.right().to_vec())
+            };
+            let (a, b) = if vis.reverse_mirror { (&right, &left) } else { (&left, &right) };
+            let half = n.div_ceil(2);
+            (0..n)
+                .map(|i| {
+                    if i < half {
+                        // Left side: bass at the center (i = half-1), treble at i=0.
+                        resample(a, half - 1 - i, half)
+                    } else {
+                        resample(b, i - half, n - half)
+                    }
+                })
+                .collect()
+        }
+    }
+}
+
+/// Map `n` slots to a left/right-symmetric copy of `src`: `pos = 0` (center) →
+/// `src[0]`, the edges → `src[last]` (reversed if `reverse`).
+fn fold_symmetric(src: &[f32], n: usize, reverse: bool) -> Vec<f32> {
+    if src.is_empty() {
+        return vec![0.0; n];
+    }
+    let m = src.len();
+    let half = n.div_ceil(2);
+    (0..n)
+        .map(|i| {
+            let dist = if i < half { half - 1 - i } else { i - half };
+            let mut idx = dist * (m - 1) / half.saturating_sub(1).max(1);
+            if reverse {
+                idx = (m - 1) - idx.min(m - 1);
+            }
+            src[idx.min(m - 1)]
+        })
+        .collect()
+}
+
+/// Value of `src` at relative position `pos` of `slots` evenly spaced samples.
+fn resample(src: &[f32], pos: usize, slots: usize) -> f32 {
+    if src.is_empty() {
+        return 0.0;
+    }
+    let m = src.len();
+    src[(pos * (m - 1) / slots.saturating_sub(1).max(1)).min(m - 1)]
+}
+
 /// Rebuild each bar mesh for the blocky shapes (Bars/Levels/Particles/Spine) as
 /// a rounded rect, or hide the pool when a line shape (Wave/Splitter) or a circle
 /// mode is active.
@@ -239,31 +308,32 @@ fn update_bars(
     };
     let (w, h) = (window.width(), window.height());
 
-    let mut values = cava.mono();
-    let n = values.len();
+    let n = cava.bars_per_channel;
     if n == 0 {
         return;
     }
-    spread_monstercat(&mut values, vis.monstercat);
+    // Per-bar values with the mirror mode applied (horizontal L/R reflection).
+    let values = mirror_values(&cava, &vis, n);
 
-    let mirror = vis.mirror != MirrorMode::Off;
     let (lo, hi) = (vis.fg_lo(), vis.fg_hi());
-    // Only the column shapes use the mirrored (centered, half-height) layout.
-    let centered = mirror && matches!(bar_shape, VisShape::Bars | VisShape::Levels);
-    let lyt = Layout::new(w, h, n, centered);
+    let lyt = Layout::new(w, h, n, false);
 
     for (bar, mesh2d, mut transform, mut visibility) in &mut bars {
+        if bar.0 >= n {
+            *visibility = Visibility::Hidden;
+            continue;
+        }
         *visibility = Visibility::Visible;
         let v = values.get(bar.0).copied().unwrap_or(0.0).clamp(0.0, 1.5);
         let x = lyt.bar_x(bar.0);
 
         // Each shape resolves to a centered rounded rect: (center y, half extents).
         let (cy, half) = match bar_shape {
-            VisShape::Bars => column_geom(&lyt, (v * lyt.max_h).max(1.0), centered),
+            VisShape::Bars => column_geom(&lyt, (v * lyt.max_h).max(1.0), false),
             VisShape::Levels => {
                 // Snap the height to discrete VU-style steps.
                 let stepped = (v * LEVEL_STEPS).round() / LEVEL_STEPS;
-                column_geom(&lyt, (stepped * lyt.max_h).max(1.0), centered)
+                column_geom(&lyt, (stepped * lyt.max_h).max(1.0), false)
             }
             VisShape::Particles => {
                 // A small square that floats at the bar's level.
@@ -328,12 +398,12 @@ fn update_box_lines(
     };
     let (w, h) = (window.width(), window.height());
 
-    let mut values = cava.mono();
-    let n = values.len();
+    let n = cava.bars_per_channel;
     if n == 0 {
         return;
     }
-    spread_monstercat(&mut values, vis.monstercat);
+    // Mirror-aware per-bar values (matches the bar pool's horizontal reflection).
+    let values = mirror_values(&cava, &vis, n);
     let (lo, hi) = (vis.fg_lo(), vis.fg_hi());
     let lyt = Layout::new(w, h, n, false);
 
