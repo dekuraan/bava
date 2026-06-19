@@ -11,17 +11,28 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
+use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
 use windows::Win32::Media::Audio::{
-    eConsole, eRender, IAudioCaptureClient, IAudioClient, IMMDeviceEnumerator, MMDeviceEnumerator,
-    AUDCLNT_E_DEVICE_INVALIDATED, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK,
+    eConsole, eRender, IAudioCaptureClient, IAudioClient, IMMDevice, IMMDeviceEnumerator,
+    MMDeviceEnumerator,
+    AUDCLNT_E_DEVICE_INVALIDATED, AUDCLNT_E_DEVICE_IN_USE, AUDCLNT_E_SERVICE_NOT_RUNNING,
+    AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK, AUDCLNT_STREAMFLAGS_LOOPBACK,
     WAVEFORMATEX, WAVEFORMATEXTENSIBLE,
 };
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_ALL, COINIT_MULTITHREADED,
 };
-use windows::core::GUID;
+use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
+use windows::core::{GUID, PCWSTR, PWSTR};
 
 use super::{AudioCapture, CaptureError, LinearResampler};
+
+/// How often [`WasapiCapture::read`] re-checks whether the default render
+/// endpoint changed. Detecting a device switch within this window is plenty
+/// responsive for a visualizer, and avoids the COM `IMMNotificationClient`
+/// path (whose `#[implement]` macro collides with the multiple `windows-core`
+/// versions winit/accesskit pull into the tree).
+const DEVICE_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 /// `wFormatTag` for raw IEEE float samples.
 const WAVE_FORMAT_IEEE_FLOAT: u16 = 0x0003;
@@ -83,12 +94,26 @@ struct Stream {
     /// Bytes per device frame (from `nBlockAlign` — may include padding beyond
     /// `device_channels * kind.size()`).
     frame_bytes: usize,
+    /// Endpoint ID this stream was opened on, used to detect a default-device
+    /// switch (the old endpoint often keeps delivering audio without ever
+    /// returning `AUDCLNT_E_DEVICE_INVALIDATED`).
+    device_id: Option<String>,
 }
 
 /// A WASAPI loopback stream feeding interleaved `f64` samples at the requested
 /// `rate`/`channels`.
 pub struct WasapiCapture {
     stream: Stream,
+
+    /// Device enumerator, kept alive to open/reopen streams and to poll the
+    /// current default render endpoint.
+    enumerator: IMMDeviceEnumerator,
+    /// Auto-reset event the audio engine signals when a capture buffer is ready
+    /// (`AUDCLNT_STREAMFLAGS_EVENTCALLBACK`). Reused across reopens; closed on
+    /// drop. Lets `read` block efficiently on the event instead of polling.
+    event: HANDLE,
+    /// When the default render endpoint was last checked for a change.
+    last_device_check: Instant,
 
     /// Requested output format.
     target_rate: u32,
@@ -100,6 +125,37 @@ pub struct WasapiCapture {
     resampler: LinearResampler,
     /// Scratch holding one converted device frame, reused across frames.
     frame: Vec<f64>,
+}
+
+/// Whether an HRESULT from a capture call means the stream is dead and must be
+/// reopened against the current default endpoint. Beyond plain invalidation this
+/// covers the audio service restarting and the endpoint being grabbed exclusively.
+fn is_device_lost(code: windows::core::HRESULT) -> bool {
+    code == AUDCLNT_E_DEVICE_INVALIDATED
+        || code == AUDCLNT_E_SERVICE_NOT_RUNNING
+        || code == AUDCLNT_E_DEVICE_IN_USE
+}
+
+/// Read an endpoint's stable ID string. The ID is a COM-allocated `PWSTR`, freed
+/// here after copying into an owned `String`.
+unsafe fn read_endpoint_id(device: &IMMDevice) -> Option<String> {
+    unsafe {
+        let pw: PWSTR = device.GetId().ok()?;
+        if pw.is_null() {
+            return None;
+        }
+        let s = pw.to_string().ok();
+        CoTaskMemFree(Some(pw.0 as *const core::ffi::c_void));
+        s
+    }
+}
+
+/// The current default render endpoint's ID, if one can be resolved.
+fn current_default_id(enumerator: &IMMDeviceEnumerator) -> Option<String> {
+    unsafe {
+        let device = enumerator.GetDefaultAudioEndpoint(eRender, eConsole).ok()?;
+        read_endpoint_id(&device)
+    }
 }
 
 // The COM interfaces are only ever touched from the capture thread that opened
@@ -122,9 +178,28 @@ impl WasapiCapture {
             // prior init in another mode is harmless for our usage.
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         }
-        let stream = Self::open_stream()?;
+
+        // One enumerator for the lifetime of the capture: it opens every stream
+        // (initial + reopens) and polls the current default render endpoint.
+        let enumerator: IMMDeviceEnumerator = unsafe {
+            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
+                .map_err(|e| CaptureError::Init(format!("MMDeviceEnumerator: {e}")))?
+        };
+
+        // Auto-reset, initially-unsignalled, unnamed event for the engine to
+        // signal when capture data is ready. Shared across the initial stream
+        // and every reopen via SetEventHandle.
+        let event = unsafe {
+            CreateEventW(None, false, false, PCWSTR::null())
+                .map_err(|e| CaptureError::Init(format!("CreateEventW: {e}")))?
+        };
+
+        let stream = Self::open_stream(&enumerator, event)?;
         Ok(Self {
             stream,
+            enumerator,
+            event,
+            last_device_check: Instant::now(),
             target_rate,
             target_channels,
             pending: VecDeque::new(),
@@ -133,16 +208,18 @@ impl WasapiCapture {
         })
     }
 
-    /// Build a fresh loopback stream on the current default render endpoint.
-    /// Assumes COM is already initialized on the calling thread.
-    fn open_stream() -> Result<Stream, CaptureError> {
+    /// Build a fresh loopback stream on the current default render endpoint,
+    /// driving it event-callback style off `event`. Assumes COM is already
+    /// initialized on the calling thread.
+    fn open_stream(
+        enumerator: &IMMDeviceEnumerator,
+        event: HANDLE,
+    ) -> Result<Stream, CaptureError> {
         unsafe {
-            let enumerator: IMMDeviceEnumerator =
-                CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
-                    .map_err(|e| CaptureError::Init(format!("MMDeviceEnumerator: {e}")))?;
             let device = enumerator
                 .GetDefaultAudioEndpoint(eRender, eConsole)
                 .map_err(|e| CaptureError::Init(format!("default render endpoint: {e}")))?;
+            let device_id = read_endpoint_id(&device);
             let client: IAudioClient = device
                 .Activate(CLSCTX_ALL, None)
                 .map_err(|e| CaptureError::Init(format!("activate IAudioClient: {e}")))?;
@@ -156,10 +233,12 @@ impl WasapiCapture {
             }
             let (device_rate, device_channels, kind, frame_bytes) = parse_format(mix);
 
-            // ~1s ring; periodicity must be 0 for shared mode.
+            // ~1s ring; periodicity must be 0 for shared mode. EVENTCALLBACK so
+            // the engine signals `event` when a buffer is ready (drives `read`'s
+            // wait instead of polling).
             let res = client.Initialize(
                 AUDCLNT_SHAREMODE_SHARED,
-                AUDCLNT_STREAMFLAGS_LOOPBACK,
+                AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
                 10_000_000,
                 0,
                 mix,
@@ -167,6 +246,12 @@ impl WasapiCapture {
             );
             CoTaskMemFree(Some(mix as *const core::ffi::c_void));
             res.map_err(|e| CaptureError::Init(format!("IAudioClient::Initialize: {e}")))?;
+
+            // Event-callback mode requires the handle be set before Start, else
+            // Start fails with AUDCLNT_E_EVENTHANDLE_NOT_SET.
+            client
+                .SetEventHandle(event)
+                .map_err(|e| CaptureError::Init(format!("SetEventHandle: {e}")))?;
 
             let kind =
                 kind.ok_or_else(|| CaptureError::Init("unsupported mix sample format".into()))?;
@@ -188,6 +273,7 @@ impl WasapiCapture {
                 device_channels,
                 kind,
                 frame_bytes,
+                device_id,
             })
         }
     }
@@ -197,7 +283,7 @@ impl WasapiCapture {
     /// device may have a different format — but keeps `pending`, whose samples
     /// are already at the target rate. Returns whether the rebuild succeeded.
     fn reopen(&mut self) -> bool {
-        match Self::open_stream() {
+        match Self::open_stream(&self.enumerator, self.event) {
             Ok(stream) => {
                 unsafe {
                     let _ = self.stream.client.Stop();
@@ -224,7 +310,7 @@ impl WasapiCapture {
                 let frames = match self.stream.capture.GetNextPacketSize() {
                     Ok(n) => n,
                     Err(e) => {
-                        return if e.code() == AUDCLNT_E_DEVICE_INVALIDATED {
+                        return if is_device_lost(e.code()) {
                             PumpStatus::Lost
                         } else {
                             status
@@ -243,7 +329,7 @@ impl WasapiCapture {
                         .capture
                         .GetBuffer(&mut data, &mut n_frames, &mut flags, None, None)
                 {
-                    return if e.code() == AUDCLNT_E_DEVICE_INVALIDATED {
+                    return if is_device_lost(e.code()) {
                         PumpStatus::Lost
                     } else {
                         status
@@ -312,6 +398,7 @@ impl Drop for WasapiCapture {
     fn drop(&mut self) {
         unsafe {
             let _ = self.stream.client.Stop();
+            let _ = CloseHandle(self.event);
         }
     }
 }
@@ -326,13 +413,41 @@ impl AudioCapture for WasapiCapture {
         let budget = Duration::from_secs_f64(frames as f64 / self.target_rate as f64);
         let start = Instant::now();
         while self.pending.len() < buf.len() {
+            // Periodically check whether the default render endpoint changed; if
+            // it did, rebind to the new device. The old endpoint frequently keeps
+            // delivering (old or silent) audio without ever returning
+            // AUDCLNT_E_DEVICE_INVALIDATED, so polling the default ID is the only
+            // reliable way to follow a "default output device" switch.
+            if self.last_device_check.elapsed() >= DEVICE_POLL_INTERVAL {
+                self.last_device_check = Instant::now();
+                if let Some(now_id) = current_default_id(&self.enumerator) {
+                    let changed = self
+                        .stream
+                        .device_id
+                        .as_deref()
+                        .is_some_and(|cur| cur != now_id);
+                    if changed && !self.reopen() {
+                        std::thread::sleep(Duration::from_millis(100));
+                        break;
+                    }
+                }
+            }
             match self.pump() {
                 PumpStatus::Data => {}
                 PumpStatus::Idle => {
-                    if start.elapsed() >= budget {
+                    // Wait for the engine to signal more data, but only for the
+                    // real-time span left in this chunk's budget — a fully idle
+                    // render device produces no events, so we must still fall
+                    // through to a zero-filled frame at a steady cadence.
+                    let Some(remaining) = budget.checked_sub(start.elapsed()) else {
+                        break;
+                    };
+                    let ms = remaining.as_millis().min(u32::MAX as u128) as u32;
+                    // WAIT_OBJECT_0 → a buffer is ready, loop and pump it; any
+                    // other result (timeout/failure) → treat as idle and stop.
+                    if unsafe { WaitForSingleObject(self.event, ms) } != WAIT_OBJECT_0 {
                         break;
                     }
-                    std::thread::sleep(Duration::from_millis(3));
                 }
                 PumpStatus::Lost => {
                     if !self.reopen() {
@@ -343,6 +458,13 @@ impl AudioCapture for WasapiCapture {
                     }
                 }
             }
+        }
+        // Bound the converted backlog so a consumer that briefly stalls can't let
+        // `pending` grow without limit; keep the most recent ~2 s, drop older.
+        let cap = (self.target_rate as usize * self.target_channels * 2).max(buf.len());
+        if self.pending.len() > cap {
+            let overflow = self.pending.len() - cap;
+            self.pending.drain(..overflow);
         }
         for slot in buf.iter_mut() {
             *slot = self.pending.pop_front().unwrap_or(0.0);

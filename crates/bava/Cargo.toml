@@ -7,6 +7,12 @@ repository.workspace = true
 description = "A Bevy music visualizer driven by cavacore, MPRIS, and spotifyd"
 default-run = "bava"
 
+[features]
+# Native PipeWire capture backend (Linux). On by default; disable with
+# `--no-default-features` to drop the libpipewire link on pure-PulseAudio hosts.
+default = ["pipewire"]
+pipewire = ["dep:pipewire"]
+
 [dependencies]
 cavacore-rs.workspace = true
 
@@ -71,9 +77,19 @@ dirs = "6"
 
 # --- Linux backends: PulseAudio capture + MPRIS now-playing over D-Bus. ---
 [target.'cfg(target_os = "linux")'.dependencies]
-# Audio capture (PulseAudio simple API, works through pipewire-pulse).
+# Audio capture (PulseAudio simple API, works through pipewire-pulse). Always
+# compiled: the universal fallback when the native PipeWire backend is disabled
+# or fails to connect.
 libpulse-binding = "2"
 libpulse-simple-binding = "2"
+# Native PipeWire capture (default-on). Follows the default sink's monitor via
+# the graph (PW_KEY_STREAM_CAPTURE_SINK + autoconnect) and negotiates format,
+# which the pipewire-pulse compatibility path can't. Optional + linked only with
+# the `pipewire` feature so a `--no-default-features` build stays free of the
+# libpipewire link for pure-PulseAudio systems.
+# `v0_3_44` unlocks PW_KEY_TARGET_OBJECT (for pinning an explicit capture node);
+# the runtime libpipewire is far newer, so the gate is purely a min-version marker.
+pipewire = { version = "0.10", optional = true, features = ["v0_3_44"] }
 # Now-playing metadata + album art over MPRIS / D-Bus.
 mpris = "2"
 # HTTP fetch for remote album art (e.g. spotifyd's http artUrl).
@@ -87,8 +103,10 @@ windows = { version = "0.62", features = [
     "Storage_Streams",
     "Win32_Foundation",
     "Win32_Media_Audio",
+    "Win32_Security",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
+    "Win32_System_Threading",
     "Win32_System_Variant",
 ] }
 
