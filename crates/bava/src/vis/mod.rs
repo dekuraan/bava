@@ -536,3 +536,127 @@ fn color_close(a: Color, b: Color) -> bool {
     let b = b.to_srgba();
     (a.red - b.red).abs() + (a.green - b.green).abs() + (a.blue - b.blue).abs() < 0.004
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lum(c: Color) -> f32 {
+        let l = c.to_linear();
+        l.red + l.green + l.blue
+    }
+
+    #[test]
+    fn drawing_mode_all_is_complete_and_unique() {
+        assert_eq!(DrawingMode::ALL.len(), 11);
+        // Every entry distinct.
+        for (i, a) in DrawingMode::ALL.iter().enumerate() {
+            for b in &DrawingMode::ALL[i + 1..] {
+                assert_ne!(a, b, "duplicate mode {a:?}");
+            }
+        }
+        // Splitter has no circle form → exactly one Splitter shape overall.
+        let splitters = DrawingMode::ALL
+            .iter()
+            .filter(|m| m.shape() == VisShape::Splitter)
+            .count();
+        assert_eq!(splitters, 1);
+    }
+
+    #[test]
+    fn drawing_mode_next_cycles_and_wraps() {
+        let mut m = DrawingMode::ALL[0];
+        let mut seen = vec![m];
+        for _ in 0..DrawingMode::ALL.len() - 1 {
+            m = m.next();
+            seen.push(m);
+        }
+        assert_eq!(seen, DrawingMode::ALL.to_vec());
+        // Wraps back to the start.
+        assert_eq!(DrawingMode::ALL[10].next(), DrawingMode::ALL[0]);
+    }
+
+    #[test]
+    fn drawing_mode_shape_and_family_mapping() {
+        assert_eq!(DrawingMode::WaveBox.shape(), VisShape::Wave);
+        assert_eq!(DrawingMode::WaveBox.family(), VisFamily::Box);
+        assert_eq!(DrawingMode::BarsCircle.shape(), VisShape::Bars);
+        assert_eq!(DrawingMode::BarsCircle.family(), VisFamily::Circle);
+        // Box and circle share the shape but differ in family.
+        for m in DrawingMode::ALL {
+            assert_eq!(m.family() == VisFamily::Box, format!("{m:?}").ends_with("Box"));
+        }
+    }
+
+    #[test]
+    fn spread_monstercat_noop_when_factor_low() {
+        let orig = vec![0.0, 1.0, 0.0, 0.2];
+        let mut v = orig.clone();
+        spread_monstercat(&mut v, 1.0);
+        assert_eq!(v, orig);
+        spread_monstercat(&mut v, 0.5);
+        assert_eq!(v, orig);
+    }
+
+    #[test]
+    fn spread_monstercat_lifts_neighbours_and_is_order_independent() {
+        // A single spike should raise its neighbours by peak/factor^dist.
+        let mut v = vec![0.0, 0.0, 1.0, 0.0, 0.0];
+        spread_monstercat(&mut v, 2.0);
+        assert!((v[2] - 1.0).abs() < 1e-6, "peak preserved");
+        assert!((v[1] - 0.5).abs() < 1e-6, "dist 1 → 0.5");
+        assert!((v[3] - 0.5).abs() < 1e-6);
+        assert!((v[0] - 0.25).abs() < 1e-6, "dist 2 → 0.25");
+        assert!((v[4] - 0.25).abs() < 1e-6);
+
+        // Symmetric spikes give a symmetric result regardless of which is processed first.
+        let mut a = vec![1.0, 0.0, 0.0, 0.0, 1.0];
+        spread_monstercat(&mut a, 2.0);
+        for i in 0..a.len() {
+            assert!((a[i] - a[a.len() - 1 - i]).abs() < 1e-6, "asymmetry at {i}");
+        }
+    }
+
+    #[test]
+    fn gradient_color_clamps_and_brightens_with_amplitude() {
+        let lo = Color::srgb(0.1, 0.2, 0.3);
+        let hi = Color::srgb(0.9, 0.8, 0.7);
+        // Out-of-range t clamps to the endpoints.
+        assert!((lum(gradient_color(lo, hi, -1.0, 1.8)) - lum(gradient_color(lo, hi, 0.0, 1.8))).abs() < 1e-5);
+        assert!((lum(gradient_color(lo, hi, 2.0, 1.8)) - lum(gradient_color(lo, hi, 1.0, 1.8))).abs() < 1e-5);
+        // Louder → brighter when glow is on.
+        assert!(lum(gradient_color(lo, hi, 1.0, 1.8)) > lum(gradient_color(lo, hi, 0.0, 1.8)));
+        // glow_gain 0 disables the HDR boost (still a valid color).
+        let no_glow = gradient_color(lo, hi, 1.0, 0.0);
+        assert!(no_glow.to_linear().red.is_finite());
+    }
+
+    #[test]
+    fn vis_settings_profile_clamps_index_and_handles_empty() {
+        let mut s = VisSettings::default();
+        s.profiles = vec![
+            ColorProfile { name: "a".into(), fg: vec![Color::BLACK], ..ColorProfile::default() },
+            ColorProfile { name: "b".into(), fg: vec![Color::WHITE], ..ColorProfile::default() },
+        ];
+        s.active_profile = 99; // out of range → clamps to last
+        assert_eq!(s.profile().name, "b");
+
+        s.profiles.clear();
+        // Empty list → a default profile, never a panic.
+        assert_eq!(s.profile().name, ColorProfile::default().name);
+    }
+
+    #[test]
+    fn color_profile_endpoints_fall_back_to_white() {
+        let empty = ColorProfile { fg: vec![], ..ColorProfile::default() };
+        assert_eq!(empty.fg_lo(), Color::WHITE);
+        assert_eq!(empty.fg_hi(), Color::WHITE);
+
+        let two = ColorProfile {
+            fg: vec![Color::BLACK, Color::WHITE],
+            ..ColorProfile::default()
+        };
+        assert_eq!(two.fg_lo(), Color::BLACK);
+        assert_eq!(two.fg_hi(), Color::WHITE);
+    }
+}

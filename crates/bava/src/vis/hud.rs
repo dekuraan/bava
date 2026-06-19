@@ -48,7 +48,27 @@ impl Plugin for HudPlugin {
     }
 }
 
-fn setup_hud(mut commands: Commands) {
+fn setup_hud(mut commands: Commands, mut fonts: ResMut<Assets<Font>>) {
+    let font_regular = fonts.add(
+        Font::try_from_bytes(
+            include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../assets/fonts/FiraSans-Regular.ttf"
+            ))
+            .to_vec(),
+        )
+        .expect("FiraSans-Regular is valid"),
+    );
+    let font_medium = fonts.add(
+        Font::try_from_bytes(
+            include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../assets/fonts/FiraSans-Medium.ttf"
+            ))
+            .to_vec(),
+        )
+        .expect("FiraSans-Medium is valid"),
+    );
     // User background image — behind album art and bars.
     commands.spawn((
         Sprite { color: Color::NONE, ..default() },
@@ -90,6 +110,7 @@ fn setup_hud(mut commands: Commands) {
             parent.spawn((
                 Text::new(""),
                 TextFont {
+                    font: font_medium,
                     font_size: 30.0,
                     ..default()
                 },
@@ -104,6 +125,7 @@ fn setup_hud(mut commands: Commands) {
             parent.spawn((
                 Text::new(""),
                 TextFont {
+                    font: font_regular,
                     font_size: 18.0,
                     ..default()
                 },
