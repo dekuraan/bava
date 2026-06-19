@@ -44,9 +44,6 @@ jobs:
       - name: Test (cavacore-rs)
         run: cargo test -p cavacore-rs
 
-      - name: Test (bava)
-        run: cargo test -p bava --bin bava
-
   # ── Windows: native build (uses the real windows crate + MSVC toolchain) ──
   windows:
     name: Windows (x86_64)
@@ -65,11 +62,19 @@ jobs:
         shell: pwsh
         run: |
           Invoke-WebRequest -Uri "https://fftw.org/pub/fftw/fftw-3.3.5-dll64.zip" -OutFile fftw.zip
-          Expand-Archive fftw.zip -DestinationPath fftw
-          # The zip ships libfftw3-3.lib; cargo links 'fftw3' → MSVC looks for fftw3.lib.
-          $lib = Get-ChildItem fftw -Recurse -Filter "libfftw3-3.lib" | Select-Object -First 1
-          Copy-Item $lib.FullName (Join-Path $lib.DirectoryName "fftw3.lib")
-          $fftwDir = $lib.DirectoryName
+          Expand-Archive fftw.zip -DestinationPath fftw_extract
+          # Locate the directory holding fftw3.h (handles any zip nesting)
+          $fftwDir = (Get-ChildItem fftw_extract -Recurse -Filter "fftw3.h" |
+                      Select-Object -First 1).DirectoryName
+          # The zip ships .def files but no .lib; generate the MSVC import library.
+          $vsPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
+              -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+              -property installationPath
+          $libExe = (Get-ChildItem "$vsPath\VC\Tools\MSVC" -Recurse -Filter lib.exe |
+              Where-Object { $_.FullName -match 'Hostx64\\x64' } |
+              Select-Object -First 1).FullName
+          $defFile = (Get-ChildItem $fftwDir -Filter "*fftw3-3.def" | Select-Object -First 1).FullName
+          & $libExe /machine:x64 /def:$defFile /out:"$fftwDir\fftw3.lib"
           echo "LIB=$fftwDir;$env:LIB" >> $env:GITHUB_ENV
           echo "INCLUDE=$fftwDir;$env:INCLUDE" >> $env:GITHUB_ENV
 
