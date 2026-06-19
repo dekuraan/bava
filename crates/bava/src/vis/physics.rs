@@ -54,6 +54,14 @@ const WALL_THICKNESS: f32 = 200.0;
 const SAMPLES: usize = 192;
 /// Park an inactive surface/planet/column body far outside the world.
 const PARKED: f32 = 1.0e6;
+/// When ejecting a ball trapped inside the planet blob, give it enough outward
+/// speed to clear the rim by this many ball-radii against `central_gravity`,
+/// instead of dribbling out and immediately re-sinking — which reads as a ball
+/// "stuck in the orb".
+const EJECT_CLEARANCE_RADII: f32 = 4.0;
+/// Floor outward speed (px/s) used to unstick a ball a surface/column/blob has
+/// swallowed, so even a stationary swallowed ball is carried back out.
+const UNSTICK_FLOOR: f32 = 120.0;
 
 /// Runtime physics tunables, mapped from `[physics]` in the config.
 #[derive(Resource, Clone, Debug)]
@@ -677,7 +685,7 @@ fn push_balls(
         // carry it upward at least as fast as the surface is rising.
         if dist < -ball.radius {
             transform.translation.y = surf_y + ball.radius;
-            let up = rise.max(0.0).max(120.0);
+            let up = rise.max(0.0).max(UNSTICK_FLOOR);
             vel.0.y = vel.0.y.max(up);
             continue;
         }
@@ -854,7 +862,7 @@ fn push_columns(
         // carry it up at least as fast as the column is rising.
         if dist < -ball.radius {
             transform.translation.y = top + ball.radius;
-            let up = rise.max(0.0).max(120.0);
+            let up = rise.max(0.0).max(UNSTICK_FLOOR);
             vel.0.y = vel.0.y.max(up);
             continue;
         }
@@ -966,46 +974,68 @@ fn planet_forces(
     if dt <= 0.0 {
         return;
     }
+    use std::f32::consts::{FRAC_PI_2, TAU};
     let n = planet.radii.len();
+    let has_blob = n >= 3;
     for (mut transform, mut vel, ball) in &mut balls {
         let pos = transform.translation.truncate();
         let r = pos.length();
-        if r < 1.0 {
+
+        // Outward unit direction. A ball sitting on (or arbitrarily close to) the
+        // center has no radial direction of its own, so fall back to its travel
+        // direction, then to a fixed axis — otherwise a dead-center ball could
+        // never be ejected and would stay buried in the blob forever (the bug
+        // this guards against: spawn in the middle → must leave the surface).
+        let outward = if r > 1.0 {
+            pos / r
+        } else if vel.0.length_squared() > 1.0 {
+            vel.0.normalize()
+        } else {
+            Vec2::Y
+        };
+
+        // With no blob geometry yet (startup, before `update_planet` runs) and no
+        // radial direction, there's nothing meaningful to do for a center ball.
+        if !has_blob && r <= 1.0 {
             continue;
         }
-        let outward = pos / r;
 
-        // Central gravity: accelerate toward the center.
-        vel.0 -= outward * settings.central_gravity * dt;
-
-        if n < 3 {
-            continue;
-        }
-        // Blob radius in this ball's direction (invert `ring_point`'s mapping:
-        // angle = t·TAU − π/2).
-        let ang = pos.y.atan2(pos.x);
-        let t = ((ang + std::f32::consts::FRAC_PI_2) / std::f32::consts::TAU).rem_euclid(1.0);
-        let k = ((t * n as f32).round() as usize) % n;
-        let surf_r = planet.radii[k];
-        let expand = (planet.radii[k] - planet.prev[k]) / dt;
+        // Blob radius + expansion rate in this ball's direction (invert
+        // `ring_point`'s mapping: angle = t·TAU − π/2).
+        let (surf_r, expand) = if has_blob {
+            let ang = outward.y.atan2(outward.x);
+            let t = ((ang + FRAC_PI_2) / TAU).rem_euclid(1.0);
+            let k = ((t * n as f32).round() as usize) % n;
+            (planet.radii[k], (planet.radii[k] - planet.prev[k]) / dt)
+        } else {
+            (0.0, 0.0)
+        };
 
         // Unstick: the blob is solid, so a ball whose center has crossed *inside*
-        // the ring at all should never be there. Eject it the moment it crosses,
-        // not after a full radius — otherwise central gravity keeps dragging it
-        // deeper until it slips under the border and jitters there. Push it back
-        // out onto the rim and remove any inward velocity.
-        if r < surf_r {
+        // the rim should never be there. Lift it back onto the rim and give it
+        // enough outward speed to actually clear the surface against central
+        // gravity — and crucially do *not* apply the inward pull this frame, which
+        // would otherwise drag it straight back in and pin it jittering to the rim
+        // (the "stuck in the orb" failure). A dead-center ball lands here too via
+        // the `outward` fallback above and is flung clear.
+        if has_blob && r < surf_r {
             transform.translation =
                 (outward * (surf_r + ball.radius)).extend(transform.translation.z);
-            let push = expand.max(0.0).max(120.0);
+            let clearance = ball.radius * EJECT_CLEARANCE_RADII;
+            let escape = (2.0 * settings.central_gravity * clearance).sqrt();
+            let target = expand.max(0.0).max(escape);
             let along = vel.0.dot(outward);
-            if push > along {
-                vel.0 += outward * (push - along);
+            if target > along {
+                vel.0 += outward * (target - along);
             }
             continue;
         }
+
+        // Outside the blob: central gravity accelerates the ball toward center.
+        vel.0 -= outward * settings.central_gravity * dt;
+
         // Contact band + expanding blob → fling outward.
-        if (r - surf_r).abs() < ball.radius + 4.0 && expand > 0.0 {
+        if has_blob && (r - surf_r).abs() < ball.radius + 4.0 && expand > 0.0 {
             let target = expand * settings.bar_push;
             let along = vel.0.dot(outward);
             if target > along {
@@ -1086,5 +1116,512 @@ fn sync_physics_debug(settings: Res<PhysicsSettings>, mut store: ResMut<GizmoCon
         gizmos.collider_color = Some(Color::srgb(0.2, 1.0, 0.4));
         gizmos.axis_lengths = None;
         gizmos.aabb_color = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Physics tests, layered by scope:
+    //!
+    //! - **L1 — pure helpers**: geometry/predicate math with no Bevy world
+    //!   (`wall_geometry`, `sample_height`, the mode predicates, settings sanity).
+    //! - **L2 — single systems**: one system over a minimal app, asserting it
+    //!   mutates the world as intended (`on_mode_change`, `enforce_ball_cap`,
+    //!   `update_gravity_mode`, `reconcile_columns`, `update_planet`,
+    //!   `push_columns`) — no avian stepping, just the system under test.
+    //! - **L3 — avian integration**: the real avian solver stepped over many
+    //!   frames (a ball falls and rests on the floor; a fast ball doesn't tunnel).
+    //! - **L4 — scenarios**: the reported bug — a ball spawned *inside* the planet
+    //!   orb (including dead-center) must be ejected and **leave the surface**,
+    //!   never staying buried in the shape.
+
+    use super::*;
+    use crate::vis::Direction;
+    use std::time::Duration;
+
+    const DT: f32 = 1.0 / 60.0;
+
+    // --- shared builders ----------------------------------------------------
+
+    /// A scheduled-but-render-free app: real `Main` schedule + `Time` (fixed
+    /// 60 Hz step) + a default 1280×720 `Window`, but no avian solver. For L2
+    /// tests that exercise a single system's bookkeeping.
+    fn bare_app() -> App {
+        let mut app = App::new();
+        app.add_plugins(bevy::MinimalPlugins);
+        app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+            Duration::from_secs_f32(DT),
+        ));
+        app.world_mut().spawn(Window::default());
+        app
+    }
+
+    /// `bare_app` plus the avian physics solver, wired exactly like
+    /// [`PhysicsPlugin`] (PostUpdate timestep, our length unit) but without the
+    /// debug-gizmo plugin (which needs a render world). For L3/L4 tests.
+    fn physics_app(mode: DrawingMode) -> App {
+        let mut app = App::new();
+        app.add_plugins((
+            bevy::MinimalPlugins,
+            bevy::transform::TransformPlugin,
+            bevy::asset::AssetPlugin::default(),
+            PhysicsPlugins::default()
+                .with_length_unit(LENGTH_UNIT)
+                .set(PhysicsSchedulePlugin::new(PostUpdate)),
+        ));
+        app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+            Duration::from_secs_f32(DT),
+        ));
+        app.insert_resource(PhysicsSettings::default());
+        app.insert_resource(VisSettings::default());
+        app.insert_resource(EditorState::default());
+        app.insert_resource(mode);
+        // A steady mid-level spectrum so the blob / columns have real geometry.
+        app.insert_resource(Cava {
+            bars: vec![0.3; 24],
+            bars_per_channel: 24,
+            channels: 1,
+        });
+        app.init_resource::<Surface>();
+        app.init_resource::<Columns>();
+        app.init_resource::<Planet>();
+        app.init_resource::<BallCounter>();
+        app.world_mut().spawn(Window::default());
+        app.finish();
+        app
+    }
+
+    fn step(app: &mut App, frames: usize) {
+        for _ in 0..frames {
+            app.update();
+        }
+    }
+
+    fn ball_count(app: &mut App) -> usize {
+        let mut q = app.world_mut().query_filtered::<(), With<Ball>>();
+        q.iter(app.world()).count()
+    }
+
+    fn spawn_planet_body(app: &mut App) {
+        app.world_mut().spawn((
+            RigidBody::Kinematic,
+            Collider::circle(10.0),
+            Restitution::new(1.0),
+            Friction::new(0.0).with_combine_rule(CoefficientCombine::Min),
+            Transform::from_xyz(PARKED, PARKED, 0.0),
+            PlanetBody,
+        ));
+    }
+
+    /// Spawn a dynamic ball (no mesh) at `pos`; returns its entity.
+    fn spawn_ball(app: &mut App, pos: Vec2, radius: f32, restitution: f32, vel: Vec2) -> Entity {
+        app.world_mut()
+            .spawn((
+                RigidBody::Dynamic,
+                Collider::circle(radius),
+                Restitution::new(restitution),
+                LinearVelocity(vel),
+                Mass(1.0),
+                SweptCcd::default(),
+                Transform::from_translation(pos.extend(1.0)),
+                Ball { id: 0, radius },
+            ))
+            .id()
+    }
+
+    fn pos_of(app: &App, e: Entity) -> Vec2 {
+        app.world().get::<Transform>(e).unwrap().translation.truncate()
+    }
+
+    // --- L1: pure helpers ---------------------------------------------------
+
+    #[test]
+    fn l1_wall_geometry_floor_top_sits_on_floor() {
+        let (w, h) = (1280.0, 720.0);
+        // The bottom wall's *top face* must be exactly the floor (-h/2), the
+        // surface balls rest on when they fall between columns.
+        let (size, pos) = wall_geometry(WallSide::Bottom, w, h);
+        let top_face = pos.y + size.y / 2.0;
+        assert!((top_face - (-h / 2.0)).abs() < 1e-3, "floor top at {top_face}");
+        // Side walls span taller than the window and sit just outside it.
+        let (lsize, lpos) = wall_geometry(WallSide::Left, w, h);
+        assert!(lpos.x < -w / 2.0, "left wall must be outside the view");
+        assert!(lsize.y > h, "side walls overshoot the window height");
+    }
+
+    #[test]
+    fn l1_sample_height_endpoints_and_monotonic() {
+        // Single bar → flat.
+        assert_eq!(sample_height(&[0.7], 0), 0.7);
+        assert_eq!(sample_height(&[0.7], SAMPLES / 2), 0.7);
+
+        // A ramp 0→1 should sample monotonically non-decreasing across columns,
+        // hitting the endpoints exactly.
+        let vals: Vec<f32> = (0..8).map(|i| i as f32 / 7.0).collect();
+        assert!((sample_height(&vals, 0) - 0.0).abs() < 1e-4);
+        assert!((sample_height(&vals, SAMPLES - 1) - 1.0).abs() < 1e-4);
+        let mut prev = f32::NEG_INFINITY;
+        for s in 0..SAMPLES {
+            let v = sample_height(&vals, s);
+            assert!(v + 1e-4 >= prev, "non-monotonic at {s}: {v} < {prev}");
+            prev = v;
+        }
+    }
+
+    #[test]
+    fn l1_mode_predicates() {
+        let mut vis = VisSettings::default(); // mirror Off, direction BottomTop
+        assert_eq!(vis.mirror, MirrorMode::Off);
+
+        // Planet: only the smooth WaveCircle rim.
+        assert!(planet_active(DrawingMode::WaveCircle));
+        assert!(!planet_active(DrawingMode::BarsCircle));
+        assert!(!planet_active(DrawingMode::WaveBox));
+
+        // Columns: un-mirrored, floor-anchored Bars/Levels box modes.
+        assert!(columns_active(DrawingMode::BarsBox, &vis));
+        assert!(columns_active(DrawingMode::LevelsBox, &vis));
+        assert!(!columns_active(DrawingMode::ParticlesBox, &vis));
+        assert!(!columns_active(DrawingMode::WaveBox, &vis));
+
+        // Wave heightfield: only WaveBox, only floor-anchored.
+        assert!(wave_active(DrawingMode::WaveBox, &vis));
+        assert!(!wave_active(DrawingMode::WaveCircle, &vis));
+
+        // Mirroring / non-floor direction disable the box surfaces.
+        vis.mirror = MirrorMode::Full;
+        assert!(!columns_active(DrawingMode::BarsBox, &vis));
+        vis.mirror = MirrorMode::Off;
+        vis.direction = Direction::TopBottom;
+        assert!(!columns_active(DrawingMode::BarsBox, &vis));
+        assert!(!wave_active(DrawingMode::WaveBox, &vis));
+
+        // physics_supported is the union.
+        let vis = VisSettings::default();
+        for m in [DrawingMode::WaveCircle, DrawingMode::BarsBox, DrawingMode::WaveBox] {
+            assert!(physics_supported(m, &vis), "{m:?} should be supported");
+        }
+        for m in [DrawingMode::SpineBox, DrawingMode::ParticlesCircle, DrawingMode::SplitterBox] {
+            assert!(!physics_supported(m, &vis), "{m:?} should be inert");
+        }
+    }
+
+    #[test]
+    fn l1_default_settings_are_sane() {
+        let s = PhysicsSettings::default();
+        assert!(s.gravity > 0.0 && s.central_gravity > 0.0);
+        assert!((0.0..=1.0).contains(&s.restitution));
+        assert!(s.radius > 0.0 && s.mass > 0.0 && s.max_balls > 0);
+        assert!(s.trail_length >= 2);
+    }
+
+    // --- L2: single systems -------------------------------------------------
+
+    #[test]
+    fn l2_on_mode_change_keeps_balls_when_unchanged_despawns_on_switch() {
+        let mut app = bare_app();
+        app.insert_resource(DrawingMode::WaveCircle);
+        app.init_resource::<Surface>();
+        app.init_resource::<Columns>();
+        app.init_resource::<Planet>();
+        app.add_systems(Update, on_mode_change);
+
+        // First update establishes the baseline mode.
+        app.update();
+        for id in 0..3 {
+            app.world_mut().spawn(Ball { id, radius: 10.0 });
+        }
+        // No mode change → balls survive.
+        app.update();
+        assert_eq!(ball_count(&mut app), 3, "balls cleared without a mode change");
+
+        // Switch mode → all balls despawned.
+        *app.world_mut().resource_mut::<DrawingMode>() = DrawingMode::WaveBox;
+        app.update();
+        assert_eq!(ball_count(&mut app), 0, "mode switch must clear balls");
+    }
+
+    #[test]
+    fn l2_on_mode_change_resets_rate_caches() {
+        let mut app = bare_app();
+        app.insert_resource(DrawingMode::WaveCircle);
+        app.init_resource::<Surface>();
+        app.init_resource::<Columns>();
+        app.init_resource::<Planet>();
+        app.add_systems(Update, on_mode_change);
+        app.update(); // baseline
+
+        // Diverge heights from prev, then switch mode.
+        {
+            let mut surf = app.world_mut().resource_mut::<Surface>();
+            surf.heights.iter_mut().for_each(|h| *h = 5.0);
+            surf.prev.iter_mut().for_each(|p| *p = 0.0);
+        }
+        *app.world_mut().resource_mut::<DrawingMode>() = DrawingMode::WaveBox;
+        app.update();
+
+        let surf = app.world().resource::<Surface>();
+        assert_eq!(surf.prev, surf.heights, "prev must collapse onto heights");
+        assert!(surf.heights.iter().all(|&h| h == 5.0), "heights untouched");
+    }
+
+    #[test]
+    fn l2_enforce_ball_cap_evicts_oldest() {
+        let mut app = bare_app();
+        app.insert_resource(PhysicsSettings {
+            max_balls: 3,
+            ..PhysicsSettings::default()
+        });
+        app.add_systems(Update, enforce_ball_cap);
+        for id in 0..6 {
+            app.world_mut().spawn(Ball { id, radius: 10.0 });
+        }
+        app.update();
+        let mut ids: Vec<u64> = {
+            let mut q = app.world_mut().query::<&Ball>();
+            q.iter(app.world()).map(|b| b.id).collect()
+        };
+        ids.sort();
+        assert_eq!(ids, vec![3, 4, 5], "the three newest (highest id) survive");
+    }
+
+    #[test]
+    fn l2_update_gravity_mode_toggles_with_mode() {
+        let mut app = bare_app();
+        app.insert_resource(PhysicsSettings::default());
+        app.insert_resource(DrawingMode::WaveCircle);
+        app.insert_resource(Gravity(Vec2::new(0.0, -123.0)));
+        app.add_systems(Update, update_gravity_mode);
+
+        // Planet mode → gravity off (radial forces take over).
+        app.update();
+        assert_eq!(app.world().resource::<Gravity>().0, Vec2::ZERO);
+
+        // Box mode → downward gravity.
+        *app.world_mut().resource_mut::<DrawingMode>() = DrawingMode::WaveBox;
+        app.update();
+        let g = app.world().resource::<Gravity>().0;
+        assert_eq!(g, Vec2::NEG_Y * PhysicsSettings::default().gravity);
+    }
+
+    #[test]
+    fn l2_reconcile_columns_grows_and_shrinks_pool() {
+        let mut app = bare_app();
+        app.insert_resource(PhysicsSettings::default());
+        app.insert_resource(Cava {
+            bars: vec![0.0; 8],
+            bars_per_channel: 8,
+            channels: 1,
+        });
+        app.add_systems(Update, reconcile_columns);
+
+        app.update();
+        let count = |app: &mut App| {
+            let mut q = app.world_mut().query_filtered::<(), With<BarColumn>>();
+            q.iter(app.world()).count()
+        };
+        assert_eq!(count(&mut app), 8, "pool grows to the bar count");
+
+        app.world_mut().resource_mut::<Cava>().bars_per_channel = 3;
+        app.update();
+        assert_eq!(count(&mut app), 3, "pool shrinks to the new bar count");
+
+        // Surviving indices stay contiguous 0..3.
+        let mut idx: Vec<usize> = {
+            let mut q = app.world_mut().query::<&BarColumn>();
+            q.iter(app.world()).map(|c| c.0).collect()
+        };
+        idx.sort();
+        assert_eq!(idx, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn l2_update_planet_builds_blob_when_active_parks_when_not() {
+        let mut app = bare_app();
+        app.insert_resource(PhysicsSettings::default());
+        app.insert_resource(VisSettings::default());
+        app.insert_resource(DrawingMode::WaveCircle);
+        app.insert_resource(Cava {
+            bars: vec![0.4; 24],
+            bars_per_channel: 24,
+            channels: 1,
+        });
+        app.init_resource::<Planet>();
+        spawn_planet_body(&mut app);
+        app.add_systems(Update, update_planet);
+
+        app.update();
+        {
+            let planet = app.world().resource::<Planet>();
+            assert!(planet.radii.len() >= 3, "blob ring sampled");
+            assert!(planet.radii.iter().all(|&r| r > 0.0), "rim radii positive");
+            assert_eq!(planet.indices.len(), planet.radii.len(), "closed loop indices");
+        }
+        // Active → body sits at the origin.
+        let mut bq = app.world_mut().query_filtered::<&Transform, With<PlanetBody>>();
+        let at_origin = bq.single(app.world()).unwrap().translation.truncate();
+        assert!(at_origin.length() < 1.0, "active blob centered, got {at_origin:?}");
+
+        // Switch to a box mode → body parked far offscreen.
+        *app.world_mut().resource_mut::<DrawingMode>() = DrawingMode::WaveBox;
+        app.update();
+        let mut bq = app.world_mut().query_filtered::<&Transform, With<PlanetBody>>();
+        let parked = bq.single(app.world()).unwrap().translation;
+        assert!(parked.x.abs() > 1e5 && parked.y.abs() > 1e5, "parked, got {parked:?}");
+    }
+
+    #[test]
+    fn l2_push_columns_launches_a_resting_ball_on_a_rising_column() {
+        let mut app = bare_app();
+        app.insert_resource(PhysicsSettings::default());
+        app.insert_resource(VisSettings::default()); // mirror Off, BottomTop
+        app.insert_resource(DrawingMode::BarsBox);
+
+        // One column that rose 2 px since last frame (→ 120 px/s at 60 Hz).
+        let (w, h) = (1280.0_f32, 720.0_f32);
+        let lyt = Layout::new(w, h, 1, false);
+        let top = lyt.floor + 100.0;
+        app.insert_resource(Columns {
+            tops: vec![top],
+            prev: vec![top - 2.0],
+        });
+        // Ball resting right on the column top, centered over the bar.
+        let ball = spawn_ball(&mut app, Vec2::new(lyt.bar_x(0), top), 10.0, 0.5, Vec2::ZERO);
+        app.add_systems(Update, push_columns);
+        // Bevy's very first frame reports a zero `delta`, so push (which divides
+        // the rise by dt) no-ops then; step twice so a real 60 Hz frame lands.
+        step(&mut app, 2);
+
+        let v = app.world().get::<LinearVelocity>(ball).unwrap().0;
+        // rise (120) × bar_push (1.6) = 192 px/s upward.
+        let expected = 120.0 * PhysicsSettings::default().bar_push;
+        assert!(
+            (v.y - expected).abs() < 5.0,
+            "expected launch ≈{expected}, got vy={}",
+            v.y
+        );
+    }
+
+    // --- L3: avian integration ---------------------------------------------
+
+    fn spawn_walls(app: &mut App) {
+        let (w, h) = (1280.0, 720.0);
+        for side in [WallSide::Left, WallSide::Right, WallSide::Top, WallSide::Bottom] {
+            let (size, pos) = wall_geometry(side, w, h);
+            app.world_mut().spawn((
+                RigidBody::Static,
+                Collider::rectangle(size.x, size.y),
+                Transform::from_translation(pos.extend(0.0)),
+                side,
+            ));
+        }
+    }
+
+    #[test]
+    fn l3_box_ball_falls_and_rests_on_the_floor() {
+        let mut app = physics_app(DrawingMode::WaveBox);
+        app.add_systems(Update, update_gravity_mode);
+        spawn_walls(&mut app);
+
+        let radius = 12.0;
+        // Inelastic so it settles quickly rather than bouncing for seconds.
+        let ball = spawn_ball(&mut app, Vec2::new(0.0, 100.0), radius, 0.0, Vec2::ZERO);
+        step(&mut app, 240); // 4 s
+
+        let floor = -720.0 / 2.0;
+        let y = pos_of(&app, ball).y;
+        assert!(y > floor, "ball fell through the floor: y={y}");
+        assert!(
+            (y - (floor + radius)).abs() < 15.0,
+            "ball should rest on the floor (~{}), got y={y}",
+            floor + radius
+        );
+    }
+
+    #[test]
+    fn l3_fast_ball_does_not_tunnel_the_floor() {
+        let mut app = physics_app(DrawingMode::WaveBox);
+        app.add_systems(Update, update_gravity_mode);
+        spawn_walls(&mut app);
+
+        let radius = 12.0;
+        let floor = -720.0 / 2.0;
+        // Hurled downward fast enough that per-frame travel exceeds the ball's
+        // diameter, so swept CCD (not discrete contact) is what stops it.
+        let ball = spawn_ball(
+            &mut app,
+            Vec2::new(0.0, floor + 200.0),
+            radius,
+            0.0,
+            Vec2::new(0.0, -8_000.0),
+        );
+        step(&mut app, 120);
+
+        let y = pos_of(&app, ball).y;
+        assert!(y > floor, "fast ball tunneled the floor: y={y}");
+    }
+
+    // --- L4: scenarios (the reported "stuck in the orb" bug) ----------------
+
+    /// The orb surface radius this frame (uniform for a steady spectrum).
+    fn orb_rim(app: &App) -> f32 {
+        app.world()
+            .resource::<Planet>()
+            .radii
+            .iter()
+            .cloned()
+            .fold(0.0_f32, f32::max)
+    }
+
+    #[test]
+    fn l4_ball_spawned_dead_center_leaves_the_orb_surface() {
+        let mut app = physics_app(DrawingMode::WaveCircle);
+        app.add_systems(Update, (update_gravity_mode, update_planet, planet_forces).chain());
+        spawn_planet_body(&mut app);
+
+        let radius = 12.0;
+        // Spawn in the exact middle of the orb — the case that used to stay buried.
+        let ball = spawn_ball(&mut app, Vec2::ZERO, radius, 0.9, Vec2::ZERO);
+
+        let mut max_r = 0.0_f32;
+        for _ in 0..150 {
+            app.update();
+            max_r = max_r.max(pos_of(&app, ball).length());
+        }
+
+        let rim = orb_rim(&app);
+        assert!(rim > 0.0, "orb should have a real rim");
+        assert!(
+            max_r > rim + radius,
+            "center ball never cleared the surface: max_r={max_r}, rim={rim}"
+        );
+    }
+
+    #[test]
+    fn l4_interior_ball_is_ejected_not_left_stuck() {
+        let mut app = physics_app(DrawingMode::WaveCircle);
+        app.add_systems(Update, (update_gravity_mode, update_planet, planet_forces).chain());
+        spawn_planet_body(&mut app);
+
+        // Prime the rim so we can spawn comfortably inside it.
+        app.update();
+        let rim = orb_rim(&app);
+        let radius = 12.0;
+        let ball = spawn_ball(&mut app, Vec2::new(rim * 0.3, 0.0), radius, 0.9, Vec2::ZERO);
+
+        let mut max_r = 0.0_f32;
+        for _ in 0..150 {
+            app.update();
+            max_r = max_r.max(pos_of(&app, ball).length());
+        }
+
+        // It must reach the surface (escape the interior)...
+        assert!(max_r > rim, "interior ball never reached the surface: max_r={max_r}, rim={rim}");
+        // ...and not be sitting buried deep inside at the end.
+        let final_r = pos_of(&app, ball).length();
+        assert!(
+            final_r > rim * 0.5,
+            "ball ended up stuck deep inside: final_r={final_r}, rim={rim}"
+        );
     }
 }

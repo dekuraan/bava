@@ -796,3 +796,143 @@ fn color_to_hex(c: Color) -> String {
         format!("#{a:02x}{r:02x}{g:02x}{b:02x}")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn srgba(c: Color) -> (u8, u8, u8, u8) {
+        let s = c.to_srgba();
+        (
+            channel_to_u8(s.red),
+            channel_to_u8(s.green),
+            channel_to_u8(s.blue),
+            channel_to_u8(s.alpha),
+        )
+    }
+
+    #[test]
+    fn hex_parsing_handles_each_length() {
+        // #rgb shorthand → each nibble doubled.
+        assert_eq!(srgba(hex_to_color("#f08").unwrap()), (255, 0, 136, 255));
+        // #rrggbb opaque.
+        assert_eq!(srgba(hex_to_color("#ff0000").unwrap()), (255, 0, 0, 255));
+        // #aarrggbb with alpha.
+        assert_eq!(srgba(hex_to_color("#80ff0000").unwrap()), (255, 0, 0, 128));
+        // Leading '#' optional, whitespace trimmed.
+        assert_eq!(srgba(hex_to_color("  00ff00 ").unwrap()), (0, 255, 0, 255));
+    }
+
+    #[test]
+    fn hex_parsing_rejects_garbage() {
+        assert!(hex_to_color("#xyz").is_none());
+        assert!(hex_to_color("#12345").is_none()); // unsupported length
+        assert!(hex_to_color("").is_none());
+    }
+
+    #[test]
+    fn color_hex_round_trips() {
+        for hex in ["#ff0000", "#00ff00", "#0000ff", "#123456", "#80abcdef"] {
+            let c = hex_to_color(hex).unwrap();
+            let back = hex_to_color(&color_to_hex(c)).unwrap();
+            assert_eq!(srgba(c), srgba(back), "round-trip changed {hex}");
+        }
+        // Opaque colors serialize without the alpha pair.
+        assert_eq!(color_to_hex(hex_to_color("#abcdef").unwrap()), "#abcdef");
+        // Non-opaque keeps the alpha pair.
+        assert!(color_to_hex(hex_to_color("#80abcdef").unwrap()).starts_with("#80"));
+    }
+
+    #[test]
+    fn channel_to_u8_clamps_and_rounds() {
+        assert_eq!(channel_to_u8(-1.0), 0);
+        assert_eq!(channel_to_u8(2.0), 255);
+        assert_eq!(channel_to_u8(0.5), 128); // 127.5 rounds up
+    }
+
+    #[test]
+    fn key_names_parse_and_round_trip() {
+        assert_eq!(parse_key("p"), Some(KeyCode::KeyP));
+        assert_eq!(parse_key("  F3 "), Some(KeyCode::F3)); // case-insensitive, trimmed
+        assert_eq!(parse_key("grave"), Some(KeyCode::Backquote)); // alias
+        assert_eq!(parse_key("nope"), None);
+
+        // Canonical name round-trips; aliases resolve to the canonical one.
+        assert_eq!(key_to_name(KeyCode::KeyP), Some("p"));
+        assert_eq!(key_to_name(KeyCode::Backquote), Some("backquote"));
+        assert_eq!(parse_key(key_to_name(KeyCode::Space).unwrap()), Some(KeyCode::Space));
+    }
+
+    #[test]
+    fn sanitize_profile_name_strips_path_chars() {
+        assert_eq!(sanitize_profile_name("  my profile "), "my profile");
+        assert_eq!(sanitize_profile_name("../../etc/passwd"), "etcpasswd");
+        assert_eq!(sanitize_profile_name("a/b\\c:d"), "abcd");
+        assert!(sanitize_profile_name("///").is_empty());
+    }
+
+    #[test]
+    fn profile_path_rejects_empty_after_sanitizing() {
+        // A name that sanitizes to nothing yields no path (can't escape the dir).
+        assert!(Config::profile_path("///").is_none());
+    }
+
+    #[test]
+    fn config_toml_round_trips() {
+        let cfg = Config::default();
+        let text = toml::to_string_pretty(&cfg).unwrap();
+        let back: Config = toml::from_str(&text).unwrap();
+        // Spot-check fields across every section survive a serialize/parse cycle.
+        assert_eq!(back.audio.rate, cfg.audio.rate);
+        assert_eq!(back.cava.bars_per_channel, cfg.cava.bars_per_channel);
+        assert_eq!(back.vis.mode, cfg.vis.mode);
+        assert_eq!(back.vis.mirror, cfg.vis.mirror);
+        assert_eq!(back.physics.enabled, cfg.physics.enabled);
+        assert_eq!(back.gui.toggle_key, cfg.gui.toggle_key);
+    }
+
+    #[test]
+    fn partial_toml_falls_back_to_defaults() {
+        // `#[serde(default)]` means a sparse file still parses, filling the rest.
+        let cfg: Config = toml::from_str("[cava]\nbars_per_channel = 7\n").unwrap();
+        assert_eq!(cfg.cava.bars_per_channel, 7);
+        assert_eq!(cfg.audio.rate, AudioConfig::default().rate);
+        assert_eq!(cfg.vis.mode, VisConfig::default().mode);
+    }
+
+    #[test]
+    fn settings_round_trip_through_config() {
+        let cava = CavaSettings::default();
+        let vis = VisSettings::default();
+        let physics = PhysicsSettings::default();
+        let cfg = Config::from_settings(&cava, &vis, DrawingMode::BarsCircle, &physics);
+
+        let cava_back = cfg.to_cava_settings(false);
+        assert_eq!(cava_back.bars_per_channel, cava.bars_per_channel);
+        assert_eq!(cava_back.rate, cava.rate);
+        assert_eq!(cava_back.channels, cava.channels);
+
+        let vis_back = cfg.to_vis_settings();
+        assert_eq!(vis_back.mirror, vis.mirror);
+        assert_eq!(vis_back.monstercat, vis.monstercat);
+        assert_eq!(vis_back.direction, vis.direction);
+
+        let phys_back = cfg.to_physics_settings();
+        assert_eq!(phys_back.max_balls, physics.max_balls);
+        assert_eq!(phys_back.central_gravity, physics.central_gravity);
+
+        assert_eq!(cfg.vis_mode(), DrawingMode::BarsCircle);
+    }
+
+    #[test]
+    fn gui_toggle_key_round_trips_and_falls_back() {
+        let mut cfg = Config::default();
+        cfg.set_gui_toggle_key(KeyCode::F5);
+        assert_eq!(cfg.gui.toggle_key, "f5");
+        assert_eq!(cfg.gui_toggle_key(), KeyCode::F5);
+
+        // An unknown name falls back to the default rather than panicking.
+        cfg.gui.toggle_key = "definitely-not-a-key".into();
+        assert_eq!(cfg.gui_toggle_key(), parse_key(DEFAULT_TOGGLE_KEY).unwrap());
+    }
+}

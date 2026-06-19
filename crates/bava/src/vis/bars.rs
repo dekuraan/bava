@@ -592,3 +592,133 @@ fn sample_h(values: &[f32], t: f32) -> f32 {
     let s = frac * frac * (3.0 - 2.0 * frac); // smoothstep
     values[i0] + (values[i1] - values[i0]) * s
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn layout_basic_geometry() {
+        let (w, h, n) = (1000.0, 600.0, 10);
+        let lyt = Layout::new(w, h, n, false);
+        assert_eq!(lyt.left, -500.0);
+        assert_eq!(lyt.floor, -300.0);
+        assert_eq!(lyt.slot_w, 100.0);
+        assert_eq!(lyt.bar_w, 100.0 - BAR_GAP);
+        assert!((lyt.max_h - h * MAX_HEIGHT_FRAC).abs() < 1e-3);
+        // Bars are centered in their slots, evenly spaced.
+        assert_eq!(lyt.bar_x(0), -500.0 + 50.0);
+        assert_eq!(lyt.bar_x(9), 500.0 - 50.0);
+        // half_height halves the full-scale span.
+        let half = Layout::new(w, h, n, true);
+        assert!((half.max_h - lyt.max_h * 0.5).abs() < 1e-3);
+    }
+
+    #[test]
+    fn layout_with_margin_shrinks_and_offsets() {
+        let lyt = Layout::new_with_margin(1000.0, 600.0, 10, false, 50.0, Vec2::ZERO);
+        // Effective width 900 → slots 90 wide, left edge -450.
+        assert_eq!(lyt.slot_w, 90.0);
+        assert_eq!(lyt.left, -450.0);
+        assert_eq!(lyt.floor, -250.0);
+    }
+
+    #[test]
+    fn column_geom_floor_anchored_vs_centered() {
+        let lyt = Layout::new(1000.0, 600.0, 10, false);
+        let (cy, half) = column_geom(&lyt, 120.0, false);
+        // Floor-anchored: center is half the height above the floor.
+        assert_eq!(cy, lyt.floor + 60.0);
+        assert_eq!(half.y, 60.0);
+        assert_eq!(half.x, lyt.bar_w * 0.5);
+
+        let (cy_c, half_c) = column_geom(&lyt, 120.0, true);
+        assert_eq!(cy_c, 0.0);
+        assert_eq!(half_c.y, 120.0); // centered uses full height as half-extent
+    }
+
+    #[test]
+    fn sample_h_endpoints_and_degenerate() {
+        assert_eq!(sample_h(&[], 0.5), 0.0);
+        assert_eq!(sample_h(&[0.42], 0.5), 0.42);
+        let v = vec![0.0, 0.25, 0.5, 0.75, 1.0];
+        assert!((sample_h(&v, 0.0) - 0.0).abs() < 1e-5);
+        assert!((sample_h(&v, 1.0) - 1.0).abs() < 1e-5);
+        // Clamps out-of-range t.
+        assert!((sample_h(&v, -1.0) - 0.0).abs() < 1e-5);
+        assert!((sample_h(&v, 2.0) - 1.0).abs() < 1e-5);
+        // Monotonic non-decreasing across a ramp.
+        let mut prev = f32::NEG_INFINITY;
+        for k in 0..=64 {
+            let s = sample_h(&v, k as f32 / 64.0);
+            assert!(s + 1e-5 >= prev);
+            prev = s;
+        }
+    }
+
+    #[test]
+    fn fold_symmetric_is_mirror_symmetric() {
+        assert_eq!(fold_symmetric(&[], 4, false), vec![0.0; 4]);
+        let src = vec![1.0, 0.6, 0.2]; // bass→treble
+        let out = fold_symmetric(&src, 8, false);
+        assert_eq!(out.len(), 8);
+        for i in 0..out.len() {
+            assert!(
+                (out[i] - out[out.len() - 1 - i]).abs() < 1e-6,
+                "not symmetric at {i}: {out:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn resample_endpoints_and_empty() {
+        assert_eq!(resample(&[], 0, 4), 0.0);
+        let src = vec![10.0, 20.0, 30.0];
+        assert_eq!(resample(&src, 0, 4), 10.0);
+        // Last slot maps to the last source sample.
+        assert_eq!(resample(&src, 3, 4), 30.0);
+    }
+
+    #[test]
+    fn mirror_values_off_mode_matches_spread_mono() {
+        let cava = Cava {
+            bars: vec![0.0, 1.0, 0.0, 0.5],
+            bars_per_channel: 4,
+            channels: 1,
+        };
+        let vis = VisSettings {
+            mirror: MirrorMode::Off,
+            reverse_order: false,
+            ..VisSettings::default()
+        };
+        let got = mirror_values(&cava, &vis, 4);
+        let mut want = cava.mono();
+        spread_monstercat(&mut want, vis.monstercat);
+        assert_eq!(got, want);
+
+        // reverse_order flips the result.
+        let vis_rev = VisSettings { reverse_order: true, ..vis };
+        let mut rev = mirror_values(&cava, &vis_rev, 4);
+        rev.reverse();
+        assert_eq!(rev, got);
+    }
+
+    #[test]
+    fn mirror_values_full_is_symmetric() {
+        let cava = Cava {
+            bars: vec![1.0, 0.5, 0.1],
+            bars_per_channel: 3,
+            channels: 1,
+        };
+        let vis = VisSettings {
+            mirror: MirrorMode::Full,
+            reverse_order: false,
+            monstercat: 1.0, // disable spreading for an exact symmetry check
+            ..VisSettings::default()
+        };
+        let out = mirror_values(&cava, &vis, 8);
+        for i in 0..out.len() {
+            assert!((out[i] - out[out.len() - 1 - i]).abs() < 1e-6, "asymmetry at {i}");
+        }
+    }
+}

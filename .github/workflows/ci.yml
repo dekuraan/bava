@@ -44,6 +44,9 @@ jobs:
       - name: Test (cavacore-rs)
         run: cargo test -p cavacore-rs
 
+      - name: Test (bava)
+        run: cargo test -p bava --bin bava
+
   # ── Windows: native build (uses the real windows crate + MSVC toolchain) ──
   windows:
     name: Windows (x86_64)

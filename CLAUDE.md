@@ -13,6 +13,8 @@ cargo run -p bava            # run the app (needs a Wayland/X11 display in env)
 cargo build --release -p bava
 cargo test -p cavacore-rs    # the rigorous cava safety/DSP suite
 cargo test -p cavacore-rs --test dsp noise_reduction_slows_decay  # single test
+cargo test -p bava --bin bava            # the app's unit/system/physics tests (headless, no display)
+cargo test -p bava --bin bava physics    # just the physics suite
 ```
 
 Running needs the display env this shell may lack: `WAYLAND_DISPLAY=wayland-1 cargo run -p bava` (check `ls /run/user/1000/wayland-*` for the socket — it is **not** `wayland-0`).
@@ -20,6 +22,13 @@ Running needs the display env this shell may lack: `WAYLAND_DISPLAY=wayland-1 ca
 Windows code can't be built natively from this Linux box, but it *can* be type-checked by cross-compiling (no link step): `cargo check --target x86_64-pc-windows-gnu -p bava`. **macOS code can't even be type-checked here** (no Apple SDK / objc runtime, and no mingw-equivalent) — verify it by reading the pinned `objc2-*` crate sources under `~/.cargo/registry/.../objc2-core-audio-0.3.2/` and resolving the dep graph with `cargo tree -p bava --target aarch64-apple-darwin`; real compilation happens only on a Mac. `cavacore-sys`'s `build.rs` compiles `cavacore.c` with `cc`, which needs `fftw3.h` on the mingw include path — stage the system header and point `cc` at it: `cp /usr/include/fftw3.h /tmp/fftwinc/ && CFLAGS_x86_64_pc_windows_gnu=-I/tmp/fftwinc cargo check --target x86_64-pc-windows-gnu -p bava`. (Actually *linking* on a real Windows host still needs FFTW3 available, since `build.rs` falls back to `-lfftw3`.)
 
 `rust-analyzer.toml` at the workspace root configures rust-analyzer to check both `x86_64-unknown-linux-gnu` and `x86_64-pc-windows-gnu` simultaneously, so `wasapi.rs` and `mpris/windows.rs` get type-checked in the editor on Linux. macOS backends can't be checked here and are verified manually.
+
+## Testing
+
+- `cavacore-rs` keeps its rigorous suite in `tests/` (`validation.rs`, `dsp.rs`, shared signal gen in `tests/common/`).
+- **`bava` is a binary crate (no lib target), so all its tests are in-module `#[cfg(test)] mod tests`** — an integration `tests/` dir can't reach the crate's internals. They run headless (no display): `cargo test -p bava --bin bava`.
+- The physics tests (`vis/physics.rs`) follow an explicit ladder: **L1** pure helpers, **L2** a single system over a minimal `App` (no avian step), **L3** the real avian solver stepped over many frames, **L4** scenarios (e.g. a ball spawned dead-center in the orb must leave the surface — the regression test for the planet "stuck ball" bug).
+- **Running avian headless**: `MinimalPlugins + TransformPlugin + AssetPlugin + PhysicsPlugins::default().with_length_unit(LENGTH_UNIT).set(PhysicsSchedulePlugin::new(PostUpdate))`, plus `TimeUpdateStrategy::ManualDuration(1/60)` and a spawned `Window::default()` (1280×720). **Omit `PhysicsDebugPlugin`** (it needs a render world). Gotcha: Bevy's *first* `update()` reports `delta == 0`, so any dt-dividing system no-ops on frame 1 — step twice when asserting on one.
 
 ## Crates
 
@@ -43,7 +52,7 @@ Windows code can't be built natively from this Linux box, but it *can* be type-c
 
 ## CI / releases
 
-`.github/workflows/ci.yml` runs on every push/PR to `main`: Linux build + `cavacore-rs` tests, Windows native build (`windows-latest`), macOS aarch64 build (`macos-latest`), and a fast Linux→Windows cross-check. `.github/workflows/release.yml` triggers on `v*` tags and produces four release artifacts: `bava-linux-x86_64`, `bava-windows-x86_64.exe`, `bava-macos-aarch64`, `bava-macos-x86_64`. Tag a release with `git tag v0.x.y && git push --tags`.
+`.github/workflows/ci.yml` runs on every push/PR to `main`: Linux build + `cavacore-rs` tests + `bava` tests (`cargo test -p bava --bin bava`), Windows native build (`windows-latest`), macOS aarch64 build (`macos-latest`), and a fast Linux→Windows cross-check. `.github/workflows/release.yml` triggers on `v*` tags and produces four release artifacts: `bava-linux-x86_64`, `bava-windows-x86_64.exe`, `bava-macos-aarch64`, `bava-macos-x86_64`. Tag a release with `git tag v0.x.y && git push --tags`.
 
 ## Now-playing & album art
 

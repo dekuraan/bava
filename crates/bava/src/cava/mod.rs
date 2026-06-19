@@ -386,3 +386,51 @@ fn stop_on_exit(mut exit: MessageReader<AppExit>, ring: Option<Res<AudioRing>>) 
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mono_input_left_is_all_right_is_empty() {
+        let cava = Cava {
+            bars: vec![0.1, 0.2, 0.3, 0.4],
+            bars_per_channel: 4,
+            channels: 1,
+        };
+        assert_eq!(cava.left(), &[0.1, 0.2, 0.3, 0.4]);
+        assert!(cava.right().is_empty());
+        assert_eq!(cava.mono(), vec![0.1, 0.2, 0.3, 0.4]);
+    }
+
+    #[test]
+    fn stereo_splits_channels_and_averages_for_mono() {
+        // 3 bars/channel: [L0,L1,L2, R0,R1,R2].
+        let cava = Cava {
+            bars: vec![1.0, 0.0, 0.5, 0.0, 1.0, 0.5],
+            bars_per_channel: 3,
+            channels: 2,
+        };
+        assert_eq!(cava.left(), &[1.0, 0.0, 0.5]);
+        assert_eq!(cava.right(), &[0.0, 1.0, 0.5]);
+        // mono is the per-bar average of the two channels.
+        assert_eq!(cava.mono(), vec![0.5, 0.5, 0.5]);
+    }
+
+    #[test]
+    fn accessors_tolerate_short_or_empty_buffers() {
+        // Buffer shorter than declared (e.g. a frame mid-resize) must not panic.
+        let cava = Cava {
+            bars: vec![0.7],
+            bars_per_channel: 4,
+            channels: 2,
+        };
+        assert_eq!(cava.left(), &[0.7]);
+        assert!(cava.right().is_empty());
+        // mono fills missing bars with 0.0.
+        assert_eq!(cava.mono(), vec![0.7, 0.0, 0.0, 0.0]);
+
+        let empty = Cava::default();
+        assert!(empty.mono().is_empty());
+    }
+}
