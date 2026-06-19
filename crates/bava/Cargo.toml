@@ -56,6 +56,10 @@ bevy_egui = { version = "0.39", default-features = false, features = [
 # Album-art decoding (both platforms decode in-memory image bytes).
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 
+# Dominant-color extraction from album art (modified median-cut quantization),
+# for the dynamic color profile derived from the current track's cover.
+color-thief = "0.2"
+
 # Lock-free-ish hand-off from the audio/now-playing threads to Bevy systems.
 crossbeam-channel = "0.5"
 

@@ -350,6 +350,11 @@ fn colors_section(ui: &mut egui::Ui, vis: &mut VisSettings) {
             .text("glow gain (HDR)")
             .step_by(0.05),
     );
+    ui.checkbox(&mut vis.dynamic_colors, "Dynamic colors (from album art)")
+        .on_hover_text(
+            "Override the foreground gradient with primary/secondary colors \
+             extracted from the current track's cover. Eases on song change.",
+        );
     ui.separator();
 
     if vis.profiles.is_empty() {

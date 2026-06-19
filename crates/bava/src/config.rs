@@ -205,6 +205,9 @@ pub struct VisConfig {
     pub bloom_intensity: f32,
     /// HDR glow multiplier applied to loud bars (0 = no boost, 1.8 = default).
     pub glow_gain: f32,
+    /// Derive the foreground gradient from the current track's album art instead
+    /// of the active profile's colors. Off by default.
+    pub dynamic_colors: bool,
 }
 
 /// `[[vis.profile]]` — a named color scheme.
@@ -365,6 +368,7 @@ impl Config {
                 tonemapping: vis.tonemapping,
                 bloom_intensity: vis.bloom_intensity,
                 glow_gain: vis.glow_gain,
+                dynamic_colors: vis.dynamic_colors,
             },
             physics: PhysicsConfig {
                 enabled: physics.enabled,
@@ -606,6 +610,8 @@ impl Config {
             tonemapping: v.tonemapping,
             bloom_intensity: v.bloom_intensity,
             glow_gain: v.glow_gain,
+            dynamic_colors: v.dynamic_colors,
+            dynamic_fg: None,
         }
     }
 
