@@ -17,8 +17,11 @@ mod stroke;
 
 use std::path::PathBuf;
 
+use bevy::color::{Mix, Oklcha};
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
+
+use crate::now_playing::AlbumArt;
 
 /// Layout family a drawing mode belongs to: linear (box) or radial (circle).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -310,6 +313,14 @@ pub struct VisSettings {
     /// HDR glow multiplier: how far past 1.0 loud bars are pushed before tone
     /// mapping. `0.0` disables the per-amplitude brightness boost entirely.
     pub glow_gain: f32,
+    /// When `true`, the foreground gradient follows colors extracted from the
+    /// current track's album art instead of the active profile's `fg` stops.
+    pub dynamic_colors: bool,
+    /// Runtime-only animated `(primary, secondary)` album colors, eased toward the
+    /// latest extracted pair by [`animate_album_colors`]. Not serialized; when
+    /// `Some` and [`dynamic_colors`](Self::dynamic_colors) is set it overrides
+    /// [`fg_lo`](Self::fg_lo) / [`fg_hi`](Self::fg_hi) for every renderer.
+    pub dynamic_fg: Option<(Color, Color)>,
 }
 
 impl Default for VisSettings {
@@ -336,6 +347,8 @@ impl Default for VisSettings {
             tonemapping: ToneMap::default(),
             bloom_intensity: 0.25,
             glow_gain: 1.8,
+            dynamic_colors: false,
+            dynamic_fg: None,
         }
     }
 }
@@ -351,13 +364,21 @@ impl VisSettings {
         self.profiles[i].clone()
     }
 
-    /// Low-amplitude foreground gradient end from the active profile.
+    /// Low-amplitude foreground gradient end. The album-art **primary** when
+    /// dynamic colors are on and a palette is available, else the active profile.
     pub fn fg_lo(&self) -> Color {
+        if self.dynamic_colors && let Some((primary, _)) = self.dynamic_fg {
+            return primary;
+        }
         self.profile().fg_lo()
     }
 
-    /// Full-amplitude foreground gradient end from the active profile.
+    /// Full-amplitude foreground gradient end. The album-art **secondary** when
+    /// dynamic colors are on and a palette is available, else the active profile.
     pub fn fg_hi(&self) -> Color {
+        if self.dynamic_colors && let Some((_, secondary)) = self.dynamic_fg {
+            return secondary;
+        }
         self.profile().fg_hi()
     }
 }
@@ -414,7 +435,8 @@ impl Plugin for VisPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<VisSettings>()
             .init_resource::<DrawingMode>()
-            .add_systems(Update, cycle_mode)
+            .init_resource::<AlbumPalette>()
+            .add_systems(Update, (cycle_mode, animate_album_colors))
             .add_plugins((
                 bars::BarsPlugin,
                 circle::CirclePlugin,
@@ -438,4 +460,79 @@ fn cycle_mode(
         *mode = mode.next();
         info!("bava: drawing mode → {:?}", *mode);
     }
+}
+
+/// Album-art accent colors, smoothed across track changes.
+///
+/// `target` is the latest `(primary, secondary)` pair extracted from the cover;
+/// `current` chases it so a song change eases the visualization's colors over a
+/// fraction of a second instead of snapping. New balls spawn with whatever
+/// `current` is at spawn time, so already-airborne balls keep their old color.
+#[derive(Resource, Default)]
+pub struct AlbumPalette {
+    current: Option<(Color, Color)>,
+    target: Option<(Color, Color)>,
+}
+
+/// Time constant (seconds) of the exponential ease toward a new track's colors.
+const ALBUM_COLOR_TAU: f32 = 0.4;
+
+/// Ease [`VisSettings::dynamic_fg`] toward the current album-art palette each
+/// frame when [`VisSettings::dynamic_colors`] is on. Interpolates in Oklch so the
+/// transition stays perceptually even; writes are change-guarded so a settled
+/// palette doesn't mark `VisSettings` dirty every frame.
+fn animate_album_colors(
+    time: Res<Time>,
+    art: Res<AlbumArt>,
+    mut palette: ResMut<AlbumPalette>,
+    mut vis: ResMut<VisSettings>,
+) {
+    if art.is_changed() {
+        palette.target = art.colors;
+    }
+
+    if !vis.dynamic_colors {
+        if vis.dynamic_fg.is_some() {
+            vis.dynamic_fg = None;
+        }
+        return;
+    }
+
+    let Some(target) = palette.target else {
+        if vis.dynamic_fg.is_some() {
+            vis.dynamic_fg = None;
+        }
+        return;
+    };
+
+    let current = palette.current.unwrap_or(target);
+    let f = 1.0 - (-time.delta_secs() / ALBUM_COLOR_TAU).exp();
+    let mut primary = mix_oklch(current.0, target.0, f);
+    let mut secondary = mix_oklch(current.1, target.1, f);
+    // Snap once we're within a hair of the target so the value can settle and the
+    // change-guard below stops re-marking VisSettings.
+    if color_close(primary, target.0) && color_close(secondary, target.1) {
+        primary = target.0;
+        secondary = target.1;
+    }
+
+    palette.current = Some((primary, secondary));
+    let next = Some((primary, secondary));
+    if vis.dynamic_fg != next {
+        vis.dynamic_fg = next;
+    }
+}
+
+/// Perceptually-even blend between two colors via Oklch.
+fn mix_oklch(a: Color, b: Color, t: f32) -> Color {
+    let a = Oklcha::from(a);
+    let b = Oklcha::from(b);
+    Color::Oklcha(a.mix(&b, t.clamp(0.0, 1.0)))
+}
+
+/// Whether two colors are within rounding distance in sRGB.
+fn color_close(a: Color, b: Color) -> bool {
+    let a = a.to_srgba();
+    let b = b.to_srgba();
+    (a.red - b.red).abs() + (a.green - b.green).abs() + (a.blue - b.blue).abs() < 0.004
 }
