@@ -10,7 +10,7 @@
 pub mod capture;
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -133,6 +133,13 @@ struct AudioRing {
     running: Arc<AtomicBool>,
     /// Maximum backlog; a render stall can't grow the buffer past this.
     cap: usize,
+    /// The sample rate the capture backend actually negotiated, published by the
+    /// capture thread once [`capture::open`] succeeds (0 until then). Backends
+    /// like PipeWire/WASAPI deliver at the device's native rate rather than the
+    /// requested one; cavacore's framerate-adaptive smoothing is tuned to
+    /// `plan.rate / frame_samples`, so the plan must be rebuilt to the *real*
+    /// delivery rate or the smoothing runs fast/slow by the rate ratio.
+    negotiated_rate: Arc<AtomicU32>,
 }
 
 impl AudioRing {
@@ -144,6 +151,7 @@ impl AudioRing {
             buf: Arc::new(Mutex::new(VecDeque::with_capacity(cap))),
             running: Arc::new(AtomicBool::new(true)),
             cap,
+            negotiated_rate: Arc::new(AtomicU32::new(0)),
         }
     }
 }
@@ -214,7 +222,10 @@ impl Plugin for CavaPlugin {
             .expect("failed to spawn capture thread");
         app.insert_resource(ring);
 
-        app.add_systems(Update, (rebuild_cava, feed_cava).chain())
+        app.add_systems(
+            Update,
+            (reconcile_capture_rate, rebuild_cava, feed_cava).chain(),
+        )
             .add_systems(Last, stop_on_exit);
     }
 }
@@ -241,6 +252,10 @@ fn capture_reader(settings: CavaSettings, ring: AudioRing) {
         capture.channels(),
         capture.rate()
     );
+
+    // Publish the negotiated rate so the main thread can rebuild the cavacore
+    // plan to match the *actual* delivery rate (see `reconcile_capture_rate`).
+    ring.negotiated_rate.store(capture.rate(), Ordering::Relaxed);
 
     let chunk = settings.frame_samples.max(1) * settings.channels.max(1);
     let mut buf = vec![0.0f64; chunk];
@@ -342,6 +357,70 @@ fn feed_cava(
             );
             *dbg = FeedStats::default();
         }
+    }
+}
+
+/// Rebuild the cavacore plan to match the rate the capture backend actually
+/// negotiated, once it becomes known.
+///
+/// The plan is built up front at the *requested* [`CavaSettings::rate`], but
+/// backends like PipeWire and WASAPI loopback can only deliver at the device's
+/// native rate (commonly 48 kHz when 44.1 kHz was asked for). cavacore's
+/// framerate-adaptive smoothing is tuned to `plan.rate / frame_samples`, while
+/// executes actually happen at `delivered_rate / frame_samples` — so a mismatch
+/// makes the bars decay/respond faster (or slower) by the rate ratio. We learn
+/// the real rate from the capture thread and rebuild the plan to match, which
+/// also corrects the FFT bin frequencies. This is a one-shot: once the plan's
+/// rate equals the negotiated rate, it no-ops.
+fn reconcile_capture_rate(
+    ring: Res<AudioRing>,
+    state: Option<NonSendMut<CavaState>>,
+    mut settings: ResMut<CavaSettings>,
+    mut cava: ResMut<Cava>,
+) {
+    let negotiated = ring.negotiated_rate.load(Ordering::Relaxed);
+    if negotiated == 0 {
+        return; // capture hasn't reported a rate yet
+    }
+    let Some(mut state) = state else {
+        return; // cavacore never initialized
+    };
+    if state.plan.rate() == negotiated {
+        return; // already matches (e.g. Pulse forced the requested rate)
+    }
+
+    let requested = state.plan.rate();
+    let channels = state.plan.channels();
+    let cfg = CavaConfig {
+        bars: settings.bars_per_channel as u32,
+        rate: negotiated,
+        channels: channels as u32,
+        autosens: settings.autosens,
+        noise_reduction: settings.noise_reduction,
+        low_cutoff_freq: settings.low_cutoff_freq,
+        high_cutoff_freq: settings.high_cutoff_freq,
+    };
+    match cfg.build() {
+        Ok(plan) => {
+            let bars = plan.bars();
+            state.plan = plan;
+            state.accum.clear();
+            state.scratch.clear();
+            cava.bars = vec![0.0; bars * channels];
+            cava.bars_per_channel = bars;
+            cava.channels = channels;
+            // Keep settings in sync so a later editor "Apply"/config save uses
+            // the real rate rather than reintroducing the mismatch.
+            settings.rate = negotiated;
+            info!(
+                "bava: capture negotiated {negotiated} Hz (requested {requested}); \
+                 rebuilt cavacore to match — smoothing now correct"
+            );
+        }
+        Err(e) => error!(
+            "bava: failed to rebuild cavacore at negotiated {negotiated} Hz: {e}; \
+             keeping {requested} Hz plan (smoothing may be off)"
+        ),
     }
 }
 
