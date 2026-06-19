@@ -56,9 +56,10 @@ pub struct AlbumArt {
     pub image: Option<Handle<Image>>,
     /// Pixel dimensions of the current art (width, height).
     pub size: Option<(u32, u32)>,
-    /// `(primary, secondary)` colors extracted from the art, for the dynamic
-    /// color profile. `None` when there is no art or extraction failed.
-    pub colors: Option<(Color, Color)>,
+    /// Accent colors extracted from the art (most vibrant first, up to
+    /// [`MAX_DYNAMIC_COLORS`]), for the dynamic color profile. `None` when there
+    /// is no art or extraction failed.
+    pub colors: Option<Vec<Color>>,
 }
 
 /// Decoded RGBA8 album art produced off-thread.
@@ -66,8 +67,8 @@ struct DecodedArt {
     rgba: Vec<u8>,
     width: u32,
     height: u32,
-    /// `(primary, secondary)` colors extracted from the art on the decode thread.
-    colors: Option<(Color, Color)>,
+    /// Accent colors extracted from the art on the decode thread.
+    colors: Option<Vec<Color>>,
 }
 
 /// Messages from the now-playing thread to the Bevy world.
@@ -131,8 +132,8 @@ fn apply_now_playing_updates(
                 );
                 album_art.image = Some(images.add(image));
                 album_art.size = Some((art.width, art.height));
-                if let Some((p, s)) = art.colors {
-                    debug!("bava: album colors — primary {p:?}, secondary {s:?}");
+                if let Some(colors) = &art.colors {
+                    debug!("bava: album colors — {colors:?}");
                 }
                 album_art.colors = art.colors;
             }
@@ -162,16 +163,20 @@ fn decode_art_bytes(bytes: &[u8]) -> Option<DecodedArt> {
     })
 }
 
-/// Pick two accent colors from album-art RGBA8 pixels: a vibrant **primary** and
-/// a contrasting **secondary**.
+/// Maximum number of accent colors extracted from album art (the dynamic-color
+/// count slider clamps to this).
+pub const MAX_DYNAMIC_COLORS: usize = 5;
+
+/// Pick up to [`MAX_DYNAMIC_COLORS`] accent colors from album-art RGBA8 pixels,
+/// most vibrant first and each visibly distinct in hue.
 ///
 /// This follows the recipe common to media players (Android `Palette`,
 /// Vibrant.js): quantize to a small palette via modified median-cut
 /// (`color_thief`), then score candidates in HSL — favouring saturation,
-/// mid-lightness, and dominance for the primary, and adding a hue-distance bonus
-/// so the secondary is visibly distinct. Falls back to a lightness-shifted
-/// primary for near-monochrome covers.
-fn extract_palette(rgba: &[u8]) -> Option<(Color, Color)> {
+/// mid-lightness, and dominance — and greedily pick the next color that balances
+/// a high score with hue-distance from the ones already chosen. Falls back to
+/// lightness-shifted variants of the primary for near-monochrome covers.
+fn extract_palette(rgba: &[u8]) -> Option<Vec<Color>> {
     // quality 10 = sample every 10th pixel (fast, plenty for accent picking);
     // ask for up to 8 representative colors.
     let palette = color_thief::get_palette(rgba, color_thief::ColorFormat::Rgba, 10, 8).ok()?;
@@ -200,30 +205,49 @@ fn extract_palette(rgba: &[u8]) -> Option<(Color, Color)> {
         d.min(360.0 - d) / 180.0
     };
 
+    // Primary: the most vibrant candidate.
     let (pi, (primary, ph)) = cands
         .iter()
         .enumerate()
         .map(|(i, c)| (i, *c))
         .max_by(|(i, (_, a)), (j, (_, b))| score(a, *i).total_cmp(&score(b, *j)))?;
 
-    // Secondary: best score plus a strong bonus for being a different hue.
-    let secondary = cands
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| *i != pi)
-        .map(|(i, (col, h))| (score(h, i) + 0.4 * hue_dist(h.hue, ph.hue), *col))
-        .max_by(|(a, _), (b, _)| a.total_cmp(b))
-        .map(|(_, col)| col)
-        .unwrap_or_else(|| {
-            // Monochrome cover: derive the secondary by shifting lightness.
-            let mut h = ph;
-            h.lightness = if ph.lightness < 0.5 {
-                (ph.lightness + 0.35).min(0.9)
-            } else {
-                (ph.lightness - 0.35).max(0.1)
-            };
-            Color::Hsla(h)
-        });
+    let mut chosen = vec![primary];
+    let mut chosen_hues = vec![ph.hue];
+    let mut used = vec![pi];
 
-    Some((primary, secondary))
+    // Greedily add the next color that best balances vibrancy with being a
+    // different hue from everything chosen so far.
+    while chosen.len() < MAX_DYNAMIC_COLORS && used.len() < cands.len() {
+        let next = cands
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !used.contains(i))
+            .map(|(i, (col, h))| {
+                let nearest = chosen_hues
+                    .iter()
+                    .map(|&ch| hue_dist(h.hue, ch))
+                    .fold(1.0_f32, f32::min);
+                (i, score(h, i) + 0.4 * nearest, *col, h.hue)
+            })
+            .max_by(|(_, a, _, _), (_, b, _, _)| a.total_cmp(b));
+        let Some((i, _, col, hue)) = next else { break };
+        chosen.push(col);
+        chosen_hues.push(hue);
+        used.push(i);
+    }
+
+    // Monochrome cover: only one candidate survived — derive a lightness-shifted
+    // secondary so dynamic colors still has two stops to gradient between.
+    if chosen.len() == 1 {
+        let mut h = ph;
+        h.lightness = if ph.lightness < 0.5 {
+            (ph.lightness + 0.35).min(0.9)
+        } else {
+            (ph.lightness - 0.35).max(0.1)
+        };
+        chosen.push(Color::Hsla(h));
+    }
+
+    Some(chosen)
 }

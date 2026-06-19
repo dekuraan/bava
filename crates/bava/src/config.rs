@@ -208,6 +208,10 @@ pub struct VisConfig {
     /// Derive the foreground gradient from the current track's album art instead
     /// of the active profile's colors. Off by default.
     pub dynamic_colors: bool,
+    /// How many album-art colors to use for dynamic colors (2..=5).
+    pub dynamic_color_count: usize,
+    /// Crossfade time, in seconds, when dynamic colors change on a new track.
+    pub dynamic_color_fade: f32,
 }
 
 /// `[[vis.profile]]` — a named color scheme.
@@ -269,6 +273,8 @@ pub struct PhysicsConfig {
     pub max_balls: usize,
     /// Randomize each spawned ball's properties around the defaults.
     pub randomize: bool,
+    /// Minimum delay between right-click spray bursts while held, in milliseconds.
+    pub spawn_debounce_ms: u64,
     /// Spectrum-surface smoothing time constant, in seconds (larger = smoother).
     pub bar_smoothing: f32,
     /// Restitution of the spectrum surface.
@@ -369,6 +375,8 @@ impl Config {
                 bloom_intensity: vis.bloom_intensity,
                 glow_gain: vis.glow_gain,
                 dynamic_colors: vis.dynamic_colors,
+                dynamic_color_count: vis.dynamic_color_count,
+                dynamic_color_fade: vis.dynamic_color_fade,
             },
             physics: PhysicsConfig {
                 enabled: physics.enabled,
@@ -379,6 +387,7 @@ impl Config {
                 radius: physics.radius,
                 max_balls: physics.max_balls,
                 randomize: physics.randomize,
+                spawn_debounce_ms: physics.spawn_debounce_ms,
                 bar_smoothing: physics.bar_smoothing,
                 bar_restitution: physics.bar_restitution,
                 bar_push: physics.bar_push,
@@ -611,6 +620,8 @@ impl Config {
             bloom_intensity: v.bloom_intensity,
             glow_gain: v.glow_gain,
             dynamic_colors: v.dynamic_colors,
+            dynamic_color_count: v.dynamic_color_count.clamp(2, crate::now_playing::MAX_DYNAMIC_COLORS),
+            dynamic_color_fade: v.dynamic_color_fade.max(0.0),
             dynamic_fg: None,
         }
     }
@@ -627,6 +638,7 @@ impl Config {
             radius: p.radius,
             max_balls: p.max_balls,
             randomize: p.randomize,
+            spawn_debounce_ms: p.spawn_debounce_ms,
             bar_smoothing: p.bar_smoothing,
             bar_restitution: p.bar_restitution,
             bar_push: p.bar_push,

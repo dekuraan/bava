@@ -352,9 +352,25 @@ fn colors_section(ui: &mut egui::Ui, vis: &mut VisSettings) {
     );
     ui.checkbox(&mut vis.dynamic_colors, "Dynamic colors (from album art)")
         .on_hover_text(
-            "Override the foreground gradient with primary/secondary colors \
-             extracted from the current track's cover. Eases on song change.",
+            "Override the foreground gradient with colors extracted from the \
+             current track's cover. Eases on song change.",
         );
+    if vis.dynamic_colors {
+        ui.add(
+            egui::Slider::new(
+                &mut vis.dynamic_color_count,
+                2..=crate::now_playing::MAX_DYNAMIC_COLORS,
+            )
+            .text("dynamic colors"),
+        )
+        .on_hover_text("How many album-art colors to spread across the gradient and balls.");
+        ui.add(
+            egui::Slider::new(&mut vis.dynamic_color_fade, 0.0..=5.0)
+                .text("color fade (s)")
+                .step_by(0.05),
+        )
+        .on_hover_text("Crossfade time when the palette changes on a new track. 0 = instant.");
+    }
     ui.separator();
 
     if vis.profiles.is_empty() {
@@ -568,6 +584,19 @@ fn physics_section(ui: &mut egui::Ui, physics: &mut PhysicsSettings) {
     }
 
     ui.checkbox(&mut physics.randomize, "Randomize per ball");
+
+    let mut debounce = physics.spawn_debounce_ms as u32;
+    if ui
+        .add(
+            egui::Slider::new(&mut debounce, 0..=2000)
+                .text("right-click spray delay (ms)")
+                .step_by(10.0),
+        )
+        .on_hover_text("Delay between bursts of 8 balls while right-click is held down.")
+        .changed()
+    {
+        physics.spawn_debounce_ms = debounce as u64;
+    }
 
     ui.collapsing("Surface / wave", |ui| {
         ui.add(

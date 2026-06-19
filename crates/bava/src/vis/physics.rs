@@ -33,6 +33,7 @@
 use std::collections::VecDeque;
 
 use avian2d::prelude::*;
+use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::prelude::*;
 
 use crate::cava::Cava;
@@ -41,7 +42,7 @@ use crate::vis::bars::{column_geom, mirror_values, Layout, LEVEL_STEPS, MAX_HEIG
 use crate::vis::circle::blob_ring;
 use crate::vis::stroke::{apply_stroke_tapered, empty_stroke_mesh, stroke_material, STROKE_FEATHER};
 use crate::vis::{
-    gradient_color, spread_monstercat, DrawingMode, MirrorMode, VisFamily, VisSettings, VisShape,
+    sample_gradient, spread_monstercat, DrawingMode, MirrorMode, VisFamily, VisSettings, VisShape,
 };
 
 /// 1 physics "metre" = this many world pixels. Scales avian's internal
@@ -62,6 +63,8 @@ const EJECT_CLEARANCE_RADII: f32 = 4.0;
 /// Floor outward speed (px/s) used to unstick a ball a surface/column/blob has
 /// swallowed, so even a stationary swallowed ball is carried back out.
 const UNSTICK_FLOOR: f32 = 120.0;
+/// How many balls a single right-click spawns (left-click spawns one).
+const RIGHT_CLICK_BURST: usize = 8;
 
 /// Runtime physics tunables, mapped from `[physics]` in the config.
 #[derive(Resource, Clone, Debug)]
@@ -82,6 +85,8 @@ pub struct PhysicsSettings {
     pub max_balls: usize,
     /// Randomize each spawned ball's properties around the defaults.
     pub randomize: bool,
+    /// Minimum delay between right-click spray bursts while held, in milliseconds.
+    pub spawn_debounce_ms: u64,
     /// Surface smoothing time constant, in seconds (larger = smoother/slower).
     pub bar_smoothing: f32,
     /// Restitution of the spectrum surface.
@@ -109,6 +114,7 @@ impl Default for PhysicsSettings {
             radius: 12.0,
             max_balls: 200,
             randomize: true,
+            spawn_debounce_ms: 500,
             bar_smoothing: 0.05,
             bar_restitution: 1.0,
             bar_push: 1.6,
@@ -232,6 +238,7 @@ impl Plugin for PhysicsPlugin {
                     .with_length_unit(LENGTH_UNIT)
                     .set(PhysicsSchedulePlugin::new(PostUpdate)),
                 PhysicsDebugPlugin::default(),
+                FrameTimeDiagnosticsPlugin::default(),
             ))
             .add_systems(Startup, setup_physics)
             .add_systems(
@@ -251,6 +258,7 @@ impl Plugin for PhysicsPlugin {
                     update_trails,
                     toggle_physics_debug,
                     sync_physics_debug,
+                    update_debug_overlay,
                 ),
             );
     }
@@ -297,6 +305,21 @@ fn setup_physics(
     // missing required resource fails param validation → panic on the first frame
     // (Bevy 0.18). It just early-returns in its body when physics is disabled.
     commands.insert_resource(TrailMaterial(materials.add(stroke_material())));
+
+    // F3 debug overlay (FPS + ball count), hidden until `debug_draw` is toggled on.
+    commands.spawn((
+        DebugOverlay,
+        Text::new(""),
+        TextFont { font_size: 16.0, ..default() },
+        TextColor(Color::srgb(0.2, 1.0, 0.4)),
+        Node {
+            position_type: PositionType::Absolute,
+            top: Val::Px(8.0),
+            left: Val::Px(8.0),
+            ..default()
+        },
+        Visibility::Hidden,
+    ));
 
     if !settings.enabled {
         return;
@@ -405,8 +428,9 @@ fn on_mode_change(
     planet.prev.copy_from_slice(&planet.radii);
 }
 
-/// Left-click spawns a ball at the cursor with (optionally randomized) props,
-/// but only in a mode where physics is supported.
+/// Left-click spawns a single ball at the cursor; right-click sprays a scattered
+/// burst of [`RIGHT_CLICK_BURST`] every frame it's held down. Both only fire in a
+/// mode where physics is supported.
 #[allow(clippy::too_many_arguments)]
 fn spawn_ball_on_click(
     mut commands: Commands,
@@ -421,11 +445,21 @@ fn spawn_ball_on_click(
     mut materials: ResMut<Assets<ColorMaterial>>,
     windows: Query<&Window>,
     cameras: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
+    time: Res<Time>,
+    mut cooldown: Local<f32>,
 ) {
-    // Skip when disabled, when the click lands on egui, or in an inert mode.
+    *cooldown = (*cooldown - time.delta_secs()).max(0.0);
+
+    let left = mouse.just_pressed(MouseButton::Left);
+    // Right-click is held-to-spray, throttled by `spawn_debounce_ms`: it fires on
+    // the initial press, then once each cooldown window elapses while held.
+    let right_fire = mouse.pressed(MouseButton::Right)
+        && (mouse.just_pressed(MouseButton::Right) || *cooldown <= 0.0);
+    // Skip when disabled, when the click lands on egui, in an inert mode, or with
+    // no spawn button firing this frame.
     if !settings.enabled
         || editor.capture_pointer
-        || !mouse.just_pressed(MouseButton::Left)
+        || !(left || right_fire)
         || !physics_supported(*mode, &vis)
     {
         return;
@@ -443,6 +477,45 @@ fn spawn_ball_on_click(
         return;
     };
 
+    if right_fire {
+        *cooldown = settings.spawn_debounce_ms as f32 / 1000.0;
+    }
+    let count = if left { 1 } else { 0 } + if right_fire { RIGHT_CLICK_BURST } else { 0 };
+    for _ in 0..count {
+        // Scatter a burst so the balls don't spawn perfectly stacked on each other.
+        let at = if count > 1 {
+            world + Vec2::new(fastrand::f32() - 0.5, fastrand::f32() - 0.5) * settings.radius * 4.0
+        } else {
+            world
+        };
+        spawn_one_ball(
+            &mut commands,
+            &mut meshes,
+            &mut materials,
+            &settings,
+            &vis,
+            &trail_mat,
+            &mut counter,
+            *mode,
+            at,
+        );
+    }
+}
+
+/// Spawn a single ball at `world` with (optionally randomized) props, plus its
+/// trail. Shared by left-click (one ball) and right-click (a burst).
+#[allow(clippy::too_many_arguments)]
+fn spawn_one_ball(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<ColorMaterial>,
+    settings: &PhysicsSettings,
+    vis: &VisSettings,
+    trail_mat: &TrailMaterial,
+    counter: &mut BallCounter,
+    mode: DrawingMode,
+    world: Vec2,
+) {
     // Resolve ball properties, randomizing around the defaults when enabled.
     let (radius, restitution, damping, mass, tint) = if settings.randomize {
         let radius = settings.radius * fastrand::f32().mul_add(1.4, 0.6); // 0.6..2.0×
@@ -455,13 +528,15 @@ fn spawn_ball_on_click(
         (settings.radius, settings.restitution, settings.air_resistance, settings.mass, 0.5)
     };
 
-    let color = gradient_color(vis.fg_lo(), vis.fg_hi(), tint, vis.glow_gain);
+    // Sample the full active palette so balls span every dynamic color, not just
+    // the two gradient ends.
+    let color = sample_gradient(&vis.fg_stops(), tint, vis.glow_gain);
     let id = counter.0;
     counter.0 += 1;
 
     // In planet (WaveCircle) mode, launch tangentially for a near-circular orbit;
     // otherwise drop it in (gravity takes over).
-    let velocity = if planet_active(*mode) {
+    let velocity = if planet_active(mode) {
         let r = world.length();
         if r > 1.0 {
             let radial = world / r;
@@ -1120,6 +1195,33 @@ fn toggle_physics_debug(
     if !editor.capture_keyboard && keys.just_pressed(KeyCode::F3) {
         settings.debug_draw = !settings.debug_draw;
     }
+}
+
+/// Marker for the F3 debug text overlay (FPS + live ball count).
+#[derive(Component)]
+struct DebugOverlay;
+
+/// Update the F3 overlay text with the current FPS and live ball count, and show
+/// it only while `debug_draw` is on (mirrors the collider wireframes).
+fn update_debug_overlay(
+    settings: Res<PhysicsSettings>,
+    diagnostics: Res<DiagnosticsStore>,
+    balls: Query<(), With<Ball>>,
+    mut overlay: Query<(&mut Text, &mut Visibility), With<DebugOverlay>>,
+) {
+    let Ok((mut text, mut visibility)) = overlay.single_mut() else {
+        return;
+    };
+    let show = settings.enabled && settings.debug_draw;
+    *visibility = if show { Visibility::Visible } else { Visibility::Hidden };
+    if !show {
+        return;
+    }
+    let fps = diagnostics
+        .get(&FrameTimeDiagnosticsPlugin::FPS)
+        .and_then(|d| d.smoothed())
+        .unwrap_or(0.0);
+    text.0 = format!("FPS: {fps:.0}\nBalls: {}", balls.iter().count());
 }
 
 /// Mirror `[physics] debug_draw` onto avian's gizmo config, drawing only the

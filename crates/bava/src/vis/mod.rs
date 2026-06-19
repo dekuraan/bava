@@ -230,18 +230,6 @@ impl Default for ColorProfile {
     }
 }
 
-impl ColorProfile {
-    /// First foreground stop (the "low amplitude" gradient end). White if empty.
-    pub fn fg_lo(&self) -> Color {
-        self.fg.first().copied().unwrap_or(Color::WHITE)
-    }
-
-    /// Last foreground stop (the "full amplitude" gradient end). White if empty.
-    pub fn fg_hi(&self) -> Color {
-        self.fg.last().copied().unwrap_or(Color::WHITE)
-    }
-}
-
 /// A background or foreground image overlay — one of Cavalier's "picture"
 /// options. `None` path means no image; the active color profile is used instead.
 #[derive(Clone, Debug)]
@@ -316,11 +304,18 @@ pub struct VisSettings {
     /// When `true`, the foreground gradient follows colors extracted from the
     /// current track's album art instead of the active profile's `fg` stops.
     pub dynamic_colors: bool,
-    /// Runtime-only animated `(primary, secondary)` album colors, eased toward the
-    /// latest extracted pair by [`animate_album_colors`]. Not serialized; when
-    /// `Some` and [`dynamic_colors`](Self::dynamic_colors) is set it overrides
-    /// [`fg_lo`](Self::fg_lo) / [`fg_hi`](Self::fg_hi) for every renderer.
-    pub dynamic_fg: Option<(Color, Color)>,
+    /// How many album-art colors to use when [`dynamic_colors`](Self::dynamic_colors)
+    /// is on (2..=[`MAX_DYNAMIC_COLORS`](crate::now_playing::MAX_DYNAMIC_COLORS)).
+    pub dynamic_color_count: usize,
+    /// Crossfade time constant (seconds) when the dynamic palette changes on a new
+    /// track. Larger = slower, more gradual color transition; ~0 snaps instantly.
+    pub dynamic_color_fade: f32,
+    /// Runtime-only animated album colors (most vibrant first), eased toward the
+    /// latest extracted set by [`animate_album_colors`]. Not serialized; when
+    /// `Some` and [`dynamic_colors`](Self::dynamic_colors) is set it overrides the
+    /// profile's `fg` stops for [`fg_lo`](Self::fg_lo) / [`fg_hi`](Self::fg_hi) /
+    /// [`fg_stops`](Self::fg_stops), driving every renderer and the physics balls.
+    pub dynamic_fg: Option<Vec<Color>>,
 }
 
 impl Default for VisSettings {
@@ -348,6 +343,8 @@ impl Default for VisSettings {
             bloom_intensity: 0.25,
             glow_gain: 1.8,
             dynamic_colors: false,
+            dynamic_color_count: 2,
+            dynamic_color_fade: 0.4,
             dynamic_fg: None,
         }
     }
@@ -364,22 +361,34 @@ impl VisSettings {
         self.profiles[i].clone()
     }
 
-    /// Low-amplitude foreground gradient end. The album-art **primary** when
-    /// dynamic colors are on and a palette is available, else the active profile.
-    pub fn fg_lo(&self) -> Color {
-        if self.dynamic_colors && let Some((primary, _)) = self.dynamic_fg {
-            return primary;
+    /// Active foreground color stops: the dynamic album-art palette (clamped to
+    /// [`dynamic_color_count`](Self::dynamic_color_count)) when dynamic colors are
+    /// on and a palette is available, else the active profile's `fg` stops. Always
+    /// non-empty (falls back to white). Drives every renderer and the physics balls.
+    pub fn fg_stops(&self) -> Vec<Color> {
+        if self.dynamic_colors
+            && let Some(colors) = &self.dynamic_fg
+            && !colors.is_empty()
+        {
+            let n = self.dynamic_color_count.clamp(2, colors.len());
+            return colors[..n].to_vec();
         }
-        self.profile().fg_lo()
+        let fg = self.profile().fg;
+        if fg.is_empty() {
+            vec![Color::WHITE]
+        } else {
+            fg
+        }
     }
 
-    /// Full-amplitude foreground gradient end. The album-art **secondary** when
-    /// dynamic colors are on and a palette is available, else the active profile.
+    /// Low-amplitude foreground gradient end (the first active stop).
+    pub fn fg_lo(&self) -> Color {
+        self.fg_stops().first().copied().unwrap_or(Color::WHITE)
+    }
+
+    /// Full-amplitude foreground gradient end (the last active stop).
     pub fn fg_hi(&self) -> Color {
-        if self.dynamic_colors && let Some((_, secondary)) = self.dynamic_fg {
-            return secondary;
-        }
-        self.profile().fg_hi()
+        self.fg_stops().last().copied().unwrap_or(Color::WHITE)
     }
 }
 
@@ -428,6 +437,28 @@ pub(crate) fn gradient_color(lo: Color, hi: Color, t: f32, glow_gain: f32) -> Co
     Color::linear_rgba(lin.red * glow, lin.green * glow, lin.blue * glow, lin.alpha)
 }
 
+/// Multi-stop gradient sample by amplitude `t` (0..1) across N evenly-spaced color
+/// stops, HDR-boosted like [`gradient_color`]. With two stops it's identical to
+/// `gradient_color`; with more it lets the dynamic album palette span every color.
+pub(crate) fn sample_gradient(stops: &[Color], t: f32, glow_gain: f32) -> Color {
+    match stops {
+        [] => gradient_color(Color::WHITE, Color::WHITE, t, glow_gain),
+        [only] => gradient_color(*only, *only, t, glow_gain),
+        _ => {
+            let t = t.clamp(0.0, 1.0);
+            let span = (stops.len() - 1) as f32;
+            let scaled = t * span;
+            let i = (scaled.floor() as usize).min(stops.len() - 2);
+            // Local 0..1 position within segment `i`, re-driving the HDR glow so the
+            // brightness still tracks the global amplitude `t`.
+            let local = scaled - i as f32;
+            let seg = gradient_color(stops[i], stops[i + 1], local, 0.0).to_linear();
+            let glow = 1.0 + t * glow_gain;
+            Color::linear_rgba(seg.red * glow, seg.green * glow, seg.blue * glow, seg.alpha)
+        }
+    }
+}
+
 /// Selects and installs the visualizers and HUD.
 pub struct VisPlugin;
 
@@ -464,18 +495,15 @@ fn cycle_mode(
 
 /// Album-art accent colors, smoothed across track changes.
 ///
-/// `target` is the latest `(primary, secondary)` pair extracted from the cover;
-/// `current` chases it so a song change eases the visualization's colors over a
-/// fraction of a second instead of snapping. New balls spawn with whatever
-/// `current` is at spawn time, so already-airborne balls keep their old color.
+/// `target` is the latest color set extracted from the cover; `current` chases it
+/// so a song change eases the visualization's colors over a fraction of a second
+/// instead of snapping. New balls spawn with whatever `current` is at spawn time,
+/// so already-airborne balls keep their old color.
 #[derive(Resource, Default)]
 pub struct AlbumPalette {
-    current: Option<(Color, Color)>,
-    target: Option<(Color, Color)>,
+    current: Option<Vec<Color>>,
+    target: Option<Vec<Color>>,
 }
-
-/// Time constant (seconds) of the exponential ease toward a new track's colors.
-const ALBUM_COLOR_TAU: f32 = 0.4;
 
 /// Ease [`VisSettings::dynamic_fg`] toward the current album-art palette each
 /// frame when [`VisSettings::dynamic_colors`] is on. Interpolates in Oklch so the
@@ -488,7 +516,7 @@ fn animate_album_colors(
     mut vis: ResMut<VisSettings>,
 ) {
     if art.is_changed() {
-        palette.target = art.colors;
+        palette.target = art.colors.clone();
     }
 
     if !vis.dynamic_colors {
@@ -498,26 +526,38 @@ fn animate_album_colors(
         return;
     }
 
-    let Some(target) = palette.target else {
+    let Some(target) = palette.target.clone() else {
         if vis.dynamic_fg.is_some() {
             vis.dynamic_fg = None;
         }
         return;
     };
 
-    let current = palette.current.unwrap_or(target);
-    let f = 1.0 - (-time.delta_secs() / ALBUM_COLOR_TAU).exp();
-    let mut primary = mix_oklch(current.0, target.0, f);
-    let mut secondary = mix_oklch(current.1, target.1, f);
-    // Snap once we're within a hair of the target so the value can settle and the
-    // change-guard below stops re-marking VisSettings.
-    if color_close(primary, target.0) && color_close(secondary, target.1) {
-        primary = target.0;
-        secondary = target.1;
+    let current = palette.current.as_ref();
+    // A near-zero fade snaps; otherwise ease exponentially with the configured tau.
+    let f = if vis.dynamic_color_fade <= 1.0e-3 {
+        1.0
+    } else {
+        1.0 - (-time.delta_secs() / vis.dynamic_color_fade).exp()
+    };
+    // Ease each stop toward its target; a stop the previous palette didn't have
+    // (the new cover yields more colors) snaps in at the target.
+    let mut next: Vec<Color> = target
+        .iter()
+        .enumerate()
+        .map(|(i, &tgt)| {
+            let from = current.and_then(|c| c.get(i)).copied().unwrap_or(tgt);
+            mix_oklch(from, tgt, f)
+        })
+        .collect();
+    // Snap once every stop is within a hair of its target, so the value settles
+    // and the change-guard below stops re-marking VisSettings.
+    if next.iter().zip(&target).all(|(c, t)| color_close(*c, *t)) {
+        next = target;
     }
 
-    palette.current = Some((primary, secondary));
-    let next = Some((primary, secondary));
+    palette.current = Some(next.clone());
+    let next = Some(next);
     if vis.dynamic_fg != next {
         vis.dynamic_fg = next;
     }
@@ -647,16 +687,36 @@ mod tests {
     }
 
     #[test]
-    fn color_profile_endpoints_fall_back_to_white() {
-        let empty = ColorProfile { fg: vec![], ..ColorProfile::default() };
-        assert_eq!(empty.fg_lo(), Color::WHITE);
-        assert_eq!(empty.fg_hi(), Color::WHITE);
+    fn fg_stops_fall_back_to_white_and_use_profile() {
+        // Empty profile fg → a single white stop, and fg_lo/fg_hi both white.
+        let mut s = VisSettings::default();
+        s.profiles = vec![ColorProfile { fg: vec![], ..ColorProfile::default() }];
+        assert_eq!(s.fg_stops(), vec![Color::WHITE]);
+        assert_eq!(s.fg_lo(), Color::WHITE);
+        assert_eq!(s.fg_hi(), Color::WHITE);
 
-        let two = ColorProfile {
+        // A two-stop profile drives the gradient ends.
+        s.profiles = vec![ColorProfile {
             fg: vec![Color::BLACK, Color::WHITE],
             ..ColorProfile::default()
-        };
-        assert_eq!(two.fg_lo(), Color::BLACK);
-        assert_eq!(two.fg_hi(), Color::WHITE);
+        }];
+        assert_eq!(s.fg_lo(), Color::BLACK);
+        assert_eq!(s.fg_hi(), Color::WHITE);
+    }
+
+    #[test]
+    fn dynamic_color_count_clamps_active_stops() {
+        let mut s = VisSettings::default();
+        s.dynamic_colors = true;
+        s.dynamic_fg = Some(vec![Color::BLACK, Color::WHITE, Color::srgb(1.0, 0.0, 0.0)]);
+        // Count of 2 takes the first two extracted colors.
+        s.dynamic_color_count = 2;
+        assert_eq!(s.fg_stops().len(), 2);
+        // Count of 3 takes all three.
+        s.dynamic_color_count = 3;
+        assert_eq!(s.fg_stops().len(), 3);
+        // A count past what's available is clamped to the palette length.
+        s.dynamic_color_count = 5;
+        assert_eq!(s.fg_stops().len(), 3);
     }
 }
