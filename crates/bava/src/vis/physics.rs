@@ -1206,13 +1206,22 @@ fn toggle_physics_debug(
 #[derive(Component)]
 struct DebugOverlay;
 
-/// Update the F3 overlay text with the current FPS and live ball count, and show
-/// it only while `debug_draw` is on (mirrors the collider wireframes).
+/// How often the F3 overlay text is rebuilt. The per-frame FPS jitters too fast
+/// to read, so we refresh at a fixed low cadence (~5 Hz) and show the
+/// diagnostics' running *averages* rather than the instantaneous value.
+const OVERLAY_REFRESH_SECS: f32 = 0.2;
+
+/// Update the F3 overlay text with the averaged FPS / frame time and live ball
+/// count, and show it only while `debug_draw` is on (mirrors the collider
+/// wireframes). The text is rebuilt at [`OVERLAY_REFRESH_SECS`] cadence, not
+/// every frame, so the readout stays legible.
 fn update_debug_overlay(
     settings: Res<PhysicsSettings>,
+    time: Res<Time>,
     diagnostics: Res<DiagnosticsStore>,
     balls: Query<(), With<Ball>>,
     mut overlay: Query<(&mut Text, &mut Visibility), With<DebugOverlay>>,
+    mut since_refresh: Local<f32>,
 ) {
     let Ok((mut text, mut visibility)) = overlay.single_mut() else {
         return;
@@ -1222,11 +1231,26 @@ fn update_debug_overlay(
     if !show {
         return;
     }
+
+    // Throttle text rebuilds; populate immediately on first show (empty text).
+    *since_refresh += time.delta_secs();
+    if *since_refresh < OVERLAY_REFRESH_SECS && !text.0.is_empty() {
+        return;
+    }
+    *since_refresh = 0.0;
+
     let fps = diagnostics
         .get(&FrameTimeDiagnosticsPlugin::FPS)
-        .and_then(|d| d.smoothed())
+        .and_then(|d| d.average())
         .unwrap_or(0.0);
-    text.0 = format!("FPS: {fps:.0}\nBalls: {}", balls.iter().count());
+    let frame_ms = diagnostics
+        .get(&FrameTimeDiagnosticsPlugin::FRAME_TIME)
+        .and_then(|d| d.average())
+        .unwrap_or(0.0);
+    text.0 = format!(
+        "FPS: {fps:>4.0}  ({frame_ms:.1} ms)\nBalls: {}",
+        balls.iter().count()
+    );
 }
 
 /// Mirror `[physics] debug_draw` onto avian's gizmo config, drawing only the
