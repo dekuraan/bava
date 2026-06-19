@@ -27,6 +27,9 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
             libpulse-dev \
+            libpipewire-0.3-dev \
+            clang \
+            libclang-dev \
             libasound2-dev \
             libfftw3-dev \
             libdbus-1-dev \
@@ -38,8 +41,15 @@ jobs:
             libxi-dev \
             libvulkan-dev
 
+      # Default features include the native PipeWire backend (needs
+      # libpipewire-0.3-dev + libclang for libspa-sys' bindgen).
       - name: Build
         run: cargo build --release -p bava
+
+      # Guard the PulseAudio-only build (no libpipewire link) so the
+      # `--no-default-features` path can't silently rot.
+      - name: Check (PulseAudio-only, no PipeWire feature)
+        run: cargo check --release -p bava --no-default-features
 
       - name: Test (cavacore-rs)
         run: cargo test -p cavacore-rs

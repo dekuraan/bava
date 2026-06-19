@@ -19,8 +19,9 @@
 //! fails and we surface a [`CaptureError::Init`].
 
 use std::collections::VecDeque;
-use std::ffi::c_void;
+use std::ffi::{c_char, c_int, c_void};
 use std::ptr::NonNull;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -29,12 +30,14 @@ use objc2::runtime::AnyObject;
 use objc2::AnyThread;
 use objc2_core_audio::{
     kAudioAggregateDeviceIsPrivateKey, kAudioAggregateDeviceTapAutoStartKey,
-    kAudioAggregateDeviceTapListKey, kAudioAggregateDeviceUIDKey, kAudioObjectPropertyElementMain,
-    kAudioObjectPropertyScopeGlobal, kAudioSubTapUIDKey, kAudioTapPropertyFormat,
-    kAudioTapPropertyUID, AudioDeviceCreateIOProcID, AudioDeviceDestroyIOProcID, AudioDeviceIOProcID,
-    AudioDeviceStart, AudioDeviceStop, AudioHardwareCreateAggregateDevice,
-    AudioHardwareCreateProcessTap, AudioHardwareDestroyAggregateDevice, AudioHardwareDestroyProcessTap,
-    AudioObjectGetPropertyData, AudioObjectID, AudioObjectPropertyAddress, CATapDescription,
+    kAudioAggregateDeviceTapListKey, kAudioAggregateDeviceUIDKey, kAudioDevicePropertyNominalSampleRate,
+    kAudioObjectPropertyElementMain, kAudioObjectPropertyScopeGlobal, kAudioSubTapUIDKey,
+    kAudioTapPropertyFormat, kAudioTapPropertyUID, AudioDeviceCreateIOProcID,
+    AudioDeviceDestroyIOProcID, AudioDeviceIOProcID, AudioDeviceStart, AudioDeviceStop,
+    AudioHardwareCreateAggregateDevice, AudioHardwareCreateProcessTap,
+    AudioHardwareDestroyAggregateDevice, AudioHardwareDestroyProcessTap,
+    AudioObjectAddPropertyListener, AudioObjectGetPropertyData, AudioObjectID,
+    AudioObjectPropertyAddress, AudioObjectRemovePropertyListener, CATapDescription,
 };
 use objc2_core_audio_types::{kAudioFormatFlagIsFloat, AudioBufferList, AudioStreamBasicDescription};
 use objc2_core_foundation::{CFDictionary, CFString};
@@ -77,6 +80,13 @@ pub struct CoreAudioCapture {
     mixed: Vec<f64>,
     /// Converted, target-rate interleaved samples awaiting consumption.
     pending: VecDeque<f64>,
+    /// Set by [`format_listener`] when the aggregate device's nominal sample
+    /// rate changes; [`read`](CoreAudioCapture::read) then re-reads the tap
+    /// format and fixes the resampler ratio so a mid-stream device rate change
+    /// doesn't silently corrupt the output. The listener is registered on
+    /// `aggregate` and removed in `Drop`; this `Arc` keeps the flag alive for
+    /// the listener's `client_data` pointer.
+    format_dirty: Arc<AtomicBool>,
 }
 
 // The Core Audio object IDs are plain integers and the queue is behind a mutex;
@@ -93,6 +103,22 @@ impl CoreAudioCapture {
         _frame_samples: usize,
     ) -> Result<Self, CaptureError> {
         let target_channels = target_channels.max(1) as usize;
+
+        // Preflight the audio-capture (System Audio Recording) permission. A
+        // denied/undetermined state otherwise surfaces only as an opaque
+        // tap-creation failure; checking first lets us point the user straight at
+        // the right Settings pane. If TCC can't be queried we proceed and let the
+        // tap-creation path's own fallback handle it.
+        if audio_capture_denied() {
+            open_audio_privacy_settings();
+            return Err(CaptureError::Init(
+                "audio capture permission not granted — add bava under System Settings ▸ \
+                 Privacy & Security ▸ Screen & System Audio Recording (\"System Audio Recording \
+                 Only\") and relaunch (requires macOS 14.2+)"
+                    .into(),
+            ));
+        }
+
         unsafe {
             // 1. Describe a stereo global tap: include everything, exclude nothing.
             //    Left unmuted (default) so playback is unaffected; private so it
@@ -109,9 +135,16 @@ impl CoreAudioCapture {
             let mut tap: AudioObjectID = 0;
             let status = AudioHardwareCreateProcessTap(Some(&*desc), &mut tap);
             if status != 0 || tap == 0 {
+                // The overwhelmingly common cause is a missing Audio Recording
+                // permission. Surface an actionable error and pop the relevant
+                // privacy pane (the same "System Audio Recording Only" list cava
+                // points users at) so the visualizer doesn't just silently idle.
+                open_audio_privacy_settings();
                 return Err(CaptureError::Init(format!(
-                    "AudioHardwareCreateProcessTap failed (status {status}); \
-                     grant the app the Audio Recording permission (macOS 14.2+ required)"
+                    "AudioHardwareCreateProcessTap failed (status {status}). This usually \
+                     means the Audio Recording permission is missing — grant it under \
+                     System Settings ▸ Privacy & Security ▸ Screen & System Audio Recording \
+                     (\"System Audio Recording Only\"), then relaunch. Requires macOS 14.2+."
                 )));
             }
 
@@ -166,6 +199,24 @@ impl CoreAudioCapture {
                     )));
                 }
 
+                // 6. Watch the aggregate's nominal sample rate so a mid-stream
+                //    device rate change flips `format_dirty`; `read` then re-reads
+                //    the tap format and corrects the resampler. Best-effort: a
+                //    failed registration just means we don't get the notification.
+                let format_dirty = Arc::new(AtomicBool::new(false));
+                let addr = property_address(kAudioDevicePropertyNominalSampleRate);
+                let st = AudioObjectAddPropertyListener(
+                    agg,
+                    NonNull::from(&addr),
+                    Some(format_listener),
+                    Arc::as_ptr(&format_dirty) as *mut c_void,
+                );
+                if st != 0 {
+                    bevy::log::warn!(
+                        "bava: could not watch device sample-rate changes (status {st})"
+                    );
+                }
+
                 Ok(Self {
                     tap,
                     aggregate: agg,
@@ -178,6 +229,7 @@ impl CoreAudioCapture {
                     resampler: LinearResampler::new(target_channels),
                     mixed: vec![0.0; target_channels],
                     pending: VecDeque::new(),
+                    format_dirty,
                 })
             })();
 
@@ -237,6 +289,15 @@ impl CoreAudioCapture {
 impl Drop for CoreAudioCapture {
     fn drop(&mut self) {
         unsafe {
+            // Remove the property listener before the aggregate (and the `Arc`
+            // backing its client_data) go away, so it can't fire into freed memory.
+            let addr = property_address(kAudioDevicePropertyNominalSampleRate);
+            AudioObjectRemovePropertyListener(
+                self.aggregate,
+                NonNull::from(&addr),
+                Some(format_listener),
+                Arc::as_ptr(&self.format_dirty) as *mut c_void,
+            );
             // Stop and unregister the IO proc *first* so `io_proc` can't run after
             // the shared Arc is released, then tear down device and tap.
             AudioDeviceStop(self.aggregate, self.proc_id);
@@ -249,6 +310,21 @@ impl Drop for CoreAudioCapture {
 
 impl AudioCapture for CoreAudioCapture {
     fn read(&mut self, buf: &mut [f64]) -> Result<(), CaptureError> {
+        // If the device's sample rate changed under us, re-read the tap format
+        // and fix the resampler ratio (and channel stride) so we don't keep
+        // resampling against a stale device rate.
+        if self.format_dirty.swap(false, Ordering::Relaxed) {
+            if let Ok(asbd) = unsafe { read_tap_format(self.tap) } {
+                let new_rate = (asbd.mSampleRate as u32).max(1);
+                let new_channels = asbd.mChannelsPerFrame.max(1) as usize;
+                if new_rate != self.device_rate || new_channels != self.device_channels {
+                    self.device_rate = new_rate;
+                    self.device_channels = new_channels;
+                    self.resampler.reset();
+                }
+            }
+        }
+
         // Mirror the WASAPI backend: fill the whole buffer, but cap the wait to the
         // real-time span this chunk represents so a silent device still yields a
         // steady cadence of (zero-filled) frames instead of blocking forever.
@@ -262,6 +338,15 @@ impl AudioCapture for CoreAudioCapture {
                 }
                 std::thread::sleep(Duration::from_millis(3));
             }
+        }
+        // Bound the converted backlog so a brief consumer stall can't let
+        // `pending` grow without limit; keep the most recent ~2 s, drop older.
+        // (The device-rate queue in `Shared` is already capped; this caps the
+        // post-resample side too.)
+        let cap = (self.target_rate as usize * self.target_channels * 2).max(buf.len());
+        if self.pending.len() > cap {
+            let overflow = self.pending.len() - cap;
+            self.pending.drain(..overflow);
         }
         for slot in buf.iter_mut() {
             *slot = self.pending.pop_front().unwrap_or(0.0);
@@ -352,6 +437,76 @@ unsafe extern "C-unwind" fn io_proc(
     if q.len() > shared.cap {
         let overflow = q.len() - shared.cap;
         q.drain(..overflow);
+    }
+    0
+}
+
+/// Best-effort: open the macOS privacy pane where audio capture is granted.
+///
+/// Process taps are gated behind the same authorization as screen/system-audio
+/// recording, so a denied permission otherwise surfaces only as an opaque
+/// `AudioHardwareCreateProcessTap` status. Pointing the user straight at the
+/// settings pane makes it fixable. Failure to spawn `open` is ignored — it is a
+/// convenience, not a requirement.
+fn open_audio_privacy_settings() {
+    let _ = std::process::Command::new("open")
+        .arg("x-apple.systempreferences:com.apple.settings.PrivacySecurity?Privacy_ScreenCapture")
+        .spawn();
+}
+
+// libSystem's dynamic loader, used to reach the private TCC framework for a
+// permission preflight without link-time dependency on it. Always present on macOS.
+unsafe extern "C" {
+    fn dlopen(filename: *const c_char, flag: c_int) -> *mut c_void;
+    fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+    fn dlclose(handle: *mut c_void) -> c_int;
+}
+
+/// Whether macOS reports the audio-capture (System Audio Recording) permission as
+/// *not* granted, via the private `TCCAccessPreflight`. Returns `false` when the
+/// check can't be performed, so callers fall back to attempting the tap.
+fn audio_capture_denied() -> bool {
+    const RTLD_NOW: c_int = 2;
+    // TCCAccessPreflight: 0 = granted, 1 = denied, 2 = undetermined. Audio taps
+    // get no automatic prompt, so anything but granted means the user must add us
+    // in Settings first.
+    type Preflight = unsafe extern "C" fn(*const c_void, *const c_void) -> c_int;
+    unsafe {
+        let handle = dlopen(
+            c"/System/Library/PrivateFrameworks/TCC.framework/Versions/A/TCC".as_ptr(),
+            RTLD_NOW,
+        );
+        if handle.is_null() {
+            return false;
+        }
+        let sym = dlsym(handle, c"TCCAccessPreflight".as_ptr());
+        // A null `sym` transmutes to `None` (fn-pointer null niche).
+        let denied = match std::mem::transmute::<*mut c_void, Option<Preflight>>(sym) {
+            Some(preflight) => {
+                let service = CFString::from_str("kTCCServiceAudioCapture");
+                let status =
+                    preflight((&*service) as *const CFString as *const c_void, std::ptr::null());
+                status != 0
+            }
+            None => false,
+        };
+        dlclose(handle);
+        denied
+    }
+}
+
+/// Property-listener callback: flips the `format_dirty` flag passed as
+/// `client_data` when the watched device property changes. Runs on a Core Audio
+/// notification thread, so it does nothing but an atomic store.
+unsafe extern "C-unwind" fn format_listener(
+    _object: AudioObjectID,
+    _n_addresses: u32,
+    _addresses: NonNull<AudioObjectPropertyAddress>,
+    client_data: *mut c_void,
+) -> i32 {
+    if !client_data.is_null() {
+        let flag = unsafe { &*(client_data as *const AtomicBool) };
+        flag.store(true, Ordering::Relaxed);
     }
     0
 }

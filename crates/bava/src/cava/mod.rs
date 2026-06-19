@@ -274,6 +274,7 @@ fn feed_cava(
     mut cava: ResMut<Cava>,
     settings: Res<CavaSettings>,
     mut dbg: Local<FeedStats>,
+    mut stall: Local<StallState>,
 ) {
     let Some(mut state) = state else {
         return; // cavacore failed to init; leave bars at zero
@@ -301,6 +302,27 @@ fn feed_cava(
             dbg.max_in = dbg
                 .max_in
                 .max(state.scratch.iter().fold(0.0f64, |m, &s| m.max(s.abs())));
+        }
+    }
+
+    // Stall safety net. The platform backends pad an *idle* device with silence,
+    // so a connected-but-quiet source keeps feeding zeros and the bars decay on
+    // their own. But a hard failure — PulseAudio server death, a monitor source
+    // that vanished, a capture thread backing off on repeated read errors —
+    // delivers *nothing*, which would otherwise freeze the last bars on screen.
+    // When no chunk has arrived for a short window, keep executing on silence so
+    // autosens decays the bars to zero (matching cava's `reset_output_buffers`)
+    // instead of holding a stale frame.
+    if executed > 0 {
+        stall.last_audio = Some(std::time::Instant::now());
+    } else {
+        let stalled = stall
+            .last_audio
+            .is_none_or(|t| t.elapsed() >= STALL_DECAY_AFTER);
+        if stalled {
+            state.scratch.clear();
+            state.scratch.resize(chunk, 0.0);
+            state.plan.execute(&state.scratch);
         }
     }
 
@@ -367,6 +389,19 @@ fn rebuild_cava(
         }
         Err(e) => error!("bava: cavacore rebuild failed: {e}; keeping previous plan"),
     }
+}
+
+/// How long the capture stream may deliver *no* samples before [`feed_cava`]
+/// starts feeding silence to decay the bars to zero. Short enough that a dead
+/// source visibly settles instead of freezing, long enough to ride out a normal
+/// frame's worth of jitter between captures.
+const STALL_DECAY_AFTER: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// Tracks the last time [`feed_cava`] saw real captured audio, so a stalled or
+/// dead capture stream decays the bars instead of freezing them.
+#[derive(Default)]
+struct StallState {
+    last_audio: Option<std::time::Instant>,
 }
 
 /// Rolling debug accumulator for [`feed_cava`].

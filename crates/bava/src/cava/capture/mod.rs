@@ -13,6 +13,9 @@
 #[cfg(target_os = "linux")]
 pub mod pulse;
 
+#[cfg(all(target_os = "linux", feature = "pipewire"))]
+pub mod pipewire;
+
 #[cfg(target_os = "windows")]
 pub mod wasapi;
 
@@ -34,6 +37,18 @@ pub fn open(
 ) -> Result<Box<dyn AudioCapture>, CaptureError> {
     #[cfg(target_os = "linux")]
     {
+        // Prefer the native PipeWire backend (follows the default sink + negotiates
+        // format); fall back to PulseAudio (real PulseAudio or pipewire-pulse) when
+        // PipeWire isn't running or the feature is disabled.
+        #[cfg(feature = "pipewire")]
+        {
+            match pipewire::PipeWireCapture::open(device, rate, channels, frame_samples) {
+                Ok(cap) => return Ok(Box::new(cap)),
+                Err(e) => bevy::log::warn!(
+                    "bava: native PipeWire capture unavailable ({e}); falling back to PulseAudio"
+                ),
+            }
+        }
         let cap = pulse::PulseCapture::open(device, rate, channels, frame_samples)?;
         Ok(Box::new(cap))
     }
