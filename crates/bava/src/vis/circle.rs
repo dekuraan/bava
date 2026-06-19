@@ -426,3 +426,70 @@ fn update_fill(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn circle_radii_split_and_clamp() {
+        let extent = 1000.0;
+        let total = extent * MAX_RADIUS_FRAC;
+        let (base, amp) = circle_radii(extent, 0.4);
+        assert!((base - total * 0.4).abs() < 1e-3);
+        assert!((amp - total * 0.6).abs() < 1e-3);
+        // The base + full amplitude budget is the whole radius.
+        assert!((base + amp - total).abs() < 1e-3);
+        // inner_radius is clamped to ≤ 0.95 so there's always room for bars.
+        let (base_hi, amp_hi) = circle_radii(extent, 5.0);
+        assert!((base_hi - total * 0.95).abs() < 1e-3);
+        assert!(amp_hi > 0.0);
+    }
+
+    #[test]
+    fn sample_is_folded_symmetric() {
+        let values = vec![1.0, 0.7, 0.3, 0.1];
+        // sample(t) == sample(1 - t): the ring is left/right symmetric.
+        for k in 0..=20 {
+            let t = k as f32 / 20.0;
+            assert!(
+                (sample(&values, t) - sample(&values, 1.0 - t)).abs() < 1e-5,
+                "fold broke at t={t}"
+            );
+        }
+        // Single bar is flat.
+        assert_eq!(sample(&[0.5], 0.3), 0.5);
+        // t=0 hits the first (bass) bar.
+        assert!((sample(&values, 0.0) - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn blob_ring_tracks_amplitude_and_is_closed() {
+        let extent = 1000.0;
+        let (base, amp) = circle_radii(extent, 0.38);
+
+        // Silence → a circle at the base radius.
+        let silent = blob_ring(&vec![0.0; 16], extent, 0.38, 0.0);
+        assert_eq!(silent.len(), SEGMENTS);
+        for p in &silent {
+            assert!((p.length() - base).abs() < 1e-2, "silent rim should be the base radius");
+        }
+
+        // Loud → radii grow with amplitude, bounded by base + amp·v.
+        let loud = blob_ring(&vec![1.0; 16], extent, 0.38, 0.0);
+        for p in &loud {
+            let r = p.length();
+            assert!(r > base + 1.0, "loud rim should expand past base");
+            assert!(r <= base + amp * 1.5 + 1e-2, "rim within the clamped budget");
+        }
+    }
+
+    #[test]
+    fn ring_point_places_first_segment_at_the_bottom() {
+        // k=0 → t=0 → angle = -π/2 → straight down, at radius base (silent).
+        let (p, v) = ring_point(&[0.0, 0.0, 0.0], 0, 100.0, 50.0, 0.0);
+        assert!((v - 0.0).abs() < 1e-6);
+        assert!(p.x.abs() < 1e-3, "x≈0 at the bottom");
+        assert!((p.y + 100.0).abs() < 1e-3, "y≈-base at the bottom");
+    }
+}

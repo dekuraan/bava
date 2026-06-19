@@ -196,3 +196,65 @@ pub(crate) fn apply_stroke_tapered(
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
     mesh.insert_indices(Indices::U32(indices));
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn counts(mesh: &Mesh) -> (usize, usize) {
+        (mesh.count_vertices(), mesh.indices().map(|i| i.len()).unwrap_or(0))
+    }
+
+    #[test]
+    fn stroke_too_short_yields_empty_mesh() {
+        let mut mesh = empty_stroke_mesh();
+        apply_stroke(&mut mesh, &[], 2.0, STROKE_FEATHER, false);
+        assert_eq!(counts(&mesh), (0, 0));
+        apply_stroke(&mut mesh, &[(Vec2::ZERO, Color::WHITE)], 2.0, STROKE_FEATHER, false);
+        assert_eq!(counts(&mesh), (0, 0), "a single point can't form a stroke");
+    }
+
+    #[test]
+    fn open_stroke_vertex_and_index_counts() {
+        let pts = vec![(Vec2::new(0.0, 0.0), Color::WHITE), (Vec2::new(10.0, 0.0), Color::WHITE)];
+        let mut mesh = empty_stroke_mesh();
+        apply_stroke(&mut mesh, &pts, 2.0, STROKE_FEATHER, false);
+        // 4 lanes per point; 3 quads (2 tris each) per segment; 1 segment open.
+        assert_eq!(counts(&mesh), (2 * 4, 1 * 3 * 6));
+    }
+
+    #[test]
+    fn closed_stroke_adds_a_wrap_segment() {
+        let pts = vec![
+            (Vec2::new(0.0, 0.0), Color::WHITE),
+            (Vec2::new(10.0, 0.0), Color::WHITE),
+            (Vec2::new(5.0, 8.0), Color::WHITE),
+        ];
+        let mut mesh = empty_stroke_mesh();
+        apply_stroke(&mut mesh, &pts, 2.0, STROKE_FEATHER, true);
+        // Closed → segs == n (the last point wraps to the first).
+        assert_eq!(counts(&mesh), (3 * 4, 3 * 3 * 6));
+    }
+
+    #[test]
+    fn rounded_rect_has_center_boundary_and_feather_rings() {
+        let mut mesh = empty_stroke_mesh();
+        apply_rounded_rect(&mut mesh, Vec2::new(20.0, 10.0), 4.0, STROKE_FEATHER, Color::WHITE);
+        let nb = 4 * (CORNER_SEGS + 1);
+        // center + boundary ring + feather ring.
+        assert_eq!(mesh.count_vertices(), 1 + nb * 2);
+        assert_eq!(mesh.indices().unwrap().len(), nb * 9);
+    }
+
+    #[test]
+    fn tapered_stroke_builds_four_lanes_per_point() {
+        let pts = vec![
+            (Vec2::new(0.0, 0.0), Color::WHITE),
+            (Vec2::new(10.0, 0.0), Color::WHITE),
+            (Vec2::new(20.0, 0.0), Color::WHITE),
+        ];
+        let mut mesh = empty_stroke_mesh();
+        apply_stroke_tapered(&mut mesh, &pts, 0.0, 6.0, STROKE_FEATHER, false);
+        assert_eq!(mesh.count_vertices(), 3 * 4);
+    }
+}
