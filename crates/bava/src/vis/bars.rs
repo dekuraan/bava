@@ -204,20 +204,11 @@ pub(crate) struct Layout {
 }
 
 impl Layout {
-    pub(crate) fn new(w: f32, h: f32, n: usize, half_height: bool) -> Self {
-        let slot_w = w / n.max(1) as f32;
-        Self {
-            left: -w / 2.0,
-            floor: -h / 2.0,
-            slot_w,
-            bar_w: (slot_w - BAR_GAP).max(1.0),
-            max_h: h * MAX_HEIGHT_FRAC * if half_height { 0.5 } else { 1.0 },
-        }
-    }
-
-    /// Like [`new`](Self::new) but shrinks the drawing area by `margin` on each
-    /// side and shifts its center by `offset * (w/2, h/2)`.
-    #[allow(dead_code)]
+    /// Build the per-frame layout, shrinking the drawing area by `margin` on each
+    /// side and shifting its center by `offset * (w/2, h/2)`. Reproduces the
+    /// `area_margin` / `area_offset` transform [`update_bars`] inlines, so
+    /// `physics.rs`'s column colliders land on the margin-inset bars. Pass
+    /// `margin = 0.0`, `offset = Vec2::ZERO` for the full-window layout.
     pub(crate) fn new_with_margin(
         w: f32,
         h: f32,
@@ -255,7 +246,10 @@ impl Layout {
 ///   meets at the center, treble at the edges; `reverse_mirror` flips that).
 /// - [`MirrorMode::SplitChannels`]: the left channel on one side, the right
 ///   channel mirrored on the other (mono falls back to the same data on both).
-fn mirror_values(cava: &Cava, vis: &VisSettings, n: usize) -> Vec<f32> {
+///
+/// Also consumed by `physics.rs` so the spectrum colliders read the exact same
+/// per-bar values the meshes are drawn from (mirror + `reverse_order` included).
+pub(crate) fn mirror_values(cava: &Cava, vis: &VisSettings, n: usize) -> Vec<f32> {
     let spread = |mut v: Vec<f32>| {
         spread_monstercat(&mut v, vis.monstercat);
         v

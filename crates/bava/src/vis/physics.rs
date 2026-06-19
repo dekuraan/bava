@@ -37,7 +37,7 @@ use bevy::prelude::*;
 
 use crate::cava::Cava;
 use crate::gui::EditorState;
-use crate::vis::bars::{column_geom, Layout, LEVEL_STEPS, MAX_HEIGHT_FRAC};
+use crate::vis::bars::{column_geom, mirror_values, Layout, LEVEL_STEPS, MAX_HEIGHT_FRAC};
 use crate::vis::circle::blob_ring;
 use crate::vis::stroke::{apply_stroke_tapered, empty_stroke_mesh, stroke_material, STROKE_FEATHER};
 use crate::vis::{
@@ -589,7 +589,15 @@ fn update_surface(
         return;
     };
     let (w, h) = (window.width(), window.height());
-    let floor = -h / 2.0;
+    // Match `bars::update_box_lines`'s Wave geometry: the draw region is inset by
+    // `area_margin` and shifted by `area_offset`, so the heightfield's floor,
+    // amplitude and horizontal span all follow the same transform.
+    let eff_w = (w - 2.0 * vis.area_margin).max(1.0);
+    let eff_h = (h - 2.0 * vis.area_margin).max(1.0);
+    let ox = vis.area_offset.x * w * 0.5;
+    let oy = vis.area_offset.y * h * 0.5;
+    let floor = -eff_h * 0.5 + oy;
+    let max_h = eff_h * MAX_HEIGHT_FRAC;
     let dt = time.delta_secs();
     let active = wave_active(*mode, &vis);
 
@@ -604,15 +612,16 @@ fn update_surface(
         1.0
     };
 
-    let mut values = cava.mono();
-    if !active || values.is_empty() {
+    let n = cava.bars_per_channel;
+    if !active || n == 0 {
         // Relax the surface flat to the floor when inactive.
         for hgt in &mut surface.heights {
             *hgt += (floor - *hgt) * alpha;
         }
     } else {
-        spread_monstercat(&mut values, vis.monstercat);
-        let max_h = h * MAX_HEIGHT_FRAC;
+        // Same value array the rendered Wave line is built from (monstercat,
+        // mirror and `reverse_order` all applied).
+        let values = mirror_values(&cava, &vis, n);
         for s in 0..SAMPLES {
             let v = sample_height(&values, s).clamp(0.0, 1.5);
             let target = floor + v * max_h;
@@ -620,15 +629,17 @@ fn update_surface(
         }
     }
 
-    // Rebuild the heightfield collider to match (x spans [-w/2, w/2]); park the
-    // whole body offscreen while Wave isn't the active mode. Skip the expensive
-    // collider/BVH rebuild once parked and fully relaxed to the floor — otherwise
-    // every non-Wave mode would reconstruct an unused heightfield ~60×/sec.
+    // Rebuild the heightfield collider to match (x spans the inset draw width,
+    // centered at the horizontal offset); park the whole body offscreen while
+    // Wave isn't the active mode. Skip the expensive collider/BVH rebuild once
+    // parked and fully relaxed to the floor — otherwise every non-Wave mode would
+    // reconstruct an unused heightfield ~60×/sec.
     if let Ok((mut collider, mut transform)) = body.single_mut() {
-        let settled = !active && surface.heights.iter().all(|h| (h - floor).abs() <= 0.5);
+        let settled = !active && surface.heights.iter().all(|hh| (hh - floor).abs() <= 0.5);
         if !settled {
-            *collider = Collider::heightfield(surface.heights.clone(), Vec2::new(w, 1.0));
+            *collider = Collider::heightfield(surface.heights.clone(), Vec2::new(eff_w, 1.0));
         }
+        transform.translation.x = if active { ox } else { 0.0 };
         transform.translation.y = if active { 0.0 } else { -PARKED };
     }
 }
@@ -656,13 +667,15 @@ fn push_balls(
     let Some(window) = windows.iter().next() else {
         return;
     };
-    let w = window.width();
-    let dx = w / (SAMPLES - 1) as f32;
+    // Sample columns across the same inset draw region the surface was built on.
+    let eff_w = (window.width() - 2.0 * vis.area_margin).max(1.0);
+    let left = -eff_w * 0.5 + vis.area_offset.x * window.width() * 0.5;
+    let dx = eff_w / (SAMPLES - 1) as f32;
 
     for (mut transform, mut vel, ball) in &mut balls {
         let (x, y) = (transform.translation.x, transform.translation.y);
         // Map x to a column index with neighbours for the slope.
-        let f = (x + w / 2.0) / w * (SAMPLES - 1) as f32;
+        let f = (x - left) / eff_w * (SAMPLES - 1) as f32;
         if f < 1.0 || f > (SAMPLES - 2) as f32 {
             continue;
         }
@@ -768,8 +781,7 @@ fn update_columns(
     }
 
     let (w, h) = (window.width(), window.height());
-    let mut values = cava.mono();
-    let n = values.len();
+    let n = cava.bars_per_channel;
     if n == 0 {
         // No audio this frame: keep prev synced to tops so the next non-empty
         // frame doesn't divide a multi-frame top delta by one frame's dt (which
@@ -777,8 +789,11 @@ fn update_columns(
         columns.prev.copy_from_slice(&columns.tops);
         return;
     }
-    spread_monstercat(&mut values, vis.monstercat);
-    let lyt = Layout::new(w, h, n, false);
+    // Read the bars exactly as `bars::update_bars` draws them: same per-bar
+    // values (monstercat + `reverse_order`) and the same `area_margin`/
+    // `area_offset` layout, so the colliders can't drift from the meshes.
+    let values = mirror_values(&cava, &vis, n);
+    let lyt = Layout::new_with_margin(w, h, n, false, vis.area_margin, vis.area_offset);
 
     if columns.tops.len() != n {
         columns.tops = vec![lyt.floor; n];
@@ -793,7 +808,7 @@ fn update_columns(
             transform.translation = Vec3::new(PARKED, PARKED, 0.0);
             continue;
         }
-        let mut v = values[i].clamp(0.0, 1.5);
+        let mut v = values.get(i).copied().unwrap_or(0.0).clamp(0.0, 1.5);
         if levels {
             // Snap the height to discrete VU-style steps, matching the renderer.
             v = (v * LEVEL_STEPS).round() / LEVEL_STEPS;
@@ -833,7 +848,7 @@ fn push_columns(
     if n == 0 {
         return;
     }
-    let lyt = Layout::new(w, h, n, false);
+    let lyt = Layout::new_with_margin(w, h, n, false, vis.area_margin, vis.area_offset);
 
     for (mut transform, mut vel, ball) in &mut balls {
         let (x, y) = (transform.translation.x, transform.translation.y);
