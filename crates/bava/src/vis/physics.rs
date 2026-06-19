@@ -978,6 +978,7 @@ fn update_planet(
 fn planet_forces(
     mode: Res<DrawingMode>,
     settings: Res<PhysicsSettings>,
+    vis: Res<VisSettings>,
     time: Res<Time>,
     planet: Res<Planet>,
     mut balls: Query<(&mut Transform, &mut LinearVelocity, &Ball)>,
@@ -1015,11 +1016,15 @@ fn planet_forces(
             continue;
         }
 
-        // Blob radius + expansion rate in this ball's direction (invert
-        // `ring_point`'s mapping: angle = t·TAU − π/2).
+        // Blob radius + expansion rate in this ball's direction by inverting
+        // `ring_point`'s mapping: angle = t·TAU − π/2 + rotation. The `rotation`
+        // term is essential — the polyline collider is built rotated, so omitting
+        // it here samples the wrong segment whenever `rotation != 0` and the force
+        // field stops matching the surface the ball actually rests on (balls then
+        // pin to the rim with no matching fling — the "stuck to the blob" bug).
         let (surf_r, expand) = if has_blob {
             let ang = outward.y.atan2(outward.x);
-            let t = ((ang + FRAC_PI_2) / TAU).rem_euclid(1.0);
+            let t = ((ang + FRAC_PI_2 - vis.rotation) / TAU).rem_euclid(1.0);
             let k = ((t * n as f32).round() as usize) % n;
             (planet.radii[k], (planet.radii[k] - planet.prev[k]) / dt)
         } else {
@@ -1637,6 +1642,66 @@ mod tests {
         assert!(
             final_r > rim * 0.5,
             "ball ended up stuck deep inside: final_r={final_r}, rim={rim}"
+        );
+    }
+
+    /// Rotated-blob regression: the radial force field must read the surface
+    /// radius at the ball's *true* angle, applying `vis.rotation` exactly as the
+    /// rendered polyline collider does. When the rotation term is dropped from
+    /// the inverse mapping, a swallowed ball is ejected onto a different segment
+    /// than the one it actually sits under — so on a directional blob it lands at
+    /// the wrong distance and pins to a rim that isn't there (the "still stuck to
+    /// the blob" report). Solver-free so the teleport target can be read exactly.
+    #[test]
+    fn l4_rotated_blob_ejects_along_the_real_surface() {
+        use std::f32::consts::{FRAC_PI_2, TAU};
+
+        let mut app = bare_app();
+        app.insert_resource(PhysicsSettings::default());
+        // monstercat 1.0 → spread is a no-op, so the spectrum reaches the ring
+        // unchanged; a quarter turn moves the buggy lookup 90° off the truth.
+        let vis = VisSettings { rotation: FRAC_PI_2, monstercat: 1.0, ..VisSettings::default() };
+        app.insert_resource(vis);
+        app.insert_resource(DrawingMode::WaveCircle);
+        // Silent on one side, loud past it → the rim radius varies strongly with
+        // angle, so the mis-sampled segment is clearly the wrong distance.
+        app.insert_resource(Cava { bars: vec![0.0, 1.0], bars_per_channel: 2, channels: 1 });
+        app.init_resource::<Planet>();
+        app.init_resource::<BallCounter>();
+        spawn_planet_body(&mut app);
+
+        // Build the blob once (no ball yet) so `planet.radii` is populated.
+        app.add_systems(Update, update_planet);
+        app.update();
+
+        // Ball on the +X axis (world angle 0). Resolve the rim radius the fixed
+        // force field now uses, and the buggy no-rotation one, and require them to
+        // differ so the assertion can actually catch the regression.
+        let radii = app.world().resource::<Planet>().radii.clone();
+        let n = radii.len();
+        let seg = |rot: f32| {
+            let t = ((0.0 + FRAC_PI_2 - rot) / TAU).rem_euclid(1.0);
+            radii[((t * n as f32).round() as usize) % n]
+        };
+        let correct = seg(FRAC_PI_2);
+        let buggy = seg(0.0);
+        assert!(
+            (correct - buggy).abs() > 20.0,
+            "test needs a directional blob: correct={correct}, buggy={buggy}"
+        );
+
+        // Spawn the ball deep inside along +X, then let the force field eject it.
+        let radius = 12.0;
+        let ball = spawn_ball(&mut app, Vec2::new(correct * 0.4, 0.0), radius, 0.9, Vec2::ZERO);
+        app.add_systems(Update, planet_forces.after(update_planet));
+        app.update();
+
+        let landed = pos_of(&app, ball).length();
+        assert!(
+            (landed - (correct + radius)).abs() < 2.0,
+            "ejected onto the wrong rim: landed={landed}, want≈{}, antipode≈{}",
+            correct + radius,
+            buggy + radius,
         );
     }
 }
