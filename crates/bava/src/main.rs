@@ -78,13 +78,12 @@ fn main() {
     .insert_resource(EditorState::new(cli.gui, config.gui_toggle_key()))
     .add_plugins((CavaPlugin, NowPlayingPlugin, VisPlugin, GuiPlugin));
 
-    // `--debug` also enables frame-time diagnostics, logging FPS/frame time ~1×/s.
+    // `--debug` also logs FPS/frame time ~1×/s. The vis plugin already adds
+    // `FrameTimeDiagnosticsPlugin` (for the F3 overlay), so adding it again here
+    // would panic ("plugin was already added"); only the log sink is needed.
     if cli.debug {
-        use bevy::diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin};
-        app.add_plugins((
-            FrameTimeDiagnosticsPlugin::default(),
-            LogDiagnosticsPlugin::default(),
-        ));
+        use bevy::diagnostic::LogDiagnosticsPlugin;
+        app.add_plugins(LogDiagnosticsPlugin::default());
     }
 
     app.run();

@@ -125,6 +125,9 @@ pub struct AudioConfig {
     /// Capture source. When unset, bava records the default sink's monitor.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    /// When `source` is unset, follow the sink that is actively playing instead
+    /// of the default sink (Linux only). A pinned `source` disables this.
+    pub follow_active_sink: bool,
     /// Capture sample rate (Hz).
     pub rate: u32,
     /// Channels to capture (1 or 2).
@@ -340,6 +343,7 @@ impl Config {
         Self {
             audio: AudioConfig {
                 source: cava.source.clone(),
+                follow_active_sink: cava.follow_active_sink,
                 rate: cava.rate,
                 channels: cava.channels,
                 frame_samples: cava.frame_samples,
@@ -586,6 +590,7 @@ impl Config {
             low_cutoff_freq: self.cava.low_cutoff_freq,
             high_cutoff_freq: self.cava.high_cutoff_freq,
             source: self.audio.source.clone(),
+            follow_active_sink: self.audio.follow_active_sink,
             debug,
         }
     }

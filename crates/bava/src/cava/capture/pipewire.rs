@@ -37,10 +37,26 @@ use super::{AudioCapture, CaptureError};
 /// (or report an error) before giving up so the caller can fall back to Pulse.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// How long [`PipeWireCapture::read`] waits for a full chunk of *real* samples
+/// before giving up and zero-filling. This must comfortably exceed PipeWire's
+/// largest plausible quantum (a quantum can be a few tens of ms) so that during
+/// active playback `read` always assembles a full real chunk and never injects
+/// spurious silence — which would otherwise corrupt cava's autosens/gravity
+/// smoothing (the Pulse backend blocks until a full real read is available, so
+/// it never does this). Only a genuinely idle source — sink suspended, no
+/// buffers arriving — hits this timeout; the bars then decay on the resulting
+/// silence, the same path as cava's `reset_output_buffers`. Kept below
+/// `feed_cava`'s 200 ms stall window so steady silence reaches the analysis
+/// before that net trips.
+const IDLE_TIMEOUT: Duration = Duration::from_millis(120);
+
 /// Hand-off between the realtime process callback (producer) and `read`
 /// (consumer): interleaved `f32` at the negotiated (target) format.
 struct Shared {
     queue: Mutex<VecDeque<f32>>,
+    /// Signalled by the process callback after it enqueues a quantum, so `read`
+    /// wakes the moment audio lands instead of polling.
+    filled: Condvar,
     /// Hard cap (~4 s of target-rate audio) so a stalled consumer can't grow the
     /// queue without bound; oldest samples are dropped.
     cap: usize,
@@ -91,6 +107,7 @@ impl PipeWireCapture {
 
         let shared = Arc::new(Shared {
             queue: Mutex::new(VecDeque::new()),
+            filled: Condvar::new(),
             cap: (target_rate as usize * target_channels * 4).max(1),
         });
         let handshake = Arc::new((Mutex::new(Handshake::Pending), Condvar::new()));
@@ -170,32 +187,35 @@ impl Drop for PipeWireCapture {
 
 impl AudioCapture for PipeWireCapture {
     fn read(&mut self, buf: &mut [f64]) -> Result<(), CaptureError> {
-        // Drain the queue into `buf`, capping the wait to the real-time span this
-        // chunk represents so a silent/paused source yields zero-filled frames at
-        // a steady cadence instead of blocking forever (mirrors WASAPI/CoreAudio).
-        let frames = buf.len() / self.target_channels.max(1);
-        let budget = Duration::from_secs_f64(frames as f64 / self.target_rate as f64);
+        // Block until the queue holds a full chunk of *real* samples, then drain
+        // it. PipeWire delivers in quanta that are usually larger than one chunk
+        // and arrive tens of ms apart, so returning early with whatever happens
+        // to be queued would zero-fill most chunks mid-quantum during active
+        // playback and feed cava a stream of real-audio-interspersed-with-silence
+        // — visibly different bar smoothing than the Pulse backend, whose
+        // `simple.read` blocks until a full real read is available. Only a
+        // genuinely idle source (no quanta within `IDLE_TIMEOUT`) short-reads and
+        // zero-fills, so the bars decay on silence at a steady cadence.
+        let need = buf.len();
+        let mut q = self.shared.queue.lock().unwrap();
         let start = Instant::now();
-        let mut filled = 0;
-        loop {
-            {
-                let mut q = self.shared.queue.lock().unwrap();
-                while filled < buf.len() {
-                    match q.pop_front() {
-                        Some(s) => {
-                            buf[filled] = s as f64;
-                            filled += 1;
-                        }
-                        None => break,
-                    }
-                }
-            }
-            if filled >= buf.len() || start.elapsed() >= budget {
+        while q.len() < need {
+            let remaining = match IDLE_TIMEOUT.checked_sub(start.elapsed()) {
+                Some(r) if !r.is_zero() => r,
+                _ => break,
+            };
+            let (g, res) = self.shared.filled.wait_timeout(q, remaining).unwrap();
+            q = g;
+            if res.timed_out() {
                 break;
             }
-            std::thread::sleep(Duration::from_millis(3));
         }
-        for slot in &mut buf[filled..] {
+        let take = need.min(q.len());
+        for slot in buf[..take].iter_mut() {
+            *slot = q.pop_front().unwrap() as f64;
+        }
+        drop(q);
+        for slot in &mut buf[take..] {
             *slot = 0.0;
         }
         Ok(())
@@ -328,6 +348,9 @@ fn run_loop(
                     let overflow = q.len() - ud.shared.cap;
                     q.drain(..overflow);
                 }
+                drop(q);
+                // Wake `read`, which is blocked until a full chunk is queued.
+                ud.shared.filled.notify_one();
             }
         })
         .register();

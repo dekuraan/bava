@@ -44,6 +44,12 @@ pub struct CavaSettings {
     pub high_cutoff_freq: u32,
     /// Optional explicit capture source; `None` resolves the default sink monitor.
     pub source: Option<String>,
+    /// When `source` is unset, follow whichever sink is *actively playing* (the
+    /// HDMI output you routed media to, say) instead of pinning the default
+    /// sink's monitor. Re-checked periodically on the capture thread; a pinned
+    /// `source` disables it. Linux only — ignored on Windows/macOS, which always
+    /// loop back the default render endpoint / system mix.
+    pub follow_active_sink: bool,
     /// Log input/output signal levels about once per second.
     pub debug: bool,
 }
@@ -60,6 +66,7 @@ impl Default for CavaSettings {
             low_cutoff_freq: 50,
             high_cutoff_freq: 10_000,
             source: None,
+            follow_active_sink: true,
             debug: false,
         }
     }
@@ -230,16 +237,53 @@ impl Plugin for CavaPlugin {
     }
 }
 
+/// How often [`capture_reader`] re-checks which sink is actively playing when
+/// `follow_active_sink` is on. Long enough to be negligible overhead, short
+/// enough that starting playback on another output retargets capture promptly.
+const FOLLOW_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Monitor source of the currently-active sink, or `None` when nothing is
+/// playing / on non-Linux (where capture always loops back the default output).
+fn active_sink_monitor() -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        capture::pulse::active_monitor_source()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
 /// Pure audio reader: pulls small chunks from the platform capture backend and
 /// appends them to the ring. No cavacore here — analysis happens on the render
 /// thread.
+///
+/// When no explicit `source` is pinned and `follow_active_sink` is set, the
+/// reader periodically re-resolves the sink that is actually playing and
+/// reopens the capture there — so audio routed to a non-default output (an HDMI
+/// display, say) is visualized without the user pinning a source by hand.
 fn capture_reader(settings: CavaSettings, ring: AudioRing) {
-    let mut capture = match capture::open(
-        settings.source.as_deref(),
-        settings.rate,
-        settings.channels as u8,
-        settings.frame_samples,
-    ) {
+    // Follow the active sink only when the user hasn't pinned an explicit source.
+    let follow = settings.source.is_none() && settings.follow_active_sink;
+
+    let open = |dev: &Option<String>| {
+        capture::open(
+            dev.as_deref(),
+            settings.rate,
+            settings.channels as u8,
+            settings.frame_samples,
+        )
+    };
+
+    // Initial device: a pinned source wins; otherwise the active sink if one is
+    // playing, else `None` (the backend resolves the default sink's monitor).
+    let mut current_device = settings.source.clone();
+    if follow && current_device.is_none() {
+        current_device = active_sink_monitor();
+    }
+
+    let mut capture = match open(&current_device) {
         Ok(c) => c,
         Err(e) => {
             error!("bava: audio capture unavailable, visualizer will be idle: {e}");
@@ -248,9 +292,13 @@ fn capture_reader(settings: CavaSettings, ring: AudioRing) {
     };
 
     info!(
-        "bava: capturing {} ch @ {} Hz",
+        "bava: capturing {} ch @ {} Hz{}",
         capture.channels(),
-        capture.rate()
+        capture.rate(),
+        current_device
+            .as_deref()
+            .map(|d| format!(" from {d}"))
+            .unwrap_or_default(),
     );
 
     // Publish the negotiated rate so the main thread can rebuild the cavacore
@@ -259,6 +307,7 @@ fn capture_reader(settings: CavaSettings, ring: AudioRing) {
 
     let chunk = settings.frame_samples.max(1) * settings.channels.max(1);
     let mut buf = vec![0.0f64; chunk];
+    let mut last_follow_check = std::time::Instant::now();
 
     while ring.running.load(Ordering::Relaxed) {
         if let Err(e) = capture.read(&mut buf) {
@@ -273,6 +322,27 @@ fn capture_reader(settings: CavaSettings, ring: AudioRing) {
             q.extend(buf.iter().copied());
             while q.len() > ring.cap {
                 q.pop_front();
+            }
+        }
+
+        // Periodically re-follow the active sink. Only switch when a *different*
+        // sink is actively playing; when nothing plays we keep the current source
+        // so pausing doesn't yank capture away from what you were just hearing.
+        if follow && last_follow_check.elapsed() >= FOLLOW_INTERVAL {
+            last_follow_check = std::time::Instant::now();
+            if let Some(active) = active_sink_monitor()
+                && current_device.as_deref() != Some(active.as_str())
+            {
+                let next = Some(active.clone());
+                match open(&next) {
+                    Ok(c) => {
+                        capture = c;
+                        ring.negotiated_rate.store(capture.rate(), Ordering::Relaxed);
+                        current_device = next;
+                        info!("bava: following active sink → {active}");
+                    }
+                    Err(e) => warn!("bava: could not switch to active sink {active}: {e}"),
+                }
             }
         }
     }
@@ -347,13 +417,22 @@ fn feed_cava(
     cava.bars.extend(bars.iter().map(|&v| v as f32));
 
     if settings.debug {
+        let now = std::time::Instant::now();
+        dbg.since.get_or_insert(now);
         dbg.frames += 1;
         dbg.executes += executed as u64;
         dbg.max_out = dbg.max_out.max(bars.iter().fold(0.0f64, |m, &b| m.max(b)));
         if dbg.frames >= 240 {
+            let secs = now.duration_since(dbg.since.unwrap()).as_secs_f64().max(1e-6);
             info!(
-                "bava: {} frames | {} cava executes/s | chunk={} | max input={:.3} | max bar={:.3}",
-                dbg.frames, dbg.executes, chunk, dbg.max_in, dbg.max_out,
+                "bava: {} frames in {:.2}s | {:.0} cava executes/s | chunk={} | \
+                 max input={:.3} | max bar={:.3}",
+                dbg.frames,
+                secs,
+                dbg.executes as f64 / secs,
+                chunk,
+                dbg.max_in,
+                dbg.max_out,
             );
             *dbg = FeedStats::default();
         }
@@ -490,6 +569,10 @@ struct FeedStats {
     executes: u64,
     max_in: f64,
     max_out: f64,
+    /// Wall-clock start of the current window, so execute *rate* is per-second
+    /// rather than per-window (the window is frame-counted, so its span varies
+    /// with framerate — 240 frames is ~1 s at 240 fps but ~4 s at 60 fps).
+    since: Option<std::time::Instant>,
 }
 
 /// Signal the capture thread to stop when the app is exiting.

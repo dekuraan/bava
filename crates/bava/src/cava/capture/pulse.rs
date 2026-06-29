@@ -9,6 +9,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use libpulse_binding::callbacks::ListResult;
 use libpulse_binding::context::introspect::ServerInfo;
 use libpulse_binding::context::{Context, FlagSet as ContextFlagSet, State as ContextState};
 use libpulse_binding::def::BufferAttr;
@@ -190,4 +191,81 @@ pub fn default_monitor_source() -> Result<String, CaptureError> {
         .ok_or_else(|| CaptureError::Init("no default sink reported by server".into()))?;
 
     Ok(format!("{sink}.monitor"))
+}
+
+/// Resolve the monitor source of the sink that currently has an *active* stream
+/// — i.e. wherever sound is actually coming out, which need not be the default
+/// sink (e.g. media routed to an HDMI/display output while headphones are
+/// default). Returns `None` when nothing is actively playing, or on any query
+/// error; the caller keeps its current source in that case (so a pause doesn't
+/// yank capture away from the sink you were just listening to). When several
+/// streams play at once the most recently started (highest sink-input index)
+/// wins. Works through `pipewire-pulse` too, so it serves the native PipeWire
+/// backend as well as PulseAudio.
+///
+/// This runs over a short-lived mainloop, so it's only suitable for the periodic
+/// poll on the capture thread — not per read.
+pub fn active_monitor_source() -> Option<String> {
+    let mut mainloop = Mainloop::new()?;
+    let mut context = Context::new(&mainloop, "bava-follow")?;
+    context.connect(None, ContextFlagSet::NOFLAGS, None).ok()?;
+
+    // Pump until the context is ready (or fails).
+    loop {
+        match mainloop.iterate(true) {
+            IterateResult::Success(_) => {}
+            IterateResult::Quit(_) | IterateResult::Err(_) => return None,
+        }
+        match context.get_state() {
+            ContextState::Ready => break,
+            ContextState::Failed | ContextState::Terminated => return None,
+            _ => {}
+        }
+    }
+
+    // Collect the (sink-input index, sink index) of every playing stream — one
+    // that is neither corked (paused) nor muted, since neither emits sound.
+    let playing: Rc<RefCell<Vec<(u32, u32)>>> = Rc::new(RefCell::new(Vec::new()));
+    let playing_cb = playing.clone();
+    let op = context.introspect().get_sink_input_info_list(move |res| {
+        if let ListResult::Item(info) = res
+            && !info.corked
+            && !info.mute
+        {
+            playing_cb.borrow_mut().push((info.index, info.sink));
+        }
+    });
+    while op.get_state() == OperationState::Running {
+        match mainloop.iterate(true) {
+            IterateResult::Success(_) => {}
+            IterateResult::Quit(_) | IterateResult::Err(_) => return None,
+        }
+    }
+
+    // Most recently started stream (highest index) wins the sink.
+    let sink_idx = playing
+        .borrow()
+        .iter()
+        .max_by_key(|(input_idx, _)| *input_idx)
+        .map(|(_, sink_idx)| *sink_idx)?;
+
+    // Resolve that sink's monitor source name.
+    let monitor: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+    let monitor_cb = monitor.clone();
+    let op = context.introspect().get_sink_info_by_index(sink_idx, move |res| {
+        if let ListResult::Item(info) = res
+            && let Some(name) = &info.monitor_source_name
+        {
+            *monitor_cb.borrow_mut() = Some(name.to_string());
+        }
+    });
+    while op.get_state() == OperationState::Running {
+        match mainloop.iterate(true) {
+            IterateResult::Success(_) => {}
+            IterateResult::Quit(_) | IterateResult::Err(_) => return None,
+        }
+    }
+
+    let m = monitor.borrow_mut().take();
+    m
 }
