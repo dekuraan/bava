@@ -127,11 +127,14 @@ impl Default for PhysicsSettings {
 }
 
 /// A spawned ball. `id` is a monotonic spawn counter used to evict the oldest;
-/// `radius` is cached for the surface-push proximity test.
+/// `radius` is cached for the surface-push proximity test; `tint` is the ball's
+/// fixed 0..1 position in the active palette, re-sampled by [`retint_balls`] when
+/// the dynamic album colors change so the ball follows the fade.
 #[derive(Component)]
 struct Ball {
     id: u64,
     radius: f32,
+    tint: f32,
 }
 
 /// Monotonic counter handing out [`Ball::id`]s.
@@ -256,6 +259,7 @@ impl Plugin for PhysicsPlugin {
                     (reconcile_columns, update_columns, push_columns).chain(),
                     (update_planet, planet_forces).chain(),
                     update_trails,
+                    retint_balls,
                     toggle_physics_debug,
                     sync_physics_debug,
                     update_debug_overlay,
@@ -564,7 +568,7 @@ fn spawn_one_ball(
             Mesh2d(meshes.add(Circle::new(radius))),
             MeshMaterial2d(materials.add(color)),
             Transform::from_translation(world.extend(1.0)),
-            Ball { id, radius },
+            Ball { id, radius, tint },
         ))
         .id();
 
@@ -1190,6 +1194,37 @@ fn update_trails(
     }
 }
 
+/// Re-sample each live ball's color from the active palette whenever
+/// [`VisSettings`] changes, so balls already on screen follow the dynamic
+/// album-color fade (and any live edit of the gradient in the editor) instead of
+/// staying frozen at their spawn-time color. Each ball keeps its fixed `tint`
+/// (its position in the palette), so the relative spread across colors is
+/// preserved. The shared trail material is per-vertex colored from
+/// [`Trail::color`], so updating that field is enough for [`update_trails`] to
+/// pick it up next frame.
+fn retint_balls(
+    vis: Res<VisSettings>,
+    balls: Query<(&Ball, &MeshMaterial2d<ColorMaterial>)>,
+    mut trails: Query<&mut Trail>,
+    ball_tints: Query<&Ball>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
+) {
+    if !vis.is_changed() {
+        return;
+    }
+    let stops = vis.fg_stops();
+    for (ball, mat) in &balls {
+        if let Some(material) = materials.get_mut(&mat.0) {
+            material.color = sample_gradient(&stops, ball.tint, vis.glow_gain);
+        }
+    }
+    for mut trail in &mut trails {
+        if let Ok(ball) = ball_tints.get(trail.ball) {
+            trail.color = sample_gradient(&stops, ball.tint, vis.glow_gain);
+        }
+    }
+}
+
 /// Toggle the collider debug draw with **F3** (suppressed while egui has the
 /// keyboard, so typing in the editor doesn't flip it).
 fn toggle_physics_debug(
@@ -1370,7 +1405,7 @@ mod tests {
                 Mass(1.0),
                 SweptCcd::default(),
                 Transform::from_translation(pos.extend(1.0)),
-                Ball { id: 0, radius },
+                Ball { id: 0, radius, tint: 0.5 },
             ))
             .id()
     }
@@ -1475,7 +1510,7 @@ mod tests {
         // First update establishes the baseline mode.
         app.update();
         for id in 0..3 {
-            app.world_mut().spawn(Ball { id, radius: 10.0 });
+            app.world_mut().spawn(Ball { id, radius: 10.0, tint: 0.5 });
         }
         // No mode change → balls survive.
         app.update();
@@ -1520,7 +1555,7 @@ mod tests {
         });
         app.add_systems(Update, enforce_ball_cap);
         for id in 0..6 {
-            app.world_mut().spawn(Ball { id, radius: 10.0 });
+            app.world_mut().spawn(Ball { id, radius: 10.0, tint: 0.5 });
         }
         app.update();
         let mut ids: Vec<u64> = {
