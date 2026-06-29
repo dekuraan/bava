@@ -34,6 +34,17 @@ use super::{AudioCapture, CaptureError, LinearResampler};
 /// versions winit/accesskit pull into the tree).
 const DEVICE_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
+/// How long [`WasapiCapture::read`] waits for real loopback data before giving up
+/// and zero-filling the rest of the chunk. Must comfortably exceed the shared-
+/// mode engine period (~10 ms) so that during active playback a read spanning a
+/// packet boundary blocks for the next packet instead of injecting silence —
+/// feeding cava silence-laced audio skews its autosens/gravity smoothing (this
+/// was the PipeWire backend's bug too). Only a genuinely idle render endpoint
+/// (loopback delivers no packets when nothing plays) hits this, then yields
+/// zeros at a steady cadence so the bars decay. Kept below `feed_cava`'s 200 ms
+/// stall window.
+const IDLE_TIMEOUT: Duration = Duration::from_millis(120);
+
 /// `wFormatTag` for raw IEEE float samples.
 const WAVE_FORMAT_IEEE_FLOAT: u16 = 0x0003;
 /// `wFormatTag` for integer PCM samples.
@@ -405,12 +416,13 @@ impl Drop for WasapiCapture {
 
 impl AudioCapture for WasapiCapture {
     fn read(&mut self, buf: &mut [f64]) -> Result<(), CaptureError> {
-        // Fill the whole buffer. Loop pumping packets, but cap the wait to the
-        // real-time span this chunk represents so an idle device (no loopback
-        // packets) yields silence at a steady cadence instead of spinning or
-        // blocking forever. On endpoint invalidation, rebind to the new default.
-        let frames = buf.len() / self.target_channels.max(1);
-        let budget = Duration::from_secs_f64(frames as f64 / self.target_rate as f64);
+        // Fill the whole buffer with real samples, blocking on the engine's
+        // buffer-ready event between packets so active playback never zero-fills
+        // mid-stream (which would feed cava silence-laced audio). Only after
+        // `IDLE_TIMEOUT` with no data — a genuinely idle render endpoint, which
+        // in loopback delivers no packets — do we fall through to a zero-filled
+        // chunk at a steady cadence. On endpoint invalidation, rebind to the new
+        // default.
         let start = Instant::now();
         while self.pending.len() < buf.len() {
             // Periodically check whether the default render endpoint changed; if
@@ -435,11 +447,11 @@ impl AudioCapture for WasapiCapture {
             match self.pump() {
                 PumpStatus::Data => {}
                 PumpStatus::Idle => {
-                    // Wait for the engine to signal more data, but only for the
-                    // real-time span left in this chunk's budget — a fully idle
-                    // render device produces no events, so we must still fall
-                    // through to a zero-filled frame at a steady cadence.
-                    let Some(remaining) = budget.checked_sub(start.elapsed()) else {
+                    // Wait for the engine to signal more data, up to the idle
+                    // timeout left in this read — a fully idle render device
+                    // produces no events, so we must still fall through to a
+                    // zero-filled frame at a steady cadence.
+                    let Some(remaining) = IDLE_TIMEOUT.checked_sub(start.elapsed()) else {
                         break;
                     };
                     let ms = remaining.as_millis().min(u32::MAX as u128) as u32;
