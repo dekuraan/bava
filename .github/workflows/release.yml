@@ -140,30 +140,51 @@ jobs:
           path: target/aarch64-apple-darwin/release/bava
 
   # ── macOS x86_64 (Intel) ──────────────────────────────────────────────────
+  # GitHub retired the free Intel `macos-13` runner (jobs sit queued until the
+  # 24h timeout), so build the x86_64 binary by *cross-compiling* on the arm64
+  # `macos-latest` runner. The only native dep is FFTW; we install an x86_64
+  # build of it via an x86_64 Homebrew running under Rosetta, and point
+  # pkg-config (used by cavacore-sys' build.rs) at it.
   build-macos-x86:
     name: Build (macOS x86_64)
-    runs-on: macos-13
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Install fftw3
-        run: brew install fftw
+      - name: Install Rosetta
+        run: softwareupdate --install-rosetta --agree-to-license
 
-      - name: Build release
-        run: cargo build --release -p bava
+      - name: Install x86_64 FFTW via Rosetta Homebrew
+        run: |
+          # macos-latest is arm64 and ships only the /opt/homebrew (arm64) brew.
+          # Install a separate x86_64 brew under /usr/local (run via Rosetta) so
+          # we get an x86_64 libfftw3 to link the cross-compiled binary against.
+          if [ ! -x /usr/local/bin/brew ]; then
+            arch -x86_64 /bin/bash -c \
+              "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" </dev/null
+          fi
+          arch -x86_64 /usr/local/bin/brew install fftw
+
+      - name: Build release (cross-compile to x86_64)
+        env:
+          PKG_CONFIG_ALLOW_CROSS: "1"
+          PKG_CONFIG_PATH: /usr/local/opt/fftw/lib/pkgconfig
+        run: cargo build --release -p bava --target x86_64-apple-darwin
 
       - name: Strip binary
-        run: strip target/release/bava
+        run: strip target/x86_64-apple-darwin/release/bava
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: bava-macos-x86_64
-          path: target/release/bava
+          path: target/x86_64-apple-darwin/release/bava
 
   # ── GitHub Release ────────────────────────────────────────────────────────
   release:
