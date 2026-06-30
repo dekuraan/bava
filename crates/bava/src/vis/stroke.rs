@@ -20,9 +20,29 @@ use bevy::sprite_render::AlphaMode2d;
 /// Default antialiasing feather half-width, in pixels, for stroke edges.
 pub(crate) const STROKE_FEATHER: f32 = 1.5;
 
-/// A new, empty stroke mesh (filled per frame by [`apply_stroke`]).
+/// A new stroke mesh holding a single degenerate, fully-transparent triangle
+/// (filled with real geometry per frame by [`apply_stroke`]).
+///
+/// It is *not* truly empty on purpose: Bevy's mesh slab allocator logs a
+/// "use-after-free: attempted to copy element data for an unallocated key" every
+/// frame a `Mesh` asset is extracted with **zero** vertices — `allocate_meshes`
+/// skips allocation for an empty vertex buffer but still attempts the data copy
+/// (`bevy_render::mesh::allocator`). Stroke meshes are extracted before their
+/// first `apply_stroke` and whenever they have <2 points, so we keep a zero-area,
+/// zero-alpha triangle (which rasterizes nothing) instead of an empty buffer.
 pub(crate) fn empty_stroke_mesh() -> Mesh {
-    Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
+    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+    write_degenerate_tri(&mut mesh);
+    mesh
+}
+
+/// Overwrite `mesh` with a single zero-area, zero-alpha triangle — an invisible
+/// stand-in for an empty mesh that keeps the vertex buffer non-empty so the mesh
+/// slab allocator never sees a zero-vertex extract (see [`empty_stroke_mesh`]).
+fn write_degenerate_tri(mesh: &mut Mesh) {
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, vec![[0.0f32, 0.0, 0.0]; 3]);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, vec![[0.0f32, 0.0, 0.0, 0.0]; 3]);
+    mesh.insert_indices(Indices::U32(vec![0, 1, 2]));
 }
 
 /// A white, alpha-blended material; the per-vertex colors supply the actual hue
@@ -136,9 +156,9 @@ pub(crate) fn apply_stroke_tapered(
 ) {
     let n = pts.len();
     if n < 2 {
-        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, Vec::<[f32; 3]>::new());
-        mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, Vec::<[f32; 4]>::new());
-        mesh.insert_indices(Indices::U32(Vec::new()));
+        // <2 points can't form a stroke; emit an invisible degenerate triangle
+        // rather than a zero-vertex mesh (which the slab allocator rejects).
+        write_degenerate_tri(mesh);
         return;
     }
 
@@ -206,12 +226,15 @@ mod tests {
     }
 
     #[test]
-    fn stroke_too_short_yields_empty_mesh() {
+    fn stroke_too_short_yields_degenerate_tri() {
+        // <2 points yields an invisible degenerate triangle, NOT a zero-vertex
+        // mesh: Bevy's slab allocator errors every frame on a 0-vertex extract.
         let mut mesh = empty_stroke_mesh();
+        assert_eq!(counts(&mesh), (3, 3), "empty stroke mesh is a degenerate tri");
         apply_stroke(&mut mesh, &[], 2.0, STROKE_FEATHER, false);
-        assert_eq!(counts(&mesh), (0, 0));
+        assert_eq!(counts(&mesh), (3, 3));
         apply_stroke(&mut mesh, &[(Vec2::ZERO, Color::WHITE)], 2.0, STROKE_FEATHER, false);
-        assert_eq!(counts(&mesh), (0, 0), "a single point can't form a stroke");
+        assert_eq!(counts(&mesh), (3, 3), "a single point can't form a stroke");
     }
 
     #[test]
