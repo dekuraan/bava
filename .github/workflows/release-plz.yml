@@ -1,0 +1,33 @@
+name: release-plz
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+# Serialize runs so two pushes can't race on the release PR / tag.
+concurrency:
+  group: release-plz-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-plz:
+    runs-on: ubuntu-latest
+    steps:
+      # A PAT (not the default GITHUB_TOKEN) is required: a tag pushed with
+      # GITHUB_TOKEN does NOT trigger release.yml (GitHub blocks token-triggered
+      # workflow recursion), and the release PR's CI wouldn't run either. The PAT
+      # also lets the bot push to main and open PRs. See report for how to mint it.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_PLZ_TOKEN }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: release-plz/action@v0.5
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}

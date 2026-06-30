@@ -1,0 +1,30 @@
+name: Security audit
+
+# cargo-audit only reads Cargo.lock against the RustSec advisory DB, so it needs
+# no system deps and no build. Run it when the dependency set changes *and* on a
+# weekly schedule, so an advisory disclosed after a dep was pinned still surfaces.
+on:
+  push:
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+  pull_request:
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+  schedule:
+    - cron: "0 6 * * 1" # Mondays 06:00 UTC
+
+permissions:
+  contents: read
+  issues: write # audit-check opens an issue per advisory on push/schedule
+
+jobs:
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}

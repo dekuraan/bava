@@ -1,0 +1,21 @@
+# release-plz manages versions + changelog and cuts the release tag. This repo
+# ships an application, not crates.io libraries, so nothing is published to a
+# registry; release-plz only opens the "release" PR and, on merge, pushes the
+# `v<version>` tag that the existing release.yml builds binaries from.
+[workspace]
+publish = false           # app repo — never `cargo publish`
+git_release_enable = false # release.yml creates the GitHub Release (with binaries)
+
+# The app crate drives the release. Its tag must match release.yml's `v*` trigger.
+[[package]]
+name = "bava"
+git_tag_name = "v{{ version }}"
+
+# Internal libs: versioned in-tree but not released on their own tags.
+[[package]]
+name = "cavacore-rs"
+release = false
+
+[[package]]
+name = "cavacore-sys"
+release = false

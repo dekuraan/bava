@@ -1,0 +1,29 @@
+name: Dependabot auto-merge
+
+# Auto-enable merge for Dependabot's patch/minor bumps once CI passes; major
+# bumps are left for manual review. Uses the plain `pull_request` event (not
+# pull_request_target) with fetch-metadata — the secure, GitHub-recommended
+# pattern that never checks out untrusted code with write access.
+on: pull_request
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  auto-merge:
+    runs-on: ubuntu-latest
+    if: github.actor == 'dependabot[bot]'
+    steps:
+      - name: Fetch Dependabot metadata
+        id: meta
+        uses: dependabot/fetch-metadata@v2
+
+      - name: Enable auto-merge for patch & minor updates
+        if: >
+          steps.meta.outputs.update-type == 'version-update:semver-patch' ||
+          steps.meta.outputs.update-type == 'version-update:semver-minor'
+        run: gh pr merge --auto --squash "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
