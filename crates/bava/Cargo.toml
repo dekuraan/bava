@@ -22,7 +22,7 @@ cavacore-rs.workspace = true
 # into just the 2D + UI render pipelines (which transitively give the app/asset/
 # window/text layers and HDR+bloom), windowing on Wayland/X11, and keyboard/mouse
 # input. Adds back: 3D, `audio`, `scene`, `picking`, gamepad, sysinfo — if needed.
-bevy = { version = "0.18", default-features = false, features = [
+bevy = { version = "0.19", default-features = false, features = [
     "2d_bevy_render",  # sprite + core pipeline + post-process (bloom) + gizmos (avian F3 debug)
     "ui_bevy_render",  # bevy_ui for the HUD; transitively pulls default_app (asset/window/state/input_focus)
     "tonemapping_luts", # LUTs for the AgX / TonyMcMapface / BlenderFilmic tone mappers (see [vis] tonemapping)
