@@ -156,9 +156,10 @@ fn fetch_and_decode_art(url: &str) -> Option<DecodedArt> {
         let path = std::path::Path::new(std::ffi::OsStr::from_bytes(&decoded));
         std::fs::read(path).ok()?
     } else if url.starts_with("http://") || url.starts_with("https://") {
-        let resp = ureq::get(url).call().ok()?;
+        let mut resp = ureq::get(url).call().ok()?;
         let mut buf = Vec::new();
-        resp.into_reader()
+        resp.body_mut()
+            .as_reader()
             .take(16 * 1024 * 1024)
             .read_to_end(&mut buf)
             .ok()?;
