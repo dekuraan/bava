@@ -94,6 +94,8 @@ pipewire = { version = "0.10", optional = true, features = ["v0_3_44"] }
 mpris = "2"
 # HTTP fetch for remote album art (e.g. spotifyd's http artUrl).
 ureq = "2"
+# Decode `data:…;base64,…` artUrls (jellyfin-desktop embeds the cover inline).
+base64 = "0.22"
 
 # --- Windows backends: WASAPI loopback capture + GSMTC now-playing. ---
 [target.'cfg(target_os = "windows")'.dependencies]
