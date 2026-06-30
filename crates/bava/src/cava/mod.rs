@@ -210,7 +210,7 @@ impl Plugin for CavaPlugin {
                     plan.bars(),
                     settings.rate
                 );
-                app.insert_non_send_resource(CavaState {
+                app.insert_non_send(CavaState {
                     plan,
                     accum: VecDeque::new(),
                     scratch: Vec::new(),

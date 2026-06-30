@@ -103,8 +103,8 @@ fn editor_ui(
 
     // Toggle with the configured key (ignored while a text field has focus);
     // Escape closes.
-    editor.capture_keyboard = ctx.wants_keyboard_input();
-    editor.capture_pointer = ctx.wants_pointer_input();
+    editor.capture_keyboard = ctx.egui_wants_keyboard_input();
+    editor.capture_pointer = ctx.egui_wants_pointer_input();
     if keys.just_pressed(editor.toggle_key) && !editor.capture_keyboard {
         editor.open = !editor.open;
     }

@@ -257,10 +257,10 @@ fn update_circle_bars(
         transform.translation = Vec3::new(cos * radius, sin * radius, 0.5);
         transform.rotation = Quat::from_rotation_z(rot);
 
-        if let Some(mesh) = meshes.get_mut(&mesh2d.0) {
+        if let Some(mut mesh) = meshes.get_mut(&mesh2d.0) {
             let round = vis.items_roundness.clamp(0.0, 1.0) * half.x.min(half.y);
             let color = gradient_color(lo, hi, v.min(1.0), glow);
-            apply_rounded_rect(mesh, half, round, STROKE_FEATHER, color);
+            apply_rounded_rect(&mut mesh, half, round, STROKE_FEATHER, color);
         }
     }
 }
@@ -369,8 +369,8 @@ fn update_ring(
         })
         .collect();
 
-    if let Some(mesh) = meshes.get_mut(&ring.mesh) {
-        apply_stroke(mesh, &pts, vis.line_thickness * 0.5, STROKE_FEATHER, true);
+    if let Some(mut mesh) = meshes.get_mut(&ring.mesh) {
+        apply_stroke(&mut mesh, &pts, vis.line_thickness * 0.5, STROKE_FEATHER, true);
     }
 }
 
@@ -409,7 +409,7 @@ fn update_fill(
     let (base, amp) = circle_radii(extent, vis.inner_radius);
     let rot = vis.rotation;
 
-    if let Some(mesh) = meshes.get_mut(&fill.mesh) {
+    if let Some(mut mesh) = meshes.get_mut(&fill.mesh) {
         let mut positions = Vec::with_capacity(SEGMENTS + 1);
         positions.push([0.0, 0.0, 0.0]); // center
         let mut peak = 0.0f32;
@@ -421,7 +421,7 @@ fn update_fill(
         mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
 
         // Tint the fill by loudness; keep it translucent so art shows through.
-        if let Some(mat) = materials.get_mut(&fill.material) {
+        if let Some(mut mat) = materials.get_mut(&fill.material) {
             mat.color = gradient_color(vis.fg_lo(), vis.fg_hi(), peak, vis.glow_gain).with_alpha(0.28);
         }
     }

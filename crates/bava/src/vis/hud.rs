@@ -49,26 +49,20 @@ impl Plugin for HudPlugin {
 }
 
 fn setup_hud(mut commands: Commands, mut fonts: ResMut<Assets<Font>>) {
-    let font_regular = fonts.add(
-        Font::try_from_bytes(
-            include_bytes!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../assets/fonts/FiraSans-Regular.ttf"
-            ))
-            .to_vec(),
-        )
-        .expect("FiraSans-Regular is valid"),
-    );
-    let font_medium = fonts.add(
-        Font::try_from_bytes(
-            include_bytes!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../assets/fonts/FiraSans-Medium.ttf"
-            ))
-            .to_vec(),
-        )
-        .expect("FiraSans-Medium is valid"),
-    );
+    let font_regular = fonts.add(Font::from_bytes(
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/fonts/FiraSans-Regular.ttf"
+        ))
+        .to_vec(),
+    ));
+    let font_medium = fonts.add(Font::from_bytes(
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/fonts/FiraSans-Medium.ttf"
+        ))
+        .to_vec(),
+    ));
     // User background image — behind album art and bars.
     commands.spawn((
         Sprite { color: Color::NONE, ..default() },
@@ -110,12 +104,12 @@ fn setup_hud(mut commands: Commands, mut fonts: ResMut<Assets<Font>>) {
             parent.spawn((
                 Text::new(""),
                 TextFont {
-                    font: font_medium,
-                    font_size: 30.0,
+                    font: font_medium.into(),
+                    font_size: 30.0.into(),
                     ..default()
                 },
                 TextColor(Color::WHITE),
-                TextLayout::new_with_justify(Justify::Center),
+                TextLayout::justify(Justify::Center),
                 TextShadow {
                     offset: Vec2::splat(2.0),
                     color: Color::srgba(0.0, 0.0, 0.0, 0.85),
@@ -125,12 +119,12 @@ fn setup_hud(mut commands: Commands, mut fonts: ResMut<Assets<Font>>) {
             parent.spawn((
                 Text::new(""),
                 TextFont {
-                    font: font_regular,
-                    font_size: 18.0,
+                    font: font_regular.into(),
+                    font_size: 18.0.into(),
                     ..default()
                 },
                 TextColor(Color::srgba(0.85, 0.85, 0.9, 1.0)),
-                TextLayout::new_with_justify(Justify::Center),
+                TextLayout::justify(Justify::Center),
                 TextShadow {
                     offset: Vec2::splat(1.5),
                     color: Color::srgba(0.0, 0.0, 0.0, 0.8),

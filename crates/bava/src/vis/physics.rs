@@ -237,9 +237,12 @@ impl Plugin for PhysicsPlugin {
             // Run the simulation in PostUpdate (variable timestep) so it steps
             // once per render frame, matching the per-frame cava analysis.
             .add_plugins((
-                PhysicsPlugins::default()
-                    .with_length_unit(LENGTH_UNIT)
-                    .set(PhysicsSchedulePlugin::new(PostUpdate)),
+                // `PhysicsPlugins::new(schedule)` routes *every* sub-plugin —
+                // including the Position→Transform writeback (avian 0.7 split it
+                // into its own plugin) — through that schedule. The old
+                // `.set(PhysicsSchedulePlugin::new(..))` only moved the sim step
+                // and left the writeback in `FixedPostUpdate`, freezing transforms.
+                PhysicsPlugins::new(PostUpdate).with_length_unit(LENGTH_UNIT),
                 PhysicsDebugPlugin::default(),
                 FrameTimeDiagnosticsPlugin::default(),
             ))
@@ -314,7 +317,7 @@ fn setup_physics(
     commands.spawn((
         DebugOverlay,
         Text::new(""),
-        TextFont { font_size: 16.0, ..default() },
+        TextFont { font_size: 16.0.into(), ..default() },
         TextColor(Color::srgb(0.2, 1.0, 0.4)),
         Node {
             position_type: PositionType::Absolute,
@@ -1219,10 +1222,10 @@ fn update_trails(
             .enumerate()
             .map(|(i, &p)| (p, trail.color.with_alpha((i + 1) as f32 / m as f32)))
             .collect();
-        if let Some(mesh) = meshes.get_mut(&mesh2d.0) {
+        if let Some(mut mesh) = meshes.get_mut(&mesh2d.0) {
             // Taper the stroke to a point at the tail and full width at the head
             // (the ball end), so the trail reads as a triangle / comet tail.
-            apply_stroke_tapered(mesh, &pts, 0.0, trail.half_width, STROKE_FEATHER, false);
+            apply_stroke_tapered(&mut mesh, &pts, 0.0, trail.half_width, STROKE_FEATHER, false);
         }
     }
 }
@@ -1247,7 +1250,7 @@ fn retint_balls(
     }
     let stops = vis.fg_stops();
     for (ball, mat) in &balls {
-        if let Some(material) = materials.get_mut(&mat.0) {
+        if let Some(mut material) = materials.get_mut(&mat.0) {
             material.color = sample_gradient(&stops, ball.tint, vis.glow_gain);
         }
     }
@@ -1379,9 +1382,7 @@ mod tests {
             bevy::MinimalPlugins,
             bevy::transform::TransformPlugin,
             bevy::asset::AssetPlugin::default(),
-            PhysicsPlugins::default()
-                .with_length_unit(LENGTH_UNIT)
-                .set(PhysicsSchedulePlugin::new(PostUpdate)),
+            PhysicsPlugins::new(PostUpdate).with_length_unit(LENGTH_UNIT),
         ));
         app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
             Duration::from_secs_f32(DT),

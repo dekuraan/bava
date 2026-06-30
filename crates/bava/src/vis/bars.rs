@@ -20,7 +20,7 @@
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
-use bevy::render::view::Hdr;
+use bevy::camera::Hdr;
 
 use crate::cava::{Cava, CavaSettings};
 use crate::vis::stroke::{
@@ -437,9 +437,9 @@ fn update_bars(
         transform.translation.x = center.x;
         transform.translation.y = center.y;
 
-        if let Some(mesh) = meshes.get_mut(&mesh2d.0) {
+        if let Some(mut mesh) = meshes.get_mut(&mesh2d.0) {
             let radius = vis.items_roundness.clamp(0.0, 1.0) * half.x.min(half.y);
-            apply_rounded_rect(mesh, half, radius, STROKE_FEATHER, color);
+            apply_rounded_rect(&mut mesh, half, radius, STROKE_FEATHER, color);
         }
     }
 }
@@ -564,8 +564,8 @@ fn update_box_lines(
         _ => Vec::new(),
     };
 
-    if let Some(mesh) = meshes.get_mut(&line.mesh) {
-        apply_stroke(mesh, &pts, vis.line_thickness * 0.5, STROKE_FEATHER, false);
+    if let Some(mut mesh) = meshes.get_mut(&line.mesh) {
+        apply_stroke(&mut mesh, &pts, vis.line_thickness * 0.5, STROKE_FEATHER, false);
     }
 }
 

@@ -8,7 +8,7 @@ real-time. Now-playing metadata and album art are pulled from the OS media sessi
 
 | Platform | Audio capture | Now-playing |
 |---|---|---|
-| Linux | PulseAudio monitor (works via pipewire-pulse) | MPRIS over D-Bus |
+| Linux | Native PipeWire monitor (default; PulseAudio fallback) | MPRIS over D-Bus |
 | Windows | WASAPI shared-mode loopback | GlobalSystemMediaTransportControls (GSMTC) |
 | macOS 14.2+ | Core Audio process tap (no extra install) | MediaRemote adapter |
 
@@ -30,16 +30,18 @@ real-time. Now-playing metadata and album art are pulled from the OS media sessi
 
 ## Build & run
 
-Requires [Rust stable](https://rustup.rs/) and fftw3 on all platforms.
+Requires [Rust stable](https://rustup.rs/) **1.95 or newer** (Bevy 0.19) and
+fftw3 on all platforms.
 
 ### Linux
 
 ```sh
 # Arch/CachyOS
-sudo pacman -S fftw libpulse dbus libxkbcommon wayland libx11 vulkan-icd-loader
+sudo pacman -S fftw pipewire libpulse dbus libxkbcommon wayland libx11 vulkan-icd-loader
 
 cargo run -p bava
 # If the shell lacks a Wayland socket: WAYLAND_DISPLAY=wayland-1 cargo run -p bava
+# Pure-PulseAudio host (no libpipewire link): cargo run -p bava --no-default-features
 ```
 
 ### Windows
@@ -69,7 +71,8 @@ Core Audio process tap). Without it the app runs without audio capture.
 ### Tests
 
 ```sh
-cargo test -p cavacore-rs   # ~20 DSP safety and correctness tests
+cargo test -p cavacore-rs        # DSP safety and correctness suite
+cargo test -p bava --bin bava    # app unit/system/physics tests (headless)
 ```
 
 ## Workspace layout
@@ -80,8 +83,8 @@ crates/
   cavacore-rs/         # safe CavaConfig → CavaPlan wrapper; rigorous test suite
   bava/
     src/cava/          # CavaPlugin, Cava resource, capture thread, feed_cava system
-    src/cava/capture/  # AudioCapture trait; backends: pulse.rs / wasapi.rs / coreaudio.rs
-    src/mpris/         # NowPlaying + AlbumArt resources; backends: linux / windows / macos
+    src/cava/capture/  # AudioCapture trait; backends: pipewire.rs / pulse.rs / wasapi.rs / coreaudio.rs
+    src/now_playing/   # NowPlaying + AlbumArt resources; backends: linux / windows / macos
     src/vis/           # VisPlugin: all visualizer modes, HUD, physics, stroke mesh helpers
     src/gui/           # in-app settings editor (bevy_egui)
     src/config.rs      # config.toml ↔ runtime *Settings resources; CLI via clap
