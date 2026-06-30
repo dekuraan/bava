@@ -1101,11 +1101,39 @@ fn planet_forces(
         // it here samples the wrong segment whenever `rotation != 0` and the force
         // field stops matching the surface the ball actually rests on (balls then
         // pin to the rim with no matching fling — the "stuck to the blob" bug).
+        //
+        // The blob is a 256-segment *spiky* polyline, and a ball doesn't rest on
+        // one segment — its body spans an arc and physically contacts the
+        // *tallest* feature within it. Sampling only the segment under the ball's
+        // center reads the valley floor *behind* a spike the ball is wedged
+        // against: the unstick band below then never fires (`r` looks safely
+        // outside the valley) or, worse, teleports the ball back *down* into the
+        // crevice between the spikes that hold it — central gravity pins it there
+        // jittering (the recurring "trapped between spikes" bug). So take the
+        // farthest-reaching segment over the arc the ball covers as the surface it
+        // contacts; a wedged ball is then lifted onto the local spike envelope,
+        // never the crevice floor.
         let (surf_r, expand) = if has_blob {
             let ang = outward.y.atan2(outward.x);
             let t = ((ang + FRAC_PI_2 - vis.rotation) / TAU).rem_euclid(1.0);
-            let k = ((t * n as f32).round() as usize) % n;
-            (planet.radii[k], (planet.radii[k] - planet.prev[k]) / dt)
+            let k0 = ((t * n as f32).round() as usize) % n;
+            // Half-arc the ball's body subtends at this radius, in segments. Far
+            // outside the blob this collapses to the single center segment (`span
+            // == 0`), so distant balls behave exactly as before.
+            let half = (ball.radius / r.max(ball.radius)).asin();
+            let span = (half / (TAU / n as f32)).ceil() as usize;
+            let mut best = k0;
+            for d in 1..=span {
+                let lo = (k0 + n - d % n) % n;
+                let hi = (k0 + d) % n;
+                if planet.radii[lo] > planet.radii[best] {
+                    best = lo;
+                }
+                if planet.radii[hi] > planet.radii[best] {
+                    best = hi;
+                }
+            }
+            (planet.radii[best], (planet.radii[best] - planet.prev[best]) / dt)
         } else {
             (0.0, 0.0)
         };
@@ -1863,8 +1891,13 @@ mod tests {
         app.update();
 
         let landed = pos_of(&app, ball).length();
+        // The envelope sample (tallest segment over the ball's arc) lifts the
+        // landing a few px above the exact-angle radius on the rising flank, so
+        // allow a small margin — still nowhere near the antipode it would hit if
+        // rotation were dropped from the lookup (~90px away), which is what this
+        // regression guards.
         assert!(
-            (landed - (correct + radius)).abs() < 2.0,
+            (landed - (correct + radius)).abs() < 8.0,
             "ejected onto the wrong rim: landed={landed}, want≈{}, antipode≈{}",
             correct + radius,
             buggy + radius,
@@ -1918,6 +1951,70 @@ mod tests {
         assert!(
             r >= rim + radius - 0.5,
             "rim-pinned ball was not lifted clear of the surface: r={r}, rim={rim}"
+        );
+    }
+
+    /// Crevice regression: a ball resting in a valley with a taller spike within
+    /// its body's arc must be lifted onto that spike's envelope, not left sitting
+    /// on (or teleported back down to) the valley floor where the flanking spikes
+    /// pin it. Injects a flat blob with one tall segment a few steps off the
+    /// ball's center angle and reads the eject directly (solver-free). Under the
+    /// old single-segment sample `surf_r` is the valley (the ball looks safely
+    /// outside it), so the unstick never fires and central gravity drags the ball
+    /// *inward* — the "trapped between spikes" report.
+    #[test]
+    fn l4_ball_in_a_crevice_is_lifted_onto_the_spike_envelope() {
+        use std::f32::consts::TAU;
+
+        let mut app = bare_app();
+        app.insert_resource(PhysicsSettings::default());
+        app.insert_resource(VisSettings::default()); // rotation 0
+        app.insert_resource(DrawingMode::WaveCircle);
+        app.insert_resource(Cava { bars: vec![0.3; 24], bars_per_channel: 24, channels: 1 });
+        app.init_resource::<BallCounter>();
+
+        // A flat rim at 100px with a single 200px spike. The ball sits on the +X
+        // axis → center segment k0 = n/4; place the spike a few segments off it,
+        // inside the arc a 12px ball spans at r≈112 (≈5 segments each side).
+        let n = 256usize;
+        let mut radii = vec![100.0_f32; n];
+        let valley = 100.0_f32;
+        let spike = 200.0_f32;
+        let k0 = n / 4; // +X axis under the (rotation-0) inverse mapping
+        radii[k0 + 3] = spike;
+        app.insert_resource(Planet {
+            radii: radii.clone(),
+            prev: radii, // steady → no expansion fling; escape must come from unstick
+            indices: (0..n as u32).map(|k| [k, (k as u32 + 1) % n as u32]).collect(),
+        });
+
+        // Clear Bevy's zero-dt first frame (planet_forces no-ops on dt==0) before
+        // spawning, so the single step we assert on sees a real dt.
+        app.add_systems(Update, planet_forces);
+        app.update();
+
+        let radius = 12.0;
+        // Resting on the valley floor: center at valley + radius. The old sample
+        // reads `surf_r == valley`, so `r == surf_r + radius` is *not* `<` it and
+        // the unstick is skipped — central gravity then pulls the ball inward.
+        let ball = spawn_ball(&mut app, Vec2::new(valley + radius, 0.0), radius, 0.9, Vec2::ZERO);
+
+        // Sanity: the spike really is within the ball's angular span at this r.
+        let span = (radius / (valley + radius)).asin() / (TAU / n as f32);
+        assert!(span >= 3.0, "test mis-tuned: spike outside the ball's arc (span={span})");
+
+        app.update();
+
+        let r = pos_of(&app, ball).length();
+        let vel = app.world().get::<LinearVelocity>(ball).unwrap().0;
+        assert!(
+            vel.dot(Vec2::X) > 0.0,
+            "crevice ball got no outward kick (pulled into the valley): vel={vel:?}"
+        );
+        assert!(
+            r >= spike + radius - 0.5,
+            "crevice ball was not lifted onto the spike envelope: r={r}, want≈{}",
+            spike + radius
         );
     }
 }
