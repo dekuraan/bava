@@ -265,10 +265,15 @@ impl Plugin for PhysicsPlugin {
                     despawn_escaped_balls,
                     resize_walls,
                     update_gravity_mode,
-                    // Update each surface before reading it to move balls.
-                    (update_surface, push_balls).chain(),
-                    (reconcile_columns, update_columns, push_columns).chain(),
-                    (update_planet, planet_forces).chain(),
+                    // Update each surface before reading it to move balls, and
+                    // only after `on_mode_change` has zeroed the caches on a
+                    // switch frame — otherwise a reader could see a stale rate
+                    // delta and fling balls (the documented invariant above).
+                    (update_surface, push_balls).chain().after(on_mode_change),
+                    (reconcile_columns, update_columns, push_columns)
+                        .chain()
+                        .after(on_mode_change),
+                    (update_planet, planet_forces).chain().after(on_mode_change),
                     update_trails,
                     retint_balls,
                     toggle_physics_debug,

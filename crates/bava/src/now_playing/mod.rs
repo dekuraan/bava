@@ -102,11 +102,25 @@ impl Plugin for NowPlayingPlugin {
 /// Drain now-playing messages and update resources / create art textures.
 fn apply_now_playing_updates(
     rx: Res<NowPlayingRx>,
+    mut warned: Local<bool>,
     mut now_playing: ResMut<NowPlaying>,
     mut album_art: ResMut<AlbumArt>,
     mut images: ResMut<Assets<Image>>,
 ) {
-    while let Ok(msg) = rx.0.try_recv() {
+    loop {
+        let msg = match rx.0.try_recv() {
+            Ok(msg) => msg,
+            Err(crossbeam_channel::TryRecvError::Empty) => break,
+            // The backend thread ended (panic or a clean stop). Warn once so the
+            // freeze isn't silent, then stop polling a dead channel.
+            Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                if !*warned {
+                    warn!("bava: now-playing backend stopped; metadata and album art will no longer update");
+                    *warned = true;
+                }
+                break;
+            }
+        };
         match msg {
             NowPlayingMsg::Track(track) => {
                 if track.title != now_playing.title || track.artist != now_playing.artist {
@@ -154,6 +168,11 @@ fn decode_art_bytes(bytes: &[u8]) -> Option<DecodedArt> {
     let rgba = img.to_rgba8();
     let (width, height) = rgba.dimensions();
     let pixels = rgba.into_raw();
+    // A zero-area / empty decode would build a degenerate texture and can panic
+    // color_thief's quantizer — treat it as "no art".
+    if width == 0 || height == 0 || pixels.is_empty() {
+        return None;
+    }
     let colors = extract_palette(&pixels);
     Some(DecodedArt {
         rgba: pixels,

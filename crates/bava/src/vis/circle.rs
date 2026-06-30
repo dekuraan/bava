@@ -292,6 +292,9 @@ fn fan_mesh() -> Mesh {
 /// symmetric, with low frequencies at the top and highs at the bottom.
 fn sample(values: &[f32], t: f32) -> f32 {
     let n = values.len();
+    if n == 0 {
+        return 0.0;
+    }
     if n == 1 {
         return values[0];
     }

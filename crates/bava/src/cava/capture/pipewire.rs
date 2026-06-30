@@ -340,7 +340,14 @@ fn run_loop(
                 let end = (offset + size).min(bytes.len());
                 let region = &bytes[start..end];
 
-                let mut q = ud.shared.queue.lock().unwrap();
+                // try_lock so this realtime data thread never blocks on the
+                // consumer mid-drain (and a poisoned mutex can't panic-unwind
+                // through PipeWire's C trampoline). On contention, drop the
+                // quantum: the only contended window is `read`'s brief drain,
+                // after which it re-checks the queue, so no wakeup is lost.
+                let Ok(mut q) = ud.shared.queue.try_lock() else {
+                    continue;
+                };
                 for c in region.chunks_exact(4) {
                     q.push_back(f32::from_le_bytes([c[0], c[1], c[2], c[3]]));
                 }
