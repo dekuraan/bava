@@ -39,7 +39,7 @@ bevy = { version = "0.18", default-features = false, features = [
 # 2D physics: ECS-native rigid bodies/colliders for the ball + bar simulation.
 # Drop avian's default `bevy_scene` + `bevy_picking` (unused) and `xpbd_joints`
 # (no joints); keep `debug-plugin` for the F3 collider gizmos.
-avian2d = { version = "0.6", default-features = false, features = [
+avian2d = { version = "0.7", default-features = false, features = [
     "2d",
     "f32",
     "parry-f32",
