@@ -1110,14 +1110,19 @@ fn planet_forces(
             (0.0, 0.0)
         };
 
-        // Unstick: the blob is solid, so a ball whose center has crossed *inside*
-        // the rim should never be there. Lift it back onto the rim and give it
+        // Unstick: the blob is solid, so a ball touching the rim from inside *or*
+        // resting against it from outside should be flung clear, not pinned. The
+        // band extends a full `ball.radius` beyond the surface so a ball that
+        // central gravity has pressed onto the rim (center at ~`surf_r +
+        // ball.radius`, surface in contact) qualifies too — that's the "trapped at
+        // the edge" case, where the self-cancelling expansion fling below never
+        // nets enough outward push to escape. Lift it back onto the rim and give it
         // enough outward speed to actually clear the surface against central
         // gravity — and crucially do *not* apply the inward pull this frame, which
         // would otherwise drag it straight back in and pin it jittering to the rim
         // (the "stuck in the orb" failure). A dead-center ball lands here too via
         // the `outward` fallback above and is flung clear.
-        if has_blob && r < surf_r {
+        if has_blob && r < surf_r + ball.radius {
             transform.translation =
                 (outward * (surf_r + ball.radius)).extend(transform.translation.z);
             let clearance = ball.radius * EJECT_CLEARANCE_RADII;
@@ -1863,6 +1868,56 @@ mod tests {
             "ejected onto the wrong rim: landed={landed}, want≈{}, antipode≈{}",
             correct + radius,
             buggy + radius,
+        );
+    }
+
+    /// Rim-pinned regression: a ball pressed onto the rim from *outside* —
+    /// surface in contact, center still beyond the surface (`surf_r < r <
+    /// surf_r + radius`) — must be flung clear, not welded to the rim by central
+    /// gravity. The spectrum is steady, so the rim is *not* expanding and the
+    /// contact-band fling never fires; escape must come from the unstick band
+    /// alone. Under the old band (`r < surf_r`, center fully inside) such a ball
+    /// never qualified, so central gravity pinned it to the surface forever (the
+    /// "trapped at the edge" report). Solver-free so the eject is read exactly.
+    #[test]
+    fn l4_ball_pinned_on_the_rim_is_ejected() {
+        let mut app = bare_app();
+        app.insert_resource(PhysicsSettings::default());
+        app.insert_resource(VisSettings::default());
+        app.insert_resource(DrawingMode::WaveCircle);
+        // Steady, uniform spectrum → a smooth, non-pulsing rim.
+        app.insert_resource(Cava { bars: vec![0.3; 24], bars_per_channel: 24, channels: 1 });
+        app.init_resource::<Planet>();
+        app.init_resource::<BallCounter>();
+        spawn_planet_body(&mut app);
+
+        // Build the blob and clear Bevy's zero-dt first frame before spawning.
+        app.add_systems(Update, (update_planet, planet_forces.after(update_planet)));
+        app.update();
+
+        let rim = orb_rim(&app);
+        assert!(rim > 0.0, "orb should have a real rim");
+
+        // Center half a radius past the surface: body overlaps the rim, center
+        // still outside it. This is the gap the old `r < surf_r` band missed.
+        let radius = 12.0;
+        let start = Vec2::new(rim + 0.5 * radius, 0.0);
+        let ball = spawn_ball(&mut app, start, radius, 0.9, Vec2::ZERO);
+
+        app.update();
+
+        let r = pos_of(&app, ball).length();
+        let vel = app.world().get::<LinearVelocity>(ball).unwrap().0;
+        let outward = Vec2::X;
+        // The fix kicks it outward and lifts it onto the rim; the bug left it
+        // pulled inward (negative radial velocity), still buried in the old band.
+        assert!(
+            vel.dot(outward) > 0.0,
+            "rim-pinned ball got no outward kick (welded to the rim): vel={vel:?}"
+        );
+        assert!(
+            r >= rim + radius - 0.5,
+            "rim-pinned ball was not lifted clear of the surface: r={r}, rim={rim}"
         );
     }
 }
