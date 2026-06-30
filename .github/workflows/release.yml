@@ -203,23 +203,27 @@ jobs:
         with:
           path: dist
 
-      - name: Rename artifacts for release
+      # download-artifact@v4 expands each artifact into its own directory
+      # (dist/<name>/<file>), so flatten into a separate out/ dir with the
+      # release asset names — moving onto the existing dirs in place fails.
+      - name: Stage release artifacts
         run: |
-          mv dist/bava-linux-x86_64/bava             dist/bava-linux-x86_64
-          mv dist/bava-linux-x86_64-pulseaudio/bava  dist/bava-linux-x86_64-pulseaudio
-          mv dist/bava-windows-x86_64/bava.exe       dist/bava-windows-x86_64.exe
-          mv dist/bava-macos-aarch64/bava            dist/bava-macos-aarch64
-          mv dist/bava-macos-x86_64/bava             dist/bava-macos-x86_64
-          chmod +x dist/bava-linux-x86_64 dist/bava-linux-x86_64-pulseaudio \
-                   dist/bava-macos-aarch64 dist/bava-macos-x86_64
+          mkdir -p out
+          mv dist/bava-linux-x86_64/bava             out/bava-linux-x86_64
+          mv dist/bava-linux-x86_64-pulseaudio/bava  out/bava-linux-x86_64-pulseaudio
+          mv dist/bava-windows-x86_64/bava.exe       out/bava-windows-x86_64.exe
+          mv dist/bava-macos-aarch64/bava            out/bava-macos-aarch64
+          mv dist/bava-macos-x86_64/bava             out/bava-macos-x86_64
+          chmod +x out/bava-linux-x86_64 out/bava-linux-x86_64-pulseaudio \
+                   out/bava-macos-aarch64 out/bava-macos-x86_64
 
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
           files: |
-            dist/bava-linux-x86_64
-            dist/bava-linux-x86_64-pulseaudio
-            dist/bava-windows-x86_64.exe
-            dist/bava-macos-aarch64
-            dist/bava-macos-x86_64
+            out/bava-linux-x86_64
+            out/bava-linux-x86_64-pulseaudio
+            out/bava-windows-x86_64.exe
+            out/bava-macos-aarch64
+            out/bava-macos-x86_64
