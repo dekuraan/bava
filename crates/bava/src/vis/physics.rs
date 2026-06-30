@@ -60,6 +60,14 @@ const PARKED: f32 = 1.0e6;
 /// instead of dribbling out and immediately re-sinking — which reads as a ball
 /// "stuck in the orb".
 const EJECT_CLEARANCE_RADII: f32 = 4.0;
+/// On eject, also guarantee the ball at least this fraction of circular-orbit
+/// speed *tangentially*. A purely radial kick (the old behaviour) lets a ball
+/// with little sideways motion hop straight out and fall straight back into the
+/// contact band, re-triggering the unstick every frame — it quivers at the rim
+/// forever (the residual "stuck pulsing at the orb edge" case). A tangential
+/// floor turns that radial bob into an orbit that carries the ball clear. It's a
+/// no-op for balls already orbiting faster than this.
+const EJECT_ORBIT_FRACTION: f32 = 0.6;
 /// Floor outward speed (px/s) used to unstick a ball a surface/column/blob has
 /// swallowed, so even a stationary swallowed ball is carried back out.
 const UNSTICK_FLOOR: f32 = 120.0;
@@ -1163,6 +1171,25 @@ fn planet_forces(
             if target > along {
                 vel.0 += outward * (target - along);
             }
+
+            // Tangential floor: ensure the ball orbits clear instead of bobbing
+            // straight back into the rim. Conserve whatever sideways direction it
+            // already has; a dead-radial ball (v_t ≈ 0) is nudged onto a stable
+            // side picked from its id so the choice is steady frame-to-frame.
+            let tangent = Vec2::new(-outward.y, outward.x);
+            let v_t = vel.0.dot(tangent);
+            let orbit = (settings.central_gravity * (surf_r + ball.radius)).sqrt();
+            let min_t = orbit * EJECT_ORBIT_FRACTION;
+            if v_t.abs() < min_t {
+                let dir = if v_t.abs() > 1.0e-3 {
+                    v_t.signum()
+                } else if ball.id % 2 == 0 {
+                    1.0
+                } else {
+                    -1.0
+                };
+                vel.0 += tangent * (dir * min_t - v_t);
+            }
             continue;
         }
 
@@ -1837,6 +1864,47 @@ mod tests {
         assert!(
             final_r > rim * 0.5,
             "ball ended up stuck deep inside: final_r={final_r}, rim={rim}"
+        );
+    }
+
+    /// Tangential-eject regression: the unstick must impart *sideways* velocity,
+    /// not only a radial kick. A purely radial eject (the old behaviour) leaves a
+    /// dead-radial ball with zero tangential speed, so on a smooth/quiet rim it
+    /// hops straight out and falls straight back into the contact band — quivering
+    /// at the edge instead of orbiting clear. Read the eject directly (solver-free)
+    /// so the imparted tangential speed is exact: without the floor it is 0, with
+    /// it a real fraction of orbital speed.
+    #[test]
+    fn l4_eject_imparts_tangential_orbit_velocity() {
+        let mut app = bare_app();
+        app.insert_resource(PhysicsSettings::default());
+        app.insert_resource(VisSettings::default());
+        app.insert_resource(DrawingMode::WaveCircle);
+        app.insert_resource(Cava { bars: vec![0.3; 24], bars_per_channel: 24, channels: 1 });
+        app.init_resource::<Planet>();
+        app.init_resource::<BallCounter>();
+        spawn_planet_body(&mut app);
+
+        // Build the blob and clear Bevy's zero-dt first frame before spawning.
+        app.add_systems(Update, (update_planet, planet_forces.after(update_planet)));
+        app.update();
+
+        // Dead center, no velocity → the pathological zero-tangential case: a
+        // radial-only eject would leave it bobbing on a fixed diameter.
+        let radius = 12.0;
+        let ball = spawn_ball(&mut app, Vec2::ZERO, radius, 0.9, Vec2::ZERO);
+        app.update();
+
+        let pos = pos_of(&app, ball);
+        let r = pos.length();
+        assert!(r > 1.0, "ball was not ejected outward: r={r}");
+        let tangent = Vec2::new(-pos.y, pos.x) / r;
+        let v_t = app.world().get::<LinearVelocity>(ball).unwrap().0.dot(tangent).abs();
+        // The floor is a fraction of orbital speed at the ejection radius.
+        let orbit = (PhysicsSettings::default().central_gravity * r).sqrt();
+        assert!(
+            v_t > 0.5 * orbit * EJECT_ORBIT_FRACTION,
+            "eject gave no tangential orbit velocity (ball would bob radially): v_t={v_t}, orbit={orbit}"
         );
     }
 

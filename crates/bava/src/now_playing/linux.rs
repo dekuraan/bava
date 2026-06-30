@@ -2,7 +2,8 @@
 //! Linux now-playing backend: the active MPRIS player over D-Bus.
 //!
 //! Polls whichever MPRIS player is currently active (spotifyd, a browser, …) and
-//! fetches album art from its `mpris:artUrl` (`http(s)://` or `file://`), with a
+//! fetches album art from its `mpris:artUrl` (`http(s)://`, `file://`, or an
+//! inline `data:` URI — jellyfin-desktop embeds the cover that way), with a
 //! YouTube thumbnail fallback for players that expose no art URL.
 
 use std::io::Read;
@@ -123,9 +124,32 @@ fn percent_decode(s: &str) -> Vec<u8> {
     out
 }
 
-/// Fetch album art from an `http(s)://` or `file://` URL and decode to RGBA8.
+/// Decode a `data:[<mediatype>][;base64],<data>` URI into its raw bytes.
+/// jellyfin-desktop publishes its `mpris:artUrl` this way (the cover encoded
+/// inline), so there is no URL to fetch — the image bytes are the payload.
+fn decode_data_uri(url: &str) -> Option<Vec<u8>> {
+    use base64::Engine;
+
+    let rest = url.strip_prefix("data:")?;
+    // `<mediatype>[;base64],<data>` — split on the first comma.
+    let (meta, data) = rest.split_once(',')?;
+    if meta.rsplit(';').any(|seg| seg.eq_ignore_ascii_case("base64")) {
+        // Tolerate whitespace and either alphabet; the payload is large.
+        base64::engine::general_purpose::STANDARD
+            .decode(data.trim())
+            .ok()
+    } else {
+        // Non-base64 data URIs are percent-encoded text; reuse the decoder.
+        Some(percent_decode(data))
+    }
+}
+
+/// Fetch album art from a `data:`, `http(s)://`, or `file://` URL and decode to
+/// RGBA8.
 fn fetch_and_decode_art(url: &str) -> Option<DecodedArt> {
-    let bytes = if let Some(path) = url.strip_prefix("file://") {
+    let bytes = if url.starts_with("data:") {
+        decode_data_uri(url)?
+    } else if let Some(path) = url.strip_prefix("file://") {
         // Percent-decode and drop any `localhost`/empty authority before the path.
         let path = path.strip_prefix("localhost").unwrap_or(path);
         let decoded = percent_decode(path);
@@ -144,4 +168,47 @@ fn fetch_and_decode_art(url: &str) -> Option<DecodedArt> {
     };
 
     decode_art_bytes(&bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use base64::Engine;
+
+    use super::*;
+
+    /// A real 2×2 PNG, base64'd — the form jellyfin-desktop embeds inline as
+    /// `mpris:artUrl`. Built via the `image` crate so the bytes are always valid.
+    fn png_data_uri() -> String {
+        let img = image::RgbaImage::from_pixel(2, 2, image::Rgba([10, 200, 90, 255]));
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(png.into_inner());
+        format!("data:image/png;base64,{b64}")
+    }
+
+    #[test]
+    fn data_uri_base64_decodes_to_png_magic() {
+        let bytes = decode_data_uri(&png_data_uri()).expect("base64 data uri should decode");
+        assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
+    }
+
+    #[test]
+    fn data_uri_tolerates_extra_params_and_whitespace() {
+        // `;charset` before `;base64`, plus a newline injected into the payload.
+        let uri = png_data_uri().replace("base64,", "charset=utf-8;base64,\n");
+        assert!(decode_data_uri(&uri).is_some());
+    }
+
+    #[test]
+    fn fetch_decodes_inline_data_uri_to_rgba() {
+        let art = fetch_and_decode_art(&png_data_uri()).expect("inline cover should decode");
+        assert_eq!((art.width, art.height), (2, 2));
+    }
+
+    #[test]
+    fn non_data_garbage_is_rejected() {
+        assert!(decode_data_uri("file:///tmp/x.png").is_none());
+    }
 }
