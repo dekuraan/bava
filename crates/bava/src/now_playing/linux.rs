@@ -156,7 +156,13 @@ fn fetch_and_decode_art(url: &str) -> Option<DecodedArt> {
         let path = std::path::Path::new(std::ffi::OsStr::from_bytes(&decoded));
         std::fs::read(path).ok()?
     } else if url.starts_with("http://") || url.starts_with("https://") {
-        let mut resp = ureq::get(url).call().ok()?;
+        // Bound the entire fetch (DNS → finishing the body read) so a stalled
+        // art host can't wedge the now-playing thread indefinitely.
+        let agent = ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_secs(15)))
+            .build()
+            .new_agent();
+        let mut resp = agent.get(url).call().ok()?;
         let mut buf = Vec::new();
         resp.body_mut()
             .as_reader()

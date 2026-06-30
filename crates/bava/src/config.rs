@@ -546,14 +546,29 @@ impl Config {
         if let Some(source) = &cli.source {
             self.audio.source = Some(source.clone());
         }
+        // These three feed buffer sizing / cavacore plan building and are used as
+        // divisors downstream, so a zero would divide-by-zero or panic at startup.
+        // Reject the override and keep the config/default value.
         if let Some(rate) = cli.rate {
-            self.audio.rate = rate;
+            if rate == 0 {
+                eprintln!("bava: --rate 0 is invalid; ignoring");
+            } else {
+                self.audio.rate = rate;
+            }
         }
         if let Some(channels) = cli.channels {
-            self.audio.channels = channels;
+            if channels == 0 {
+                eprintln!("bava: --channels 0 is invalid; ignoring");
+            } else {
+                self.audio.channels = channels;
+            }
         }
         if let Some(frame_samples) = cli.frame_samples {
-            self.audio.frame_samples = frame_samples;
+            if frame_samples == 0 {
+                eprintln!("bava: --frame_samples 0 is invalid; ignoring");
+            } else {
+                self.audio.frame_samples = frame_samples;
+            }
         }
         if let Some(bars) = cli.bars {
             self.cava.bars_per_channel = bars;
@@ -617,7 +632,10 @@ impl Config {
             rotation: v.rotation,
             area_margin: v.area_margin,
             area_offset: Vec2::from(v.area_offset),
-            active_profile: v.active_profile,
+            // Clamp against a possibly-stale / hand-edited config so a renderer
+            // indexing `profiles[active_profile]` can't panic (`profiles` is
+            // guaranteed non-empty above).
+            active_profile: v.active_profile.min(profiles.len() - 1),
             profiles,
             background: ImageLayer::from(&v.background),
             foreground: ImageLayer::from(&v.foreground),
@@ -691,6 +709,7 @@ const KEY_NAMES: &[(&str, KeyCode)] = &[
     ("f9", KeyCode::F9), ("f10", KeyCode::F10), ("f11", KeyCode::F11), ("f12", KeyCode::F12),
     ("backquote", KeyCode::Backquote), ("grave", KeyCode::Backquote), ("tilde", KeyCode::Backquote),
     ("tab", KeyCode::Tab),
+    ("insert", KeyCode::Insert),
     ("space", KeyCode::Space),
     ("escape", KeyCode::Escape), ("esc", KeyCode::Escape),
     ("enter", KeyCode::Enter), ("return", KeyCode::Enter),

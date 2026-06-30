@@ -14,8 +14,12 @@ fn main() {
     let mut build = cc::Build::new();
     build.file(&src).include(&vendor).warnings(false);
 
-    // Pick up non-standard fftw3 prefix (e.g. /opt/homebrew on macOS/ARM).
-    if let Ok(paths) = pkg_config::include_paths("fftw3") {
+    // Pick up non-standard fftw3 prefix (e.g. /opt/homebrew on macOS/ARM), but
+    // only for a native build: the host `pkg-config` reports host include/lib
+    // paths that are wrong for a cross target (e.g. Linux→Windows). When cross,
+    // rely on the caller's CFLAGS/headers and the `-lfftw3` fallback instead.
+    let probe_pkg_config = !pkg_config::cross_compiling();
+    if probe_pkg_config && let Ok(paths) = pkg_config::include_paths("fftw3") {
         for p in &paths {
             build.include(p);
         }
@@ -26,7 +30,7 @@ fn main() {
     // cavacore links against the double-precision FFTW and libm.
     // Prefer pkg-config so we pick up non-standard prefixes, but fall back to
     // a plain `-lfftw3 -lm` which is correct on every mainstream distro.
-    if pkg_config::link_lib("fftw3").is_err() {
+    if !probe_pkg_config || pkg_config::link_lib("fftw3").is_err() {
         println!("cargo:rustc-link-lib=fftw3");
     }
     // libm is a separate library on Unix; on Windows the math functions are
@@ -40,6 +44,19 @@ fn main() {
 // happy-path probe. Returns Ok if `pkg-config` succeeds.
 mod pkg_config {
     use std::{path::PathBuf, process::Command};
+
+    /// True when building for a target different from the host, unless the caller
+    /// opted in with `PKG_CONFIG_ALLOW_CROSS=1`. The host `pkg-config` only knows
+    /// host paths, so probing it for a cross target yields wrong include/lib dirs.
+    pub fn cross_compiling() -> bool {
+        if std::env::var("PKG_CONFIG_ALLOW_CROSS").as_deref() == Ok("1") {
+            return false;
+        }
+        match (std::env::var("HOST"), std::env::var("TARGET")) {
+            (Ok(host), Ok(target)) => host != target,
+            _ => false,
+        }
+    }
 
     /// Returns include paths from `pkg-config --cflags <name>`.
     pub fn include_paths(name: &str) -> Result<Vec<PathBuf>, ()> {
