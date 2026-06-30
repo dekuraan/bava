@@ -93,7 +93,7 @@ pipewire = { version = "0.10", optional = true, features = ["v0_3_44"] }
 # Now-playing metadata + album art over MPRIS / D-Bus.
 mpris = "2"
 # HTTP fetch for remote album art (e.g. spotifyd's http artUrl).
-ureq = "2"
+ureq = "3"
 
 # --- Windows backends: WASAPI loopback capture + GSMTC now-playing. ---
 [target.'cfg(target_os = "windows")'.dependencies]
