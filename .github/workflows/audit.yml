@@ -18,6 +18,7 @@ on:
 permissions:
   contents: read
   issues: write # audit-check opens an issue per advisory on push/schedule
+  checks: write # audit-check publishes results as a check run
 
 jobs:
   audit:
