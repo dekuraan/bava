@@ -1,14 +1,14 @@
 # Flatpak packaging
 
-Builds bava against the Freedesktop runtime. FFTW3 is built as a module (it is
-not in the runtime); everything else bava links — libpulse, dbus, the Vulkan
-loader, Wayland/X11 — comes from the runtime.
+Builds bava against the Freedesktop runtime. bava is pure Rust (no FFTW/C to
+build); everything it links — libpulse, dbus, the Vulkan loader, Wayland/X11 —
+comes from the runtime.
 
 ## Files
 
 | File | Purpose |
 | --- | --- |
-| `io.github.dekuraan.bava.yml` | flatpak-builder manifest (fftw3 + bava modules) |
+| `io.github.dekuraan.bava.yml` | flatpak-builder manifest (single bava module) |
 | `gen-cargo-sources.py` | Regenerates `cargo-sources.json` from `Cargo.lock` (offline, stdlib only) |
 | `cargo-sources.json` | Vendored crates.io sources for an offline cargo build — **generated** |
 | `io.github.dekuraan.bava.desktop` | Desktop entry |

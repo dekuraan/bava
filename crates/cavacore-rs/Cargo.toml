@@ -4,10 +4,12 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Safe Rust wrapper around cavacore, the audio-visualization engine from CAVA"
+description = "Pure-Rust port of cavacore, the audio-visualization engine from CAVA"
 
 [dependencies]
-cavacore-sys.workspace = true
+# Pure-Rust real-to-complex FFT (rustfft under the hood). Unnormalized, matching
+# the FFTW `dft_r2c_1d` scale the original cavacore eq constants were tuned to.
+realfft = "3"
 
 [dev-dependencies]
 # deterministic test signal generation only

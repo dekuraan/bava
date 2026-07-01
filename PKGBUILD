@@ -7,7 +7,6 @@ arch=('x86_64')
 url="https://github.com/dekuraan/bava"
 license=('GPL-3.0-or-later')
 depends=(
-    'fftw'
     'libpulse'
     'dbus'
     'libxkbcommon'

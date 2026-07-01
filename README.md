@@ -79,8 +79,7 @@ cargo test -p bava --bin bava    # app unit/system/physics tests (headless)
 
 ```
 crates/
-  cavacore-sys/        # FFI + build.rs compiling vendored cavacore.c (links fftw3)
-  cavacore-rs/         # safe CavaConfig → CavaPlan wrapper; rigorous test suite
+  cavacore-rs/         # pure-Rust cavacore port (realfft); CavaConfig → CavaPlan; rigorous test suite
   bava/
     src/cava/          # CavaPlugin, Cava resource, capture thread, feed_cava system
     src/cava/capture/  # AudioCapture trait; backends: pipewire.rs / pulse.rs / wasapi.rs / coreaudio.rs
@@ -118,9 +117,9 @@ examples.
 ## License
 
 bava is licensed under the **GNU General Public License v3.0 or later**
-(GPL-3.0-or-later); see [`LICENSE`](LICENSE). The project links FFTW3
-(GPL-2.0-or-later) via cavacore, so distributed binaries are a combined work
-conveyed under the GPL.
+(GPL-3.0-or-later); see [`LICENSE`](LICENSE).
 
-Vendors `cavacore.c` / `cavacore.h` from [karlstav/cava](https://github.com/karlstav/cava)
-(MIT, GPL-compatible; terms preserved in `crates/cavacore-sys/vendor/cava/LICENSE`).
+The `cavacore-rs` crate is a pure-Rust reimplementation of the analysis engine
+from [karlstav/cava](https://github.com/karlstav/cava) (MIT), built on the
+[`realfft`](https://crates.io/crates/realfft) FFT crate — no C or FFTW is
+linked.
