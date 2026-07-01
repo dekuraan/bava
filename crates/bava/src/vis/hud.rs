@@ -2,12 +2,10 @@
 //! On-screen HUD: a dimmed album-art backdrop, user-configured background /
 //! foreground image overlays, and a centered now-playing label.
 
-use std::path::PathBuf;
-
 use bevy::prelude::*;
 
 use crate::now_playing::{AlbumArt, NowPlaying};
-use crate::vis::VisSettings;
+use crate::vis::{ImageLayer, VisSettings};
 
 /// Full-window album-art backdrop sprite (driven by now-playing metadata).
 #[derive(Component)]
@@ -20,14 +18,6 @@ struct UserBackground;
 /// User-configured foreground image sprite (from `[vis.foreground]`).
 #[derive(Component)]
 struct UserForeground;
-
-/// Tracks the last-known paths for the user image layers so we only reload
-/// when the path actually changes.
-#[derive(Resource, Default)]
-struct UserImageState {
-    bg_path: Option<PathBuf>,
-    fg_path: Option<PathBuf>,
-}
 
 /// Now-playing text label (title line).
 #[derive(Component)]
@@ -42,8 +32,7 @@ pub struct HudPlugin;
 
 impl Plugin for HudPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<UserImageState>()
-            .add_systems(Startup, setup_hud)
+        app.add_systems(Startup, setup_hud)
             .add_systems(Update, (update_background, update_user_images, update_label));
     }
 }
@@ -188,12 +177,44 @@ fn update_label(
     }
 }
 
+/// Cover-fit, tint, and show one user image `layer` on its sprite (or hide the
+/// sprite when the layer has no path). `asset_server.load` returns the cached
+/// handle for an already-loaded path, so re-issuing it each frame is cheap.
+fn apply_image_layer(
+    layer: &ImageLayer,
+    ww: f32,
+    wh: f32,
+    asset_server: &AssetServer,
+    images: &Assets<Image>,
+    sprite: &mut Sprite,
+    visibility: &mut Visibility,
+) {
+    let Some(path) = &layer.path else {
+        sprite.color = Color::NONE;
+        *visibility = Visibility::Hidden;
+        return;
+    };
+    let handle: Handle<Image> = asset_server.load(path.clone());
+    // Cover-fit to window when the image's dimensions are known.
+    if let Some(img) = images.get(&handle) {
+        let (iw, ih) = (img.width() as f32, img.height() as f32);
+        if iw > 0.0 && ih > 0.0 {
+            let scale = (ww / iw).max(wh / ih) * layer.scale;
+            sprite.custom_size = Some(Vec2::new(iw * scale, ih * scale));
+        }
+    } else {
+        // Image not yet loaded; fill window at the configured scale.
+        sprite.custom_size = Some(Vec2::new(ww, wh) * layer.scale);
+    }
+    sprite.image = handle;
+    sprite.color = Color::srgba(1.0, 1.0, 1.0, layer.alpha);
+    *visibility = Visibility::Visible;
+}
+
 /// Load and display user-configured background / foreground images from
-/// [`VisSettings::background`] and [`VisSettings::foreground`]. Reloads only
-/// when the path changes; scale and alpha update every frame.
+/// [`VisSettings::background`] and [`VisSettings::foreground`].
 fn update_user_images(
     vis: Res<VisSettings>,
-    mut state: ResMut<UserImageState>,
     asset_server: Res<AssetServer>,
     images: Res<Assets<Image>>,
     windows: Query<&Window>,
@@ -205,61 +226,10 @@ fn update_user_images(
     };
     let (ww, wh) = (window.width(), window.height());
 
-    // --- Background ---
-    if vis.background.path != state.bg_path {
-        state.bg_path = vis.background.path.clone();
-    }
     for (mut sprite, mut visibility) in &mut bg {
-        match &state.bg_path {
-            Some(path) => {
-                let handle: Handle<Image> = asset_server.load(path.clone());
-                // Cover-fit to window when dimensions are known.
-                if let Some(img) = images.get(&handle) {
-                    let (iw, ih) = (img.width() as f32, img.height() as f32);
-                    if iw > 0.0 && ih > 0.0 {
-                        let scale = (ww / iw).max(wh / ih) * vis.background.scale;
-                        sprite.custom_size = Some(Vec2::new(iw * scale, ih * scale));
-                    }
-                } else {
-                    // Image not yet loaded; fill window at the configured scale.
-                    sprite.custom_size = Some(Vec2::new(ww, wh) * vis.background.scale);
-                }
-                sprite.image = handle;
-                sprite.color = Color::srgba(1.0, 1.0, 1.0, vis.background.alpha);
-                *visibility = Visibility::Visible;
-            }
-            None => {
-                sprite.color = Color::NONE;
-                *visibility = Visibility::Hidden;
-            }
-        }
-    }
-
-    // --- Foreground ---
-    if vis.foreground.path != state.fg_path {
-        state.fg_path = vis.foreground.path.clone();
+        apply_image_layer(&vis.background, ww, wh, &asset_server, &images, &mut sprite, &mut visibility);
     }
     for (mut sprite, mut visibility) in &mut fg {
-        match &state.fg_path {
-            Some(path) => {
-                let handle: Handle<Image> = asset_server.load(path.clone());
-                if let Some(img) = images.get(&handle) {
-                    let (iw, ih) = (img.width() as f32, img.height() as f32);
-                    if iw > 0.0 && ih > 0.0 {
-                        let scale = (ww / iw).max(wh / ih) * vis.foreground.scale;
-                        sprite.custom_size = Some(Vec2::new(iw * scale, ih * scale));
-                    }
-                } else {
-                    sprite.custom_size = Some(Vec2::new(ww, wh) * vis.foreground.scale);
-                }
-                sprite.image = handle;
-                sprite.color = Color::srgba(1.0, 1.0, 1.0, vis.foreground.alpha);
-                *visibility = Visibility::Visible;
-            }
-            None => {
-                sprite.color = Color::NONE;
-                *visibility = Visibility::Hidden;
-            }
-        }
+        apply_image_layer(&vis.foreground, ww, wh, &asset_server, &images, &mut sprite, &mut visibility);
     }
 }

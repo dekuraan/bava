@@ -89,8 +89,9 @@ impl Plugin for CirclePlugin {
         app.add_systems(Startup, setup_circle).add_systems(
             Update,
             // Reconcile the radial pool first so a live bar-count change is
-            // reflected the same frame, then draw each shape.
-            (reconcile_circle_bars, update_circle_bars, update_ring, update_fill),
+            // reflected the same frame, then draw each shape. `update_ring` draws
+            // both the Wave outline and its optional fill from one geometry pass.
+            (reconcile_circle_bars, update_circle_bars, update_ring),
         );
     }
 }
@@ -326,77 +327,34 @@ fn ring_point(values: &[f32], k: usize, base: f32, amp: f32, rotation: f32) -> (
     (Vec2::new(ang.cos() * r, ang.sin() * r), v)
 }
 
-/// Rebuild the antialiased ring-outline stroke when a circle mode is active, and
-/// hide it otherwise.
+/// Rebuild the antialiased ring-outline stroke and, when enabled, the translucent
+/// fill blob for the Wave circle mode — from a **single** ring-geometry pass. (The
+/// fill previously recomputed the whole `mono` → monstercat → `ring_point`
+/// pipeline a second time every frame.)
+#[allow(clippy::too_many_arguments)]
 fn update_ring(
     mode: Res<DrawingMode>,
     cava: Res<Cava>,
     vis: Res<VisSettings>,
     windows: Query<&Window>,
     ring: Res<RingHandles>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut q: Query<&mut Visibility, With<RingStroke>>,
-) {
-    // The ring outline is the Wave circle shape only; the other circle shapes
-    // use the radial bar pool.
-    let active = mode.family() == VisFamily::Circle && mode.shape() == VisShape::Wave;
-    for mut v in &mut q {
-        *v = if active {
-            Visibility::Visible
-        } else {
-            Visibility::Hidden
-        };
-    }
-    if !active {
-        return;
-    }
-    let Some(window) = windows.iter().next() else {
-        return;
-    };
-    let extent = window.width().min(window.height());
-
-    let mut values = cava.mono();
-    if values.is_empty() {
-        return;
-    }
-    spread_monstercat(&mut values, vis.monstercat);
-    let (base, amp) = circle_radii(extent, vis.inner_radius);
-    let rot = vis.rotation;
-
-    let (lo, hi) = (vis.fg_lo(), vis.fg_hi());
-    let glow = vis.glow_gain;
-    let pts: Vec<(Vec2, Color)> = (0..SEGMENTS)
-        .map(|k| {
-            let (pos, v) = ring_point(&values, k, base, amp, rot);
-            (pos, gradient_color(lo, hi, v.min(1.0), glow))
-        })
-        .collect();
-
-    if let Some(mut mesh) = meshes.get_mut(&ring.mesh) {
-        apply_stroke(&mut mesh, &pts, vis.line_thickness * 0.5, STROKE_FEATHER, true);
-    }
-}
-
-/// Update / show the translucent fill blob when enabled.
-fn update_fill(
-    mode: Res<DrawingMode>,
-    cava: Res<Cava>,
-    vis: Res<VisSettings>,
-    windows: Query<&Window>,
     fill: Res<FillHandles>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
-    mut q: Query<&mut Visibility, With<FillBlob>>,
+    mut ring_q: Query<&mut Visibility, (With<RingStroke>, Without<FillBlob>)>,
+    mut fill_q: Query<&mut Visibility, (With<FillBlob>, Without<RingStroke>)>,
 ) {
-    let active = mode.family() == VisFamily::Circle && mode.shape() == VisShape::Wave && vis.filling;
-    for mut v in &mut q {
-        *v = if active {
-            Visibility::Visible
-        } else {
-            Visibility::Hidden
-        };
+    // The ring outline / fill are the Wave circle shape only; the other circle
+    // shapes use the radial bar pool.
+    let ring_active = mode.family() == VisFamily::Circle && mode.shape() == VisShape::Wave;
+    let fill_active = ring_active && vis.filling;
+    for mut v in &mut ring_q {
+        *v = if ring_active { Visibility::Visible } else { Visibility::Hidden };
     }
-    if !active {
+    for mut v in &mut fill_q {
+        *v = if fill_active { Visibility::Visible } else { Visibility::Hidden };
+    }
+    if !ring_active {
         return;
     }
     let Some(window) = windows.iter().next() else {
@@ -412,13 +370,31 @@ fn update_fill(
     let (base, amp) = circle_radii(extent, vis.inner_radius);
     let rot = vis.rotation;
 
+    // Compute the ring geometry once; both the outline stroke and the fill fan
+    // read from it.
+    let ring_pts: Vec<(Vec2, f32)> = (0..SEGMENTS)
+        .map(|k| ring_point(&values, k, base, amp, rot))
+        .collect();
+
+    let (lo, hi) = (vis.fg_lo(), vis.fg_hi());
+    let glow = vis.glow_gain;
+    if let Some(mut mesh) = meshes.get_mut(&ring.mesh) {
+        let pts: Vec<(Vec2, Color)> = ring_pts
+            .iter()
+            .map(|(pos, v)| (*pos, gradient_color(lo, hi, v.min(1.0), glow)))
+            .collect();
+        apply_stroke(&mut mesh, &pts, vis.line_thickness * 0.5, STROKE_FEATHER, true);
+    }
+
+    if !fill_active {
+        return;
+    }
     if let Some(mut mesh) = meshes.get_mut(&fill.mesh) {
         let mut positions = Vec::with_capacity(SEGMENTS + 1);
         positions.push([0.0, 0.0, 0.0]); // center
         let mut peak = 0.0f32;
-        for k in 0..SEGMENTS {
-            let (pos, v) = ring_point(&values, k, base, amp, rot);
-            peak = peak.max(v);
+        for (pos, v) in &ring_pts {
+            peak = peak.max(*v);
             positions.push([pos.x, pos.y, 0.0]);
         }
         mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);

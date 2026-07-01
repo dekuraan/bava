@@ -496,10 +496,29 @@ fn audio_section(
 /// Image overlay controls: user-supplied background and foreground images.
 fn image_section(ui: &mut egui::Ui, vis: &mut VisSettings) {
     ui.label(egui::RichText::new("Images").strong());
+    image_layer_editor(
+        ui,
+        "Background image",
+        "Absolute path or relative to working dir.",
+        &mut vis.background,
+    );
+    image_layer_editor(
+        ui,
+        "Foreground overlay",
+        "Rendered above bars, below HUD text.",
+        &mut vis.foreground,
+    );
+}
 
-    ui.collapsing("Background image", |ui| {
-        let mut path_str = vis
-            .background
+/// One collapsing editor (path / clear / scale / alpha) for a user image layer.
+fn image_layer_editor(
+    ui: &mut egui::Ui,
+    header: &str,
+    help: &str,
+    layer: &mut crate::vis::ImageLayer,
+) {
+    ui.collapsing(header, |ui| {
+        let mut path_str = layer
             .path
             .as_ref()
             .map(|p| p.to_string_lossy().into_owned())
@@ -507,44 +526,19 @@ fn image_section(ui: &mut egui::Ui, vis: &mut VisSettings) {
         ui.horizontal(|ui| {
             ui.label("path");
             if ui.text_edit_singleline(&mut path_str).changed() {
-                vis.background.path = if path_str.trim().is_empty() {
+                layer.path = if path_str.trim().is_empty() {
                     None
                 } else {
                     Some(std::path::PathBuf::from(path_str.trim()))
                 };
             }
         });
-        if vis.background.path.is_some() && ui.button("Clear").clicked() {
-            vis.background.path = None;
+        if layer.path.is_some() && ui.button("Clear").clicked() {
+            layer.path = None;
         }
-        ui.label(egui::RichText::new("Absolute path or relative to working dir.").weak().small());
-        ui.add(egui::Slider::new(&mut vis.background.scale, 0.1..=4.0).text("scale"));
-        ui.add(egui::Slider::new(&mut vis.background.alpha, 0.0..=1.0).text("alpha"));
-    });
-
-    ui.collapsing("Foreground overlay", |ui| {
-        let mut path_str = vis
-            .foreground
-            .path
-            .as_ref()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        ui.horizontal(|ui| {
-            ui.label("path");
-            if ui.text_edit_singleline(&mut path_str).changed() {
-                vis.foreground.path = if path_str.trim().is_empty() {
-                    None
-                } else {
-                    Some(std::path::PathBuf::from(path_str.trim()))
-                };
-            }
-        });
-        if vis.foreground.path.is_some() && ui.button("Clear").clicked() {
-            vis.foreground.path = None;
-        }
-        ui.label(egui::RichText::new("Rendered above bars, below HUD text.").weak().small());
-        ui.add(egui::Slider::new(&mut vis.foreground.scale, 0.1..=4.0).text("scale"));
-        ui.add(egui::Slider::new(&mut vis.foreground.alpha, 0.0..=1.0).text("alpha"));
+        ui.label(egui::RichText::new(help).weak().small());
+        ui.add(egui::Slider::new(&mut layer.scale, 0.1..=4.0).text("scale"));
+        ui.add(egui::Slider::new(&mut layer.alpha, 0.0..=1.0).text("alpha"));
     });
 }
 

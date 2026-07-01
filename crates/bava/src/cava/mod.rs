@@ -147,6 +147,12 @@ struct AudioRing {
     /// `plan.rate / frame_samples`, so the plan must be rebuilt to the *real*
     /// delivery rate or the smoothing runs fast/slow by the rate ratio.
     negotiated_rate: Arc<AtomicU32>,
+    /// The channel count the capture backend actually negotiated (0 until known).
+    /// Like the rate, PipeWire's graph converter is *asked* for the exact channel
+    /// count but may negotiate a different one (e.g. a mono or 5.1 monitor); the
+    /// interleaved stream would then be deinterleaved with the wrong stride unless
+    /// the plan is rebuilt to match. Published alongside `negotiated_rate`.
+    negotiated_channels: Arc<AtomicU32>,
 }
 
 impl AudioRing {
@@ -159,6 +165,7 @@ impl AudioRing {
             running: Arc::new(AtomicBool::new(true)),
             cap,
             negotiated_rate: Arc::new(AtomicU32::new(0)),
+            negotiated_channels: Arc::new(AtomicU32::new(0)),
         }
     }
 }
@@ -301,9 +308,11 @@ fn capture_reader(settings: CavaSettings, ring: AudioRing) {
             .unwrap_or_default(),
     );
 
-    // Publish the negotiated rate so the main thread can rebuild the cavacore
-    // plan to match the *actual* delivery rate (see `reconcile_capture_rate`).
+    // Publish the negotiated rate/channels so the main thread can rebuild the
+    // cavacore plan to match the *actual* delivery format (see
+    // `reconcile_capture_rate`).
     ring.negotiated_rate.store(capture.rate(), Ordering::Relaxed);
+    ring.negotiated_channels.store(capture.channels(), Ordering::Relaxed);
 
     let chunk = settings.frame_samples.max(1) * settings.channels.max(1);
     let mut buf = vec![0.0f64; chunk];
@@ -338,6 +347,7 @@ fn capture_reader(settings: CavaSettings, ring: AudioRing) {
                     Ok(c) => {
                         capture = c;
                         ring.negotiated_rate.store(capture.rate(), Ordering::Relaxed);
+                        ring.negotiated_channels.store(capture.channels(), Ordering::Relaxed);
                         current_device = next;
                         info!("bava: following active sink → {active}");
                     }
@@ -464,12 +474,33 @@ fn reconcile_capture_rate(
     let Some(mut state) = state else {
         return; // cavacore never initialized
     };
-    if state.plan.rate() == negotiated {
-        return; // already matches (e.g. Pulse forced the requested rate)
+    // cavacore only supports 1 or 2 channels; if the backend negotiated something
+    // exotic (or hasn't reported yet), keep the plan's channel count — down-mixing
+    // an N-channel monitor is out of scope for this path.
+    let neg_channels = ring.negotiated_channels.load(Ordering::Relaxed);
+    let plan_channels = state.plan.channels() as u32;
+    let channels = if neg_channels == 1 || neg_channels == 2 {
+        neg_channels as usize
+    } else {
+        plan_channels as usize
+    };
+    if state.plan.rate() == negotiated && plan_channels as usize == channels {
+        return; // already matches (e.g. Pulse forced the requested format)
     }
 
     let requested = state.plan.rate();
-    let channels = state.plan.channels();
+    let requested_channels = plan_channels;
+    // Clamp the high cutoff below the negotiated Nyquist (and keep it above the
+    // low cutoff). A lower-than-requested negotiated rate simply cannot represent
+    // the top of the requested band, and without this clamp the rebuild would
+    // fail `CavaConfig` validation (`high_cutoff >= rate/2`) and strand us on the
+    // stale requested-rate plan — the exact frequency/smoothing mismatch this
+    // function exists to fix.
+    let nyquist = negotiated / 2;
+    let high_cutoff = settings
+        .high_cutoff_freq
+        .min(nyquist.saturating_sub(1))
+        .max(settings.low_cutoff_freq.saturating_add(1));
     let cfg = CavaConfig {
         bars: settings.bars_per_channel as u32,
         rate: negotiated,
@@ -477,7 +508,7 @@ fn reconcile_capture_rate(
         autosens: settings.autosens,
         noise_reduction: settings.noise_reduction,
         low_cutoff_freq: settings.low_cutoff_freq,
-        high_cutoff_freq: settings.high_cutoff_freq,
+        high_cutoff_freq: high_cutoff,
     };
     match cfg.build() {
         Ok(plan) => {
@@ -489,11 +520,13 @@ fn reconcile_capture_rate(
             cava.bars_per_channel = bars;
             cava.channels = channels;
             // Keep settings in sync so a later editor "Apply"/config save uses
-            // the real rate rather than reintroducing the mismatch.
+            // the real rate/channels rather than reintroducing the mismatch.
             settings.rate = negotiated;
+            settings.channels = channels;
             info!(
-                "bava: capture negotiated {negotiated} Hz (requested {requested}); \
-                 rebuilt cavacore to match — smoothing now correct"
+                "bava: capture negotiated {negotiated} Hz / {channels} ch \
+                 (requested {requested} Hz / {requested_channels} ch); \
+                 rebuilt cavacore to match — smoothing/stride now correct"
             );
         }
         Err(e) => error!(

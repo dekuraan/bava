@@ -166,6 +166,13 @@ impl LinearResampler {
             pending.extend(cur.iter().copied());
             return;
         }
+        // A non-positive or non-finite step would never advance `frac`, spinning
+        // the `while self.frac < 1.0` loop below forever. Fall back to passthrough
+        // so a degenerate device rate can't hang the capture thread.
+        if step <= 0.0 || !step.is_finite() {
+            pending.extend(cur.iter().copied());
+            return;
+        }
         if self.has_prev {
             while self.frac < 1.0 {
                 for c in 0..self.target_channels {

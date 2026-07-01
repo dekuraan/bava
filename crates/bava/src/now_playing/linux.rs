@@ -154,7 +154,16 @@ fn fetch_and_decode_art(url: &str) -> Option<DecodedArt> {
         let path = path.strip_prefix("localhost").unwrap_or(path);
         let decoded = percent_decode(path);
         let path = std::path::Path::new(std::ffi::OsStr::from_bytes(&decoded));
-        std::fs::read(path).ok()?
+        // Bound the read at 16 MiB like the http branch below: a mistagged /
+        // hi-res `file://` cover shouldn't load an arbitrarily large file into
+        // memory before decoding.
+        let mut buf = Vec::new();
+        std::fs::File::open(path)
+            .ok()?
+            .take(16 * 1024 * 1024)
+            .read_to_end(&mut buf)
+            .ok()?;
+        buf
     } else if url.starts_with("http://") || url.starts_with("https://") {
         // Bound the entire fetch (DNS → finishing the body read) so a stalled
         // art host can't wedge the now-playing thread indefinitely.

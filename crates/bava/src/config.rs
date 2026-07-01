@@ -557,8 +557,8 @@ impl Config {
             }
         }
         if let Some(channels) = cli.channels {
-            if channels == 0 {
-                eprintln!("bava: --channels 0 is invalid; ignoring");
+            if channels == 0 || channels > 2 {
+                eprintln!("bava: --channels {channels} is invalid (must be 1 or 2); ignoring");
             } else {
                 self.audio.channels = channels;
             }
@@ -571,7 +571,16 @@ impl Config {
             }
         }
         if let Some(bars) = cli.bars {
-            self.cava.bars_per_channel = bars;
+            if bars == 0 {
+                eprintln!("bava: --bars 0 is invalid; ignoring");
+            } else if bars > MAX_BARS_PER_CHANNEL {
+                eprintln!(
+                    "bava: --bars {bars} exceeds the maximum of {MAX_BARS_PER_CHANNEL}; clamping"
+                );
+                self.cava.bars_per_channel = MAX_BARS_PER_CHANNEL;
+            } else {
+                self.cava.bars_per_channel = bars;
+            }
         }
         if let Some(nr) = cli.noise_reduction {
             self.cava.noise_reduction = nr;
@@ -596,8 +605,12 @@ impl Config {
     /// Convert into the runtime [`CavaSettings`] resource.
     pub fn to_cava_settings(&self, debug: bool) -> CavaSettings {
         CavaSettings {
-            bars_per_channel: self.cava.bars_per_channel,
-            channels: self.audio.channels,
+            // Clamp against a possibly hand-edited config: an unbounded
+            // `bars_per_channel` sizes the Cava buffer and the per-bar mesh /
+            // collider pools at startup (huge values OOM or overflow), and
+            // cavacore requires exactly 1 or 2 channels.
+            bars_per_channel: self.cava.bars_per_channel.clamp(1, MAX_BARS_PER_CHANNEL),
+            channels: self.audio.channels.clamp(1, 2),
             rate: self.audio.rate,
             frame_samples: self.audio.frame_samples,
             autosens: self.cava.autosens,
@@ -665,7 +678,9 @@ impl Config {
             bar_smoothing: p.bar_smoothing,
             bar_restitution: p.bar_restitution,
             bar_push: p.bar_push,
-            central_gravity: p.central_gravity,
+            // Inward pull magnitude; negative values would make the orbit
+            // launch speed `sqrt(central_gravity * r)` NaN (see `spawn_one_ball`).
+            central_gravity: p.central_gravity.max(0.0),
             trails: p.trails,
             trail_length: p.trail_length,
             debug_draw: p.debug_draw,
@@ -687,6 +702,12 @@ pub struct ConfigHandle {
 }
 
 /// Default settings-editor toggle key name. Must appear in [`KEY_NAMES`].
+/// Upper bound on `bars_per_channel`. The GUI slider already caps at 128; this
+/// guards the CLI (`--bars`) and hand-edited config paths so an absurd value
+/// can't OOM (millions of mesh/collider entities) or overflow the Cava buffer
+/// allocation at startup. Generous — well above any sane visualizer use.
+pub(crate) const MAX_BARS_PER_CHANNEL: usize = 1024;
+
 const DEFAULT_TOGGLE_KEY: &str = "p";
 
 /// Lower-case key name ⇄ [`KeyCode`] table for the configurable editor hotkey.

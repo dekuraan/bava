@@ -171,7 +171,10 @@ impl CoreAudioCapture {
                         asbd.mBitsPerChannel, asbd.mFormatFlags
                     )));
                 }
-                let device_rate = asbd.mSampleRate as u32;
+                // Clamp to >=1 like the format-change path (line ~330): a 0 rate
+                // would make the resampler `step` 0 and spin `LinearResampler::push`
+                // forever, freezing the capture thread.
+                let device_rate = (asbd.mSampleRate as u32).max(1);
                 let device_channels = asbd.mChannelsPerFrame.max(1) as usize;
 
                 // 4. Wrap the tap in a private aggregate device. Include the PID in

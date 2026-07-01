@@ -391,7 +391,10 @@ fn update_bars(
                         (cy, Vec2::splat(dot * 0.5))
                     }
                     VisShape::Spine => {
-                        let side = (bar_w * (0.35 + v)).clamp(2.0, max_h);
+                        // `max_h` can fall below the 2.0 floor on a tiny drawable
+                        // area (large `area_margin`); guard the upper bound so
+                        // `clamp` never sees `min > max` (which panics).
+                        let side = (bar_w * (0.35 + v)).clamp(2.0, max_h.max(2.0));
                         (oy, Vec2::splat(side * 0.5))
                     }
                     _ => unreachable!(),
@@ -425,7 +428,9 @@ fn update_bars(
                         (cx, Vec2::splat(dot * 0.5))
                     }
                     VisShape::Spine => {
-                        let side = (bar_h * (0.35 + v)).clamp(2.0, max_w);
+                        // See the BottomTop twin: guard the upper bound so a tiny
+                        // drawable area can't drive `clamp` into a `min > max` panic.
+                        let side = (bar_h * (0.35 + v)).clamp(2.0, max_w.max(2.0));
                         (ox, Vec2::splat(side * 0.5))
                     }
                     _ => unreachable!(),

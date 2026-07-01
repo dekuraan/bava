@@ -341,9 +341,11 @@ fn setup_physics(
         Visibility::Hidden,
     ));
 
-    if !settings.enabled {
-        return;
-    }
+    // Spawn the play-area bodies unconditionally, even when physics is currently
+    // disabled: `enabled` is live-editable (GUI checkbox, profile/config reload)
+    // and nothing else creates these bodies when it's turned on later. They're
+    // inert until a ball exists, and `spawn_ball_on_click` gates ball spawning on
+    // `settings.enabled`, so a disabled session simply has no balls to interact.
 
     // Gravity in our pixel space; Box mode uses it, circle modes zero it.
     commands.insert_resource(Gravity(Vec2::NEG_Y * settings.gravity));
@@ -401,15 +403,23 @@ fn wall_geometry(side: WallSide, w: f32, h: f32) -> (Vec2, Vec2) {
     }
 }
 
-/// Keep the boundary walls glued to the window edges when it is resized.
+/// Keep the boundary walls glued to the window edges when it is resized. Gated on
+/// an actual size change: reassigning `Collider` marks it changed and forces avian
+/// to rebuild each wall's shape + broad-phase AABB, so doing it every frame is
+/// pure wasted work.
 fn resize_walls(
     windows: Query<&Window>,
     mut walls: Query<(&WallSide, &mut Transform, &mut Collider)>,
+    mut last_size: Local<Option<(f32, f32)>>,
 ) {
     let Some(window) = windows.iter().next() else {
         return;
     };
     let (w, h) = (window.width(), window.height());
+    if *last_size == Some((w, h)) {
+        return;
+    }
+    *last_size = Some((w, h));
     for (side, mut transform, mut collider) in &mut walls {
         let (size, pos) = wall_geometry(*side, w, h);
         transform.translation = pos.extend(0.0);
@@ -1274,7 +1284,6 @@ fn retint_balls(
     vis: Res<VisSettings>,
     balls: Query<(&Ball, &MeshMaterial2d<ColorMaterial>)>,
     mut trails: Query<&mut Trail>,
-    ball_tints: Query<&Ball>,
     mut materials: ResMut<Assets<ColorMaterial>>,
 ) {
     if !vis.is_changed() {
@@ -1287,7 +1296,7 @@ fn retint_balls(
         }
     }
     for mut trail in &mut trails {
-        if let Ok(ball) = ball_tints.get(trail.ball) {
+        if let Ok((ball, _)) = balls.get(trail.ball) {
             trail.color = sample_gradient(&stops, ball.tint, vis.glow_gain);
         }
     }
