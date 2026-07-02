@@ -56,6 +56,11 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="0.3.0" date="2026-07-02">
+      <description>
+        <p>Eleven Cavalier-style drawing modes, avian2d physics mode, dynamic album-art colors, and offline video rendering.</p>
+      </description>
+    </release>
     <release version="0.1.0" date="2026-06-17">
       <description>
         <p>Initial Flatpak release: bars/monstercat visualizer, MPRIS now-playing with album art, and the in-app settings editor.</p>

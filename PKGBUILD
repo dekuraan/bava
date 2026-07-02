@@ -8,6 +8,7 @@ url="https://github.com/dekuraan/bava"
 license=('MIT' 'Apache-2.0')
 depends=(
     'libpulse'
+    'libpipewire'
     'dbus'
     'libxkbcommon'
     'wayland'
@@ -22,6 +23,7 @@ makedepends=(
     'rust'
     'cargo'
     'pkgconf'
+    'pipewire'
     'gcc'
 )
 optdepends=(
