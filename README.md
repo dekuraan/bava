@@ -30,14 +30,14 @@ real-time. Now-playing metadata and album art are pulled from the OS media sessi
 
 ## Build & run
 
-Requires [Rust stable](https://rustup.rs/) **1.95 or newer** (Bevy 0.19) and
-fftw3 on all platforms.
+Requires [Rust stable](https://rustup.rs/) **1.95 or newer** (Bevy 0.19). bava is
+pure Rust — no C toolchain or FFTW is needed on any platform.
 
 ### Linux
 
 ```sh
 # Arch/CachyOS
-sudo pacman -S fftw pipewire libpulse dbus libxkbcommon wayland libx11 vulkan-icd-loader
+sudo pacman -S pipewire libpulse dbus libxkbcommon wayland libx11 vulkan-icd-loader
 
 cargo run -p bava
 # If the shell lacks a Wayland socket: WAYLAND_DISPLAY=wayland-1 cargo run -p bava
@@ -46,9 +46,6 @@ cargo run -p bava
 
 ### Windows
 
-Install [fftw3 pre-built DLLs](https://fftw.org/install/windows.html) and put
-them on `PATH`/`LIB`, then:
-
 ```sh
 cargo build --release -p bava
 ```
@@ -56,8 +53,6 @@ cargo build --release -p bava
 ### macOS (14.2+)
 
 ```sh
-brew install fftw
-
 # The mediaremote-adapter is required for now-playing metadata. Install it and
 # set BAVA_MEDIAREMOTE_ADAPTER_DIR to its directory before running:
 # https://github.com/ungive/mediaremote-adapter

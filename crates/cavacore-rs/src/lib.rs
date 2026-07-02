@@ -84,8 +84,6 @@ pub enum CavaError {
     InvalidCutoff { low: u32, high: u32, rate: u32 },
     /// cavacore itself rejected the parameters; carries its diagnostic string.
     Init(String),
-    /// `cava_init` returned a null pointer (allocation failure).
-    NullPlan,
 }
 
 impl fmt::Display for CavaError {
@@ -105,7 +103,6 @@ impl fmt::Display for CavaError {
                 rate / 2
             ),
             CavaError::Init(msg) => write!(f, "cavacore rejected parameters: {msg}"),
-            CavaError::NullPlan => write!(f, "cava_init returned null (out of memory)"),
         }
     }
 }
@@ -157,7 +154,7 @@ impl CavaConfig {
         }
         if self.low_cutoff_freq == 0
             || self.high_cutoff_freq <= self.low_cutoff_freq
-            || self.high_cutoff_freq >= self.rate / 2
+            || self.high_cutoff_freq > self.rate / 2
         {
             return Err(CavaError::InvalidCutoff {
                 low: self.low_cutoff_freq,
@@ -388,13 +385,15 @@ impl CavaPlan {
             framerate: 75.0,
             noise_reduction: cfg.noise_reduction,
             in_bass_l: vec![0.0; fft_bass],
-            in_bass_r: vec![0.0; fft_bass],
+            // Right-channel buffers stay empty for mono — every access is guarded
+            // by `channels == 2`, matching the C original's stereo-only allocation.
+            in_bass_r: vec![0.0; if channels == 2 { fft_bass } else { 0 }],
             in_l: vec![0.0; fft_treble],
-            in_r: vec![0.0; fft_treble],
+            in_r: vec![0.0; if channels == 2 { fft_treble } else { 0 }],
             out_bass_l: vec![Complex::default(); fft_bass / 2 + 1],
-            out_bass_r: vec![Complex::default(); fft_bass / 2 + 1],
+            out_bass_r: vec![Complex::default(); if channels == 2 { fft_bass / 2 + 1 } else { 0 }],
             out_l: vec![Complex::default(); fft_treble / 2 + 1],
-            out_r: vec![Complex::default(); fft_treble / 2 + 1],
+            out_r: vec![Complex::default(); if channels == 2 { fft_treble / 2 + 1 } else { 0 }],
             bass_scratch: bass_fft.make_scratch_vec(),
             treble_scratch: treble_fft.make_scratch_vec(),
             bass_fft,
@@ -546,19 +545,19 @@ impl CavaPlan {
 
             let lo = self.lower_cut_off[n];
             let hi = self.upper_cut_off[n];
+            // The bass-vs-treble choice depends only on `n`, so select the band's
+            // FFT output slices once instead of re-testing it for every bin.
+            let (out_l, out_r) = if (n as i32) < self.bass_cut_off_bar {
+                (&self.out_bass_l, &self.out_bass_r)
+            } else {
+                (&self.out_l, &self.out_r)
+            };
             let mut i = lo;
             while i <= hi {
                 let idx = i as usize;
-                if (n as i32) < self.bass_cut_off_bar {
-                    temp_l += self.out_bass_l[idx].re.hypot(self.out_bass_l[idx].im);
-                    if channels == 2 {
-                        temp_r += self.out_bass_r[idx].re.hypot(self.out_bass_r[idx].im);
-                    }
-                } else {
-                    temp_l += self.out_l[idx].re.hypot(self.out_l[idx].im);
-                    if channels == 2 {
-                        temp_r += self.out_r[idx].re.hypot(self.out_r[idx].im);
-                    }
+                temp_l += out_l[idx].re.hypot(out_l[idx].im);
+                if channels == 2 {
+                    temp_r += out_r[idx].re.hypot(out_r[idx].im);
                 }
                 i += 1;
             }
