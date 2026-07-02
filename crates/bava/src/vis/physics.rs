@@ -474,7 +474,7 @@ fn spawn_ball_on_click(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
     windows: Query<&Window>,
-    cameras: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
+    cameras: Query<(&Camera, &GlobalTransform), With<crate::vis::bars::VisCamera>>,
     time: Res<Time>,
     mut cooldown: Local<f32>,
 ) {

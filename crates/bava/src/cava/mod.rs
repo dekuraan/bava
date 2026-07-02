@@ -183,8 +183,36 @@ struct CavaState {
     scratch: Vec<f64>,
 }
 
+/// Pushes decoded samples straight into the audio ring, for offline rendering
+/// (`--input`). Inserted only by [`CavaPlugin`] in offline mode, where there is
+/// no capture thread; the record driver pushes each video frame's worth of
+/// samples before [`feed_cava`] drains them.
+#[derive(Resource, Clone)]
+pub struct AudioInjector {
+    ring: AudioRing,
+}
+
+impl AudioInjector {
+    /// Append interleaved samples for [`feed_cava`] to consume this frame.
+    /// Unlike the capture thread, this never evicts a backlog — the consumer
+    /// drains every frame and dropping samples would desync audio and video.
+    pub fn push(&self, samples: &[f64]) {
+        if let Ok(mut q) = self.ring.buf.lock() {
+            q.extend(samples.iter().copied());
+        }
+    }
+}
+
 /// Drives audio capture → cavacore (at render rate) → the [`Cava`] resource.
-pub struct CavaPlugin;
+///
+/// With [`offline`](Self::offline) set (`--input` video rendering), no capture
+/// thread is spawned and no rate reconciliation runs: the plan is built exactly
+/// at [`CavaSettings`]'s rate/channels (the decoded file's format) and samples
+/// arrive via [`AudioInjector`].
+#[derive(Default)]
+pub struct CavaPlugin {
+    pub offline: bool,
+}
 
 impl Plugin for CavaPlugin {
     fn build(&self, app: &mut App) {
@@ -227,8 +255,20 @@ impl Plugin for CavaPlugin {
             Err(e) => error!("bava: cavacore init failed: {e}; visualizer will be idle"),
         }
 
-        // Spawn the audio reader thread feeding the ring.
         let ring = AudioRing::new(settings.rate, settings.channels);
+
+        if self.offline {
+            // Offline rendering: samples are injected per video frame by the
+            // record driver, and the plan's rate/channels are already exact
+            // (they came from the decoded file), so no capture thread and no
+            // negotiated-rate reconciliation.
+            app.insert_resource(AudioInjector { ring: ring.clone() })
+                .insert_resource(ring)
+                .add_systems(Update, (rebuild_cava, feed_cava).chain());
+            return;
+        }
+
+        // Spawn the audio reader thread feeding the ring.
         let reader_ring = ring.clone();
         let reader_settings = settings.clone();
         thread::Builder::new()

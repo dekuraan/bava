@@ -81,8 +81,32 @@ enum NowPlayingMsg {
 #[derive(Resource)]
 struct NowPlayingRx(Receiver<NowPlayingMsg>);
 
-/// Polls the platform media session and serves now-playing + album art.
-pub struct NowPlayingPlugin;
+/// Keeps a sender alive for the app's lifetime in offline mode, where the
+/// one-shot metadata thread exits immediately — without this the drained
+/// channel reads as *disconnected* and logs a spurious "backend stopped".
+#[derive(Resource)]
+#[allow(dead_code)]
+struct NowPlayingTxKeepAlive(crossbeam_channel::Sender<NowPlayingMsg>);
+
+/// A fixed track for offline rendering (`--input`): metadata and embedded cover
+/// art read from the audio file's tags, served once instead of polling the OS
+/// media session.
+#[derive(Clone, Default)]
+pub struct OfflineTrack {
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    /// Encoded image bytes (e.g. an ID3 APIC frame), decoded off-thread like
+    /// the live backends' art.
+    pub art: Option<Vec<u8>>,
+}
+
+/// Polls the platform media session and serves now-playing + album art — or,
+/// with [`offline`](Self::offline) set, serves a fixed track's tags instead.
+#[derive(Default)]
+pub struct NowPlayingPlugin {
+    pub offline: Option<OfflineTrack>,
+}
 
 impl Plugin for NowPlayingPlugin {
     fn build(&self, app: &mut App) {
@@ -91,6 +115,28 @@ impl Plugin for NowPlayingPlugin {
             .init_resource::<AlbumArt>()
             .insert_resource(NowPlayingRx(rx))
             .add_systems(Update, apply_now_playing_updates);
+
+        if let Some(track) = &self.offline {
+            app.insert_resource(NowPlayingTxKeepAlive(tx.clone()));
+            let track = track.clone();
+            // Art decode + palette extraction can take tens of ms on a big
+            // cover; do it off-thread like the live backends so startup (and
+            // the first rendered frames) never wait on it.
+            thread::Builder::new()
+                .name("bava-now-playing".into())
+                .spawn(move || {
+                    let _ = tx.send(NowPlayingMsg::Track(NowPlaying {
+                        title: track.title,
+                        artist: track.artist,
+                        album: track.album,
+                        art_url: None,
+                    }));
+                    let art = track.art.as_deref().and_then(decode_art_bytes);
+                    let _ = tx.send(NowPlayingMsg::Art(art));
+                })
+                .expect("failed to spawn now-playing thread");
+            return;
+        }
 
         thread::Builder::new()
             .name("bava-now-playing".into())

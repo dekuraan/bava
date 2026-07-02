@@ -86,6 +86,36 @@ pub struct Cli {
     /// Print the resolved configuration and exit.
     #[arg(long)]
     pub print_config: bool,
+
+    /// Render a music video offline: decode this audio file (mp3/flac/ogg/wav/
+    /// m4a), drive the visualizer with it, and write the video to --out.
+    #[arg(long, value_name = "AUDIO_FILE", requires = "out")]
+    pub input: Option<PathBuf>,
+
+    /// Output video file for --input (e.g. musicvideo.mp4).
+    #[arg(long, value_name = "VIDEO_FILE", requires = "input")]
+    pub out: Option<PathBuf>,
+
+    /// Record without opening a window (`--headless` / `--headless=false`).
+    /// Defaults to on when run non-interactively (stdout is not a terminal).
+    #[arg(long, num_args = 0..=1, default_missing_value = "true", value_name = "BOOL")]
+    pub headless: Option<bool>,
+
+    /// Video framerate for --input (YouTube-friendly default).
+    #[arg(long, default_value_t = 60)]
+    pub fps: u32,
+
+    /// Video width in pixels for --input.
+    #[arg(long, default_value_t = 1920)]
+    pub width: u32,
+
+    /// Video height in pixels for --input.
+    #[arg(long, default_value_t = 1080)]
+    pub height: u32,
+
+    /// Render only the first SECONDS of the track (for quick tests of --input).
+    #[arg(long, value_name = "SECONDS")]
+    pub duration: Option<f64>,
 }
 
 /// Top-level config file model.

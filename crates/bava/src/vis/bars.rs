@@ -40,6 +40,12 @@ pub(crate) const LEVEL_STEPS: f32 = 14.0;
 /// Smooth segments used to draw a Wave line.
 const WAVE_SEGMENTS: usize = 192;
 
+/// Marks the visualizer's main camera — the one that draws the spectrum (as
+/// opposed to e.g. the record-mode preview camera). Post-process syncing and
+/// cursor picking target this camera specifically.
+#[derive(Component)]
+pub struct VisCamera;
+
 /// Marks a bar mesh and records which Cava bar index it renders.
 #[derive(Component)]
 struct Bar(usize);
@@ -85,6 +91,7 @@ fn setup(
 ) {
     commands.spawn((
         Camera2d,
+        VisCamera,
         Hdr,
         Msaa::Sample8,
         // Map the HDR (amplitude-boosted) colors to the display per [`VisSettings::tonemapping`].
@@ -121,7 +128,7 @@ fn setup(
 /// frame without a restart.
 fn apply_tonemapping(
     vis: Res<VisSettings>,
-    mut cameras: Query<&mut Tonemapping, With<Camera2d>>,
+    mut cameras: Query<&mut Tonemapping, With<VisCamera>>,
 ) {
     if !vis.is_changed() {
         return;
@@ -135,7 +142,7 @@ fn apply_tonemapping(
 }
 
 /// Sync live [`VisSettings::bloom_intensity`] onto the camera's bloom component.
-fn apply_bloom(vis: Res<VisSettings>, mut blooms: Query<&mut Bloom, With<Camera2d>>) {
+fn apply_bloom(vis: Res<VisSettings>, mut blooms: Query<&mut Bloom, With<VisCamera>>) {
     if !vis.is_changed() {
         return;
     }

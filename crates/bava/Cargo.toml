@@ -69,6 +69,16 @@ color-thief = "0.2"
 # Lock-free-ish hand-off from the audio/now-playing threads to Bevy systems.
 crossbeam-channel = "0.5"
 
+# Offline video rendering (`--input song.mp3 --out video.mp4`): GPU→CPU frame
+# readback from a headless render target. We implement its `Encoder` trait over
+# an ffmpeg subprocess (see `record::encoder`) instead of enabling its built-in
+# encoder features, so video encode + audio mux happen in one streaming pass.
+bevy_capture = "0.6"
+
+# Audio-file decoding for offline rendering (pure Rust). The defaults cover
+# flac/ogg/vorbis/wav/pcm; mp3 + m4a/aac are added on top.
+symphonia = { version = "0.5", features = ["mp3", "aac", "isomp4"] }
+
 # Configuration: CLI args (clap) layered over a TOML config file.
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }

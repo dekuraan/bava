@@ -27,6 +27,30 @@ real-time. Now-playing metadata and album art are pulled from the OS media sessi
 - **Config file + profiles** — `~/.config/bava/config.toml` (auto-created on
   first run), with named profile snapshots under `~/.config/bava/profiles/`.
   CLI flags override file values. Load a profile with `--profile NAME`.
+- **Offline music-video rendering** — `--input song.mp3 --out video.mp4`
+  renders the visualization of an audio file to video (no live capture),
+  faster than realtime, with YouTube-ready encoding (H.264 high / yuv420p /
+  AAC 384k / faststart). See below.
+
+## Rendering a music video
+
+```sh
+bava --input song.mp3 --out musicvideo.mp4          # 1080p60 by default
+bava --input song.flac --out out.mp4 --width 3840 --height 2160 --fps 60
+bava --input song.mp3 --out test.mp4 --duration 10  # quick 10-second preview
+```
+
+Requires an `ffmpeg` binary on `PATH` (it does the H.264/AAC encoding; frames
+are streamed to it while they render). Input can be anything symphonia decodes:
+mp3, flac, ogg/vorbis, wav, m4a/aac. The track's tags supply the now-playing
+HUD, and embedded cover art drives the dynamic color palette, same as live.
+
+In a terminal, a preview window shows frames as they render — keyboard and
+mouse still work there, so you can cycle modes with Space or click to spawn
+physics balls *into* the video. When run non-interactively (scripts, CI, SSH)
+bava records **headless** — no window at all; force it either way with
+`--headless` / `--headless=false`. Audio/video stay in exact sync regardless
+of render speed: time is stepped exactly one frame's worth per frame.
 
 ## Build & run
 
