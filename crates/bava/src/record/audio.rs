@@ -65,17 +65,18 @@ pub fn decode(path: &Path) -> Result<DecodedTrack, String> {
         .format(&hint, mss, &fmt_opts, &MetadataOptions::default())
         .map_err(|e| format!("unrecognized audio format in {}: {e}", path.display()))?;
 
-    let mut track_meta = OfflineTrack::default();
+    let mut tags = TagScratch::default();
     // Tags can live in the probe metadata (ID3v2 sits *before* the container,
     // e.g. on mp3) or in the container itself (FLAC/OGG/MP4); read both, letting
     // whichever revision is seen later fill gaps rather than overwrite.
     if let Some(rev) = probed.metadata.get().as_ref().and_then(|m| m.current()) {
-        merge_metadata(&mut track_meta, rev);
+        merge_metadata(&mut tags, rev);
     }
     let mut format = probed.format;
     if let Some(rev) = format.metadata().current() {
-        merge_metadata(&mut track_meta, rev);
+        merge_metadata(&mut tags, rev);
     }
+    let track_meta = tags.into_track();
 
     let track = format
         .tracks()
@@ -83,6 +84,9 @@ pub fn decode(path: &Path) -> Result<DecodedTrack, String> {
         .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
         .ok_or_else(|| format!("{}: no decodable audio track", path.display()))?;
     let track_id = track.id;
+    // Known for most formats (from headers / the LAME tag); lets the sample
+    // buffer allocate once instead of doubling its way through hundreds of MB.
+    let n_frames_hint = track.codec_params.n_frames;
 
     let mut decoder = symphonia::default::get_codecs()
         .make(&track.codec_params, &DecoderOptions::default())
@@ -124,6 +128,9 @@ pub fn decode(path: &Path) -> Result<DecodedTrack, String> {
         if rate == 0 {
             rate = spec.rate;
             src_channels = spec.channels.count();
+            if let Some(n) = n_frames_hint {
+                samples.reserve_exact((n as usize).saturating_mul(src_channels));
+            }
         }
 
         let buf = sample_buf.get_or_insert_with(|| {
@@ -137,12 +144,18 @@ pub fn decode(path: &Path) -> Result<DecodedTrack, String> {
         return Err(format!("{}: no audio decoded", path.display()));
     }
 
-    // cavacore handles 1 or 2 channels; fold anything wider down to stereo by
-    // keeping the first two channels (front L/R in every common layout).
+    // cavacore handles 1 or 2 channels; fold anything wider down to stereo.
+    // The first two channels are front L/R in every common layout; the rest
+    // (center — where 5.1 mixes put lead vocals — LFE, surrounds) are mixed
+    // into both sides at -3 dB so the analysis hears everything the muxed
+    // full-mix audio track carries. Absolute scale doesn't matter (autosens).
     let channels = if src_channels > 2 {
         samples = samples
             .chunks_exact(src_channels)
-            .flat_map(|frame| [frame[0], frame[1]])
+            .flat_map(|frame| {
+                let rest: f64 = frame[2..].iter().sum::<f64>() * std::f64::consts::FRAC_1_SQRT_2;
+                [frame[0] + rest, frame[1] + rest]
+            })
             .collect();
         2
     } else {
@@ -157,9 +170,34 @@ pub fn decode(path: &Path) -> Result<DecodedTrack, String> {
     })
 }
 
+/// Tag fields gathered across metadata revisions. Artist and album-artist are
+/// kept apart until the end: tag order within a file is arbitrary, and folding
+/// them into one first-wins field would show "Various Artists" (the album
+/// artist) on compilation tracks whenever TPE2 precedes TPE1.
+#[derive(Default)]
+struct TagScratch {
+    title: Option<String>,
+    artist: Option<String>,
+    album_artist: Option<String>,
+    album: Option<String>,
+    art: Option<Vec<u8>>,
+}
+
+impl TagScratch {
+    /// The performing artist wins; the album artist is only a fallback.
+    fn into_track(self) -> OfflineTrack {
+        OfflineTrack {
+            title: self.title,
+            artist: self.artist.or(self.album_artist),
+            album: self.album,
+            art: self.art,
+        }
+    }
+}
+
 /// Fold one metadata revision into `out`, filling only missing fields (called
 /// probe-metadata first, then container metadata).
-fn merge_metadata(out: &mut OfflineTrack, rev: &MetadataRevision) {
+fn merge_metadata(out: &mut TagScratch, rev: &MetadataRevision) {
     for tag in rev.tags() {
         let value = tag.value.to_string();
         if value.is_empty() {
@@ -167,9 +205,8 @@ fn merge_metadata(out: &mut OfflineTrack, rev: &MetadataRevision) {
         }
         match tag.std_key {
             Some(StandardTagKey::TrackTitle) => out.title.get_or_insert(value),
-            Some(StandardTagKey::Artist | StandardTagKey::AlbumArtist) => {
-                out.artist.get_or_insert(value)
-            }
+            Some(StandardTagKey::Artist) => out.artist.get_or_insert(value),
+            Some(StandardTagKey::AlbumArtist) => out.album_artist.get_or_insert(value),
             Some(StandardTagKey::Album) => out.album.get_or_insert(value),
             _ => continue,
         };

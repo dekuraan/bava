@@ -92,6 +92,11 @@ fn setup(
     commands.spawn((
         Camera2d,
         VisCamera,
+        // Pin bevy_ui (the HUD, the F3 overlay) to *this* camera. Without the
+        // marker, UI resolves to the camera targeting the primary window — in
+        // record mode that's the preview camera (or nothing when headless), so
+        // the HUD would silently vanish from the captured video.
+        bevy::ui::IsDefaultUiCamera,
         Hdr,
         Msaa::Sample8,
         // Map the HDR (amplitude-boosted) colors to the display per [`VisSettings::tonemapping`].

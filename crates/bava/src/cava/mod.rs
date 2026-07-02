@@ -183,6 +183,14 @@ struct CavaState {
     scratch: Vec<f64>,
 }
 
+/// Offline analysis systems (`rebuild_cava` + `feed_cava`), which run in
+/// `PreUpdate` when [`CavaPlugin::offline`] is set. The record driver orders
+/// itself `.before()` this set so its injected samples are analyzed the same
+/// frame, and every `Update` renderer then draws from that fresh [`Cava`] —
+/// a scheduler-ambiguous feed/draw order would make output nondeterministic.
+#[derive(bevy::ecs::schedule::SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct OfflineCavaSet;
+
 /// Pushes decoded samples straight into the audio ring, for offline rendering
 /// (`--input`). Inserted only by [`CavaPlugin`] in offline mode, where there is
 /// no capture thread; the record driver pushes each video frame's worth of
@@ -264,7 +272,10 @@ impl Plugin for CavaPlugin {
             // negotiated-rate reconciliation.
             app.insert_resource(AudioInjector { ring: ring.clone() })
                 .insert_resource(ring)
-                .add_systems(Update, (rebuild_cava, feed_cava).chain());
+                .add_systems(
+                    PreUpdate,
+                    (rebuild_cava, feed_cava).chain().in_set(OfflineCavaSet),
+                );
             return;
         }
 
@@ -409,6 +420,7 @@ fn feed_cava(
     state: Option<NonSendMut<CavaState>>,
     mut cava: ResMut<Cava>,
     settings: Res<CavaSettings>,
+    offline: Option<Res<AudioInjector>>,
     mut dbg: Local<FeedStats>,
     mut stall: Local<StallState>,
 ) {
@@ -441,7 +453,12 @@ fn feed_cava(
         }
     }
 
-    // Stall safety net. The platform backends pad an *idle* device with silence,
+    // Stall safety net — live capture only. Offline (`AudioInjector` present),
+    // audio arrives in *video* time while this timer measures *wall* time, so
+    // on a slow render it would inject spurious silence between real chunks
+    // (nondeterministic output); a recording can't stall anyway.
+    //
+    // Live: the platform backends pad an *idle* device with silence,
     // so a connected-but-quiet source keeps feeding zeros and the bars decay on
     // their own. But a hard failure — PulseAudio server death, a monitor source
     // that vanished, a capture thread backing off on repeated read errors —
@@ -451,7 +468,7 @@ fn feed_cava(
     // instead of holding a stale frame.
     if executed > 0 {
         stall.last_audio = Some(std::time::Instant::now());
-    } else {
+    } else if offline.is_none() {
         let stalled = stall
             .last_audio
             .is_none_or(|t| t.elapsed() >= STALL_DECAY_AFTER);

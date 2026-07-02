@@ -114,27 +114,28 @@ impl Plugin for NowPlayingPlugin {
         app.init_resource::<NowPlaying>()
             .init_resource::<AlbumArt>()
             .insert_resource(NowPlayingRx(rx))
-            .add_systems(Update, apply_now_playing_updates);
+            // PreUpdate, so metadata/art land before any Update system reads
+            // them — in offline rendering that makes the HUD and dynamic
+            // palette appear at a deterministic video frame (the first one).
+            .add_systems(PreUpdate, apply_now_playing_updates);
 
         if let Some(track) = &self.offline {
-            app.insert_resource(NowPlayingTxKeepAlive(tx.clone()));
+            // Offline rendering: decode the cover and queue everything *now*,
+            // synchronously. A background thread (like the live backends use)
+            // would race the render loop — on a fast GPU the first frames of
+            // every run would miss the art at a different, wall-clock-dependent
+            // video timestamp. The tens-of-ms decode happens once, before any
+            // frame renders.
             let track = track.clone();
-            // Art decode + palette extraction can take tens of ms on a big
-            // cover; do it off-thread like the live backends so startup (and
-            // the first rendered frames) never wait on it.
-            thread::Builder::new()
-                .name("bava-now-playing".into())
-                .spawn(move || {
-                    let _ = tx.send(NowPlayingMsg::Track(NowPlaying {
-                        title: track.title,
-                        artist: track.artist,
-                        album: track.album,
-                        art_url: None,
-                    }));
-                    let art = track.art.as_deref().and_then(decode_art_bytes);
-                    let _ = tx.send(NowPlayingMsg::Art(art));
-                })
-                .expect("failed to spawn now-playing thread");
+            let _ = tx.send(NowPlayingMsg::Track(NowPlaying {
+                title: track.title,
+                artist: track.artist,
+                album: track.album,
+                art_url: None,
+            }));
+            let art = track.art.as_deref().and_then(decode_art_bytes);
+            let _ = tx.send(NowPlayingMsg::Art(art));
+            app.insert_resource(NowPlayingTxKeepAlive(tx));
             return;
         }
 

@@ -27,11 +27,11 @@ use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::prelude::*;
 use bevy::render::RenderPlugin;
 use bevy::time::TimeUpdateStrategy;
-use bevy::window::{ExitCondition, PresentMode, WindowResolution};
+use bevy::window::{ExitCondition, PresentMode, WindowCloseRequested, WindowResolution};
 use bevy::winit::WinitPlugin;
 use bevy_capture::{Capture, CaptureBundle, CapturePlugin, RenderTargetHeadless};
 
-use crate::cava::{AudioInjector, CavaPlugin};
+use crate::cava::{AudioInjector, CavaPlugin, OfflineCavaSet};
 use crate::config::{Cli, Config};
 use crate::gui::EditorState;
 use crate::now_playing::NowPlayingPlugin;
@@ -55,6 +55,10 @@ struct Recording {
     height: u32,
     headless: bool,
     out: std::path::PathBuf,
+    /// The source audio file, handed to ffmpeg as its second input.
+    input: std::path::PathBuf,
+    /// Exact output length ffmpeg is told to produce.
+    video_secs: f64,
 }
 
 impl Recording {
@@ -63,10 +67,6 @@ impl Recording {
         (self.total_pcm as u64 * self.fps as u64).div_ceil(self.rate.max(1) as u64)
     }
 }
-
-/// The ffmpeg encoder, parked until the capture components exist.
-#[derive(Resource)]
-struct PendingEncoder(Option<(FfmpegEncoder, std::sync::Arc<EncoderStatus>)>);
 
 /// Progress of the drive loop.
 #[derive(Resource, Default)]
@@ -88,13 +88,12 @@ struct RecordState {
 
 /// Renders the visualization of a decoded track into a video file.
 ///
-/// The track and encoder sit in `Mutex<Option<…>>` only because
-/// [`Plugin::build`] gets `&self` — they're taken exactly once (a long track's
-/// samples are hundreds of MB; cloning them would double peak memory).
+/// The track sits in a `Mutex<Option<…>>` only because [`Plugin::build`] gets
+/// `&self` — it's taken exactly once (a long track's samples are hundreds of
+/// MB; cloning them would double peak memory).
 struct RecordPlugin {
     track: std::sync::Mutex<Option<DecodedTrack>>,
     spec: RecordSpec,
-    encoder: std::sync::Mutex<Option<(FfmpegEncoder, std::sync::Arc<EncoderStatus>)>>,
 }
 
 /// Validated recording parameters.
@@ -107,6 +106,8 @@ struct RecordSpec {
     headless: bool,
     /// PCM frames to render (the whole track, or less under `--duration`).
     total_pcm: usize,
+    input: std::path::PathBuf,
+    video_secs: f64,
 }
 
 impl Plugin for RecordPlugin {
@@ -127,11 +128,22 @@ impl Plugin for RecordPlugin {
             height: self.spec.height,
             headless: self.spec.headless,
             out: self.spec.out.clone(),
+            input: self.spec.input.clone(),
+            video_secs: self.spec.video_secs,
         })
-        .insert_resource(PendingEncoder(self.encoder.lock().unwrap().take()))
         .init_resource::<RecordState>()
         .add_systems(PostStartup, attach_capture)
-        .add_systems(PreUpdate, drive_recording);
+        // Feed before analysis (`OfflineCavaSet`, PreUpdate) so this frame's
+        // samples are in this frame's bars, deterministically.
+        .add_systems(PreUpdate, drive_recording.before(OfflineCavaSet));
+
+        if !self.spec.headless {
+            // Closing the preview window mid-recording is an *abort*, not a
+            // success — without this, WindowPlugin's default exit-on-close
+            // would return exit code 0 with a truncated video. (The window
+            // plugin is configured DontExit / no-close in `run`.)
+            app.add_systems(Update, abort_on_window_close);
+        }
 
         if self.spec.headless {
             // No winit, so no OS window — but the vis layout, HUD, and physics
@@ -194,9 +206,10 @@ fn attach_capture(
 fn drive_recording(
     mut state: ResMut<RecordState>,
     rec: Res<Recording>,
-    mut pending: ResMut<PendingEncoder>,
     injector: Res<AudioInjector>,
     mut captures: Query<&mut Capture>,
+    windows: Query<&Window>,
+    mut size_warned: Local<bool>,
     mut exit: MessageWriter<AppExit>,
 ) {
     let Ok(mut capture) = captures.single_mut() else {
@@ -205,6 +218,26 @@ fn drive_recording(
     if !state.warmed_up {
         state.warmed_up = true;
         return;
+    }
+
+    // The vis layout follows the `Window` entity, but the captured image is
+    // fixed at the recording resolution. `resizable: false` is only a hint —
+    // a tiling compositor can force the preview window to another size, which
+    // would skew everything in the output. Warn loudly; we can't prevent it.
+    if !rec.headless
+        && !*size_warned
+        && let Some(window) = windows.iter().next()
+    {
+        let (w, h) = (window.width().round() as u32, window.height().round() as u32);
+        if (w, h) != (rec.width, rec.height) {
+            warn!(
+                "bava: preview window is {w}x{h} but recording {}x{} — the \
+                 compositor overrode the window size; the video's layout will \
+                 be off. Record with --headless to avoid this.",
+                rec.width, rec.height,
+            );
+            *size_warned = true;
+        }
     }
 
     // ffmpeg dying mid-render (disk full, bad output path, …) is fatal now —
@@ -254,10 +287,24 @@ fn drive_recording(
     }
 
     if !state.capturing {
-        let Some((enc, status)) = pending.0.take() else {
-            error!("bava: recording encoder missing");
-            exit.write(AppExit::error());
-            return;
+        // Spawn ffmpeg only now, with the app fully up and the first frame
+        // about to render — spawning earlier would `-y`-truncate an existing
+        // output file that a startup failure (GPU init, panic) then never
+        // replaces.
+        let (enc, status) = match FfmpegEncoder::spawn(
+            &rec.out,
+            &rec.input,
+            rec.width,
+            rec.height,
+            rec.fps,
+            rec.video_secs,
+        ) {
+            Ok(pair) => pair,
+            Err(e) => {
+                error!("bava: could not start ffmpeg: {e}");
+                exit.write(AppExit::error());
+                return;
+            }
         };
         capture.start(enc);
         state.status = Some(status);
@@ -298,6 +345,24 @@ fn drive_recording(
             );
         }
         state.last_log = Some(now);
+    }
+}
+
+/// Closing the preview window aborts the recording with a *failure* exit —
+/// silently returning success with a truncated video would let scripts treat
+/// the partial file as the finished deliverable. (The already-encoded frames
+/// still finalize into a playable partial mp4 on teardown.)
+fn abort_on_window_close(
+    mut closed: MessageReader<WindowCloseRequested>,
+    rec: Res<Recording>,
+    mut exit: MessageWriter<AppExit>,
+) {
+    if closed.read().next().is_some() {
+        error!(
+            "bava: preview window closed — recording aborted; {} is incomplete",
+            rec.out.display()
+        );
+        exit.write(AppExit::error());
     }
 }
 
@@ -365,9 +430,6 @@ pub fn run(cli: &Cli, config: &Config) -> Result<(), String> {
             .unwrap_or_default(),
     );
 
-    let (enc, status) = FfmpegEncoder::spawn(&out, &input, width, height, fps, video_secs)
-        .map_err(|e| format!("could not start ffmpeg: {e}"))?;
-
     // The cavacore plan must match the decoded stream exactly; capture-thread
     // options are meaningless offline.
     let mut settings = config.to_cava_settings(cli.debug);
@@ -384,6 +446,8 @@ pub fn run(cli: &Cli, config: &Config) -> Result<(), String> {
         height,
         headless,
         total_pcm,
+        input,
+        video_secs,
     };
 
     let mut app = App::new();
@@ -417,6 +481,10 @@ pub fn run(cli: &Cli, config: &Config) -> Result<(), String> {
                 present_mode: PresentMode::AutoNoVsync,
                 ..default()
             }),
+            // A window close must not be a silent success-exit with a
+            // truncated video: `abort_on_window_close` handles it as an error.
+            exit_condition: ExitCondition::DontExit,
+            close_when_requested: false,
             ..default()
         }));
     }
@@ -443,7 +511,6 @@ pub fn run(cli: &Cli, config: &Config) -> Result<(), String> {
             RecordPlugin {
                 track: std::sync::Mutex::new(Some(track)),
                 spec,
-                encoder: std::sync::Mutex::new(Some((enc, status))),
             },
         ));
 
