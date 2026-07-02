@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! WASAPI loopback capture backend (Windows).
 //!
 //! Loops back the default render endpoint — whatever the system is playing — via

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! The cavacore subsystem.
 //!
 //! A background thread captures audio into a ring buffer; a Bevy system drains
@@ -183,8 +183,44 @@ struct CavaState {
     scratch: Vec<f64>,
 }
 
+/// Offline analysis systems (`rebuild_cava` + `feed_cava`), which run in
+/// `PreUpdate` when [`CavaPlugin::offline`] is set. The record driver orders
+/// itself `.before()` this set so its injected samples are analyzed the same
+/// frame, and every `Update` renderer then draws from that fresh [`Cava`] —
+/// a scheduler-ambiguous feed/draw order would make output nondeterministic.
+#[derive(bevy::ecs::schedule::SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct OfflineCavaSet;
+
+/// Pushes decoded samples straight into the audio ring, for offline rendering
+/// (`--input`). Inserted only by [`CavaPlugin`] in offline mode, where there is
+/// no capture thread; the record driver pushes each video frame's worth of
+/// samples before [`feed_cava`] drains them.
+#[derive(Resource, Clone)]
+pub struct AudioInjector {
+    ring: AudioRing,
+}
+
+impl AudioInjector {
+    /// Append interleaved samples for [`feed_cava`] to consume this frame.
+    /// Unlike the capture thread, this never evicts a backlog — the consumer
+    /// drains every frame and dropping samples would desync audio and video.
+    pub fn push(&self, samples: &[f64]) {
+        if let Ok(mut q) = self.ring.buf.lock() {
+            q.extend(samples.iter().copied());
+        }
+    }
+}
+
 /// Drives audio capture → cavacore (at render rate) → the [`Cava`] resource.
-pub struct CavaPlugin;
+///
+/// With [`offline`](Self::offline) set (`--input` video rendering), no capture
+/// thread is spawned and no rate reconciliation runs: the plan is built exactly
+/// at [`CavaSettings`]'s rate/channels (the decoded file's format) and samples
+/// arrive via [`AudioInjector`].
+#[derive(Default)]
+pub struct CavaPlugin {
+    pub offline: bool,
+}
 
 impl Plugin for CavaPlugin {
     fn build(&self, app: &mut App) {
@@ -227,8 +263,23 @@ impl Plugin for CavaPlugin {
             Err(e) => error!("bava: cavacore init failed: {e}; visualizer will be idle"),
         }
 
-        // Spawn the audio reader thread feeding the ring.
         let ring = AudioRing::new(settings.rate, settings.channels);
+
+        if self.offline {
+            // Offline rendering: samples are injected per video frame by the
+            // record driver, and the plan's rate/channels are already exact
+            // (they came from the decoded file), so no capture thread and no
+            // negotiated-rate reconciliation.
+            app.insert_resource(AudioInjector { ring: ring.clone() })
+                .insert_resource(ring)
+                .add_systems(
+                    PreUpdate,
+                    (rebuild_cava, feed_cava).chain().in_set(OfflineCavaSet),
+                );
+            return;
+        }
+
+        // Spawn the audio reader thread feeding the ring.
         let reader_ring = ring.clone();
         let reader_settings = settings.clone();
         thread::Builder::new()
@@ -369,6 +420,7 @@ fn feed_cava(
     state: Option<NonSendMut<CavaState>>,
     mut cava: ResMut<Cava>,
     settings: Res<CavaSettings>,
+    offline: Option<Res<AudioInjector>>,
     mut dbg: Local<FeedStats>,
     mut stall: Local<StallState>,
 ) {
@@ -401,7 +453,12 @@ fn feed_cava(
         }
     }
 
-    // Stall safety net. The platform backends pad an *idle* device with silence,
+    // Stall safety net — live capture only. Offline (`AudioInjector` present),
+    // audio arrives in *video* time while this timer measures *wall* time, so
+    // on a slow render it would inject spurious silence between real chunks
+    // (nondeterministic output); a recording can't stall anyway.
+    //
+    // Live: the platform backends pad an *idle* device with silence,
     // so a connected-but-quiet source keeps feeding zeros and the bars decay on
     // their own. But a hard failure — PulseAudio server death, a monitor source
     // that vanished, a capture thread backing off on repeated read errors —
@@ -411,7 +468,7 @@ fn feed_cava(
     // instead of holding a stale frame.
     if executed > 0 {
         stall.last_audio = Some(std::time::Instant::now());
-    } else {
+    } else if offline.is_none() {
         let stalled = stall
             .last_audio
             .is_none_or(|t| t.elapsed() >= STALL_DECAY_AFTER);

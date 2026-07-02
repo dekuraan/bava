@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Windows now-playing backend: the System Media Transport Controls.
 //!
 //! Polls the current `GlobalSystemMediaTransportControlsSession` — the same

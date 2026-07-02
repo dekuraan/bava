@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Physics playground layered over the visualizers (avian2d).
 //!
 //! The collision geometry **tracks the rendered meshes** rather than a single
@@ -474,7 +474,7 @@ fn spawn_ball_on_click(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
     windows: Query<&Window>,
-    cameras: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
+    cameras: Query<(&Camera, &GlobalTransform), With<crate::vis::bars::VisCamera>>,
     time: Res<Time>,
     mut cooldown: Local<f32>,
 ) {

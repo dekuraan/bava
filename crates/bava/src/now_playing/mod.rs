@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Now-playing + album-art integration.
 //!
 //! A background thread polls the active media session — MPRIS over D-Bus on
@@ -81,8 +81,32 @@ enum NowPlayingMsg {
 #[derive(Resource)]
 struct NowPlayingRx(Receiver<NowPlayingMsg>);
 
-/// Polls the platform media session and serves now-playing + album art.
-pub struct NowPlayingPlugin;
+/// Keeps a sender alive for the app's lifetime in offline mode, where the
+/// one-shot metadata thread exits immediately — without this the drained
+/// channel reads as *disconnected* and logs a spurious "backend stopped".
+#[derive(Resource)]
+#[allow(dead_code)]
+struct NowPlayingTxKeepAlive(crossbeam_channel::Sender<NowPlayingMsg>);
+
+/// A fixed track for offline rendering (`--input`): metadata and embedded cover
+/// art read from the audio file's tags, served once instead of polling the OS
+/// media session.
+#[derive(Clone, Default)]
+pub struct OfflineTrack {
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    /// Encoded image bytes (e.g. an ID3 APIC frame), decoded off-thread like
+    /// the live backends' art.
+    pub art: Option<Vec<u8>>,
+}
+
+/// Polls the platform media session and serves now-playing + album art — or,
+/// with [`offline`](Self::offline) set, serves a fixed track's tags instead.
+#[derive(Default)]
+pub struct NowPlayingPlugin {
+    pub offline: Option<OfflineTrack>,
+}
 
 impl Plugin for NowPlayingPlugin {
     fn build(&self, app: &mut App) {
@@ -90,7 +114,30 @@ impl Plugin for NowPlayingPlugin {
         app.init_resource::<NowPlaying>()
             .init_resource::<AlbumArt>()
             .insert_resource(NowPlayingRx(rx))
-            .add_systems(Update, apply_now_playing_updates);
+            // PreUpdate, so metadata/art land before any Update system reads
+            // them — in offline rendering that makes the HUD and dynamic
+            // palette appear at a deterministic video frame (the first one).
+            .add_systems(PreUpdate, apply_now_playing_updates);
+
+        if let Some(track) = &self.offline {
+            // Offline rendering: decode the cover and queue everything *now*,
+            // synchronously. A background thread (like the live backends use)
+            // would race the render loop — on a fast GPU the first frames of
+            // every run would miss the art at a different, wall-clock-dependent
+            // video timestamp. The tens-of-ms decode happens once, before any
+            // frame renders.
+            let track = track.clone();
+            let _ = tx.send(NowPlayingMsg::Track(NowPlaying {
+                title: track.title,
+                artist: track.artist,
+                album: track.album,
+                art_url: None,
+            }));
+            let art = track.art.as_deref().and_then(decode_art_bytes);
+            let _ = tx.send(NowPlayingMsg::Art(art));
+            app.insert_resource(NowPlayingTxKeepAlive(tx));
+            return;
+        }
 
         thread::Builder::new()
             .name("bava-now-playing".into())

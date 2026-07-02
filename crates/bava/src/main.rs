@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! bava — a cross-platform music visualizer driven by cavacore.
 //!
 //! Pipeline: loopback audio capture (PulseAudio / WASAPI / Core Audio) →
@@ -12,6 +12,7 @@ mod cava;
 mod config;
 mod gui;
 mod now_playing;
+mod record;
 mod vis;
 
 use bevy::prelude::*;
@@ -51,6 +52,16 @@ fn main() {
         return;
     }
 
+    // `--input song.mp3 --out video.mp4`: render a music video offline instead
+    // of visualizing live audio.
+    if cli.input.is_some() {
+        if let Err(e) = record::run(&cli, &config) {
+            eprintln!("bava: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     let settings = config.to_cava_settings(cli.debug);
     let vis_settings = config.to_vis_settings();
     let physics_settings = config.to_physics_settings();
@@ -76,7 +87,12 @@ fn main() {
     // Where the editor saves/reloads, and whether it starts open.
     .insert_resource(ConfigHandle { path })
     .insert_resource(EditorState::new(cli.gui, config.gui_toggle_key()))
-    .add_plugins((CavaPlugin, NowPlayingPlugin, VisPlugin, GuiPlugin));
+    .add_plugins((
+        CavaPlugin::default(),
+        NowPlayingPlugin::default(),
+        VisPlugin,
+        GuiPlugin,
+    ));
 
     // `--debug` also logs FPS/frame time ~1×/s. The vis plugin already adds
     // `FrameTimeDiagnosticsPlugin` (for the F3 overlay), so adding it again here

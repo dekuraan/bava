@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Audio capture backends.
 //!
 //! Shared utilities used by WASAPI and Core Audio backends:

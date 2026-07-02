@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Native PipeWire capture backend (Linux).
 //!
 //! Captures the default sink's monitor directly from the PipeWire graph rather

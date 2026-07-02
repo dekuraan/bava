@@ -1,8 +1,8 @@
 bava
 Copyright (C) the bava contributors
 
-This product is licensed under the GNU General Public License v3.0 or later
-(GPL-3.0-or-later); see LICENSE.
+This product is dual-licensed under the MIT License and the Apache License,
+Version 2.0, at your option; see LICENSE-MIT and LICENSE-APACHE.
 
 ================================================================================
 
@@ -37,4 +37,4 @@ and is licensed under the MIT License:
 
 `cavacore-rs` reimplements cavacore's `cava_init`/`cava_execute` algorithm in
 safe Rust (no C code, no FFI, no code copied verbatim) and is distributed as
-part of bava under GPL-3.0-or-later, as permitted by the MIT license above.
+part of bava under MIT OR Apache-2.0, consistent with the MIT license above.
