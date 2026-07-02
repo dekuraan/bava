@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Functional / end-to-end tests: verify cavacore actually analyzes audio the
 //! way a visualizer needs — silence is quiet, tones land in the right frequency
 //! band, stereo channels stay separated, and a realistic streamed signal stays

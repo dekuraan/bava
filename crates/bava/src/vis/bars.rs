@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Linear ([`VisFamily::Box`]) visualizers.
 //!
 //! Renders every box-family [`DrawingMode`] as a *distinct* shape, switching on

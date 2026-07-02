@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Visualizers and their configuration.
 //!
 //! Each visualizer reads the shared [`Cava`](crate::cava::Cava) resource, so all

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! macOS now-playing backend: the MediaRemote adapter.
 //!
 //! macOS has no public system-wide now-playing API, and as of macOS 15.4 the

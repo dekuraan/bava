@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! On-screen HUD: a dimmed album-art backdrop, user-configured background /
 //! foreground image overlays, and a centered now-playing label.
 

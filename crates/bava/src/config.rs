@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Configuration: a TOML file at `~/.config/bava/config.toml`, with CLI flags
 //! (via clap) layered on top. Precedence is **CLI > config file > defaults**.
 //!

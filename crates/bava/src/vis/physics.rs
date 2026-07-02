@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Physics playground layered over the visualizers (avian2d).
 //!
 //! The collision geometry **tracks the rendered meshes** rather than a single

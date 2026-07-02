@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Linux now-playing backend: the active MPRIS player over D-Bus.
 //!
 //! Polls whichever MPRIS player is currently active (spotifyd, a browser, …) and

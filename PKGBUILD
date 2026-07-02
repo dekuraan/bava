@@ -5,7 +5,7 @@ pkgrel=1
 pkgdesc="Bevy music visualizer driven by cavacore, MPRIS, and PulseAudio"
 arch=('x86_64')
 url="https://github.com/dekuraan/bava"
-license=('GPL-3.0-or-later')
+license=('MIT' 'Apache-2.0')
 depends=(
     'libpulse'
     'dbus'
@@ -58,5 +58,6 @@ check() {
 package() {
     cd "$srcdir/bava"
     install -Dm755 "target/release/bava" "$pkgdir/usr/bin/bava"
-    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+    install -Dm644 LICENSE-MIT "$pkgdir/usr/share/licenses/$pkgname/LICENSE-MIT"
+    install -Dm644 LICENSE-APACHE "$pkgdir/usr/share/licenses/$pkgname/LICENSE-APACHE"
 }

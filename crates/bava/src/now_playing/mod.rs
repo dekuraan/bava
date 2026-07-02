@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Now-playing + album-art integration.
 //!
 //! A background thread polls the active media session — MPRIS over D-Bus on

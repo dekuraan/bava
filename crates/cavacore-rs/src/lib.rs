@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! A pure-Rust port of [cavacore], the core audio-visualization engine of CAVA.
 //!
 //! [`CavaPlan`] turns interleaved PCM audio into a small set of smoothed,

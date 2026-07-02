@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! bava — a cross-platform music visualizer driven by cavacore.
 //!
 //! Pipeline: loopback audio capture (PulseAudio / WASAPI / Core Audio) →

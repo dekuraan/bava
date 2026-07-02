@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Core Audio process-tap capture backend (macOS 14.2+).
 //!
 //! Captures the system output mix with **no virtual device and no extra install**:

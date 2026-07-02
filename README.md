@@ -111,8 +111,9 @@ examples.
 
 ## License
 
-bava is licensed under the **GNU General Public License v3.0 or later**
-(GPL-3.0-or-later); see [`LICENSE`](LICENSE).
+bava is dual-licensed under the **MIT License** ([`LICENSE-MIT`](LICENSE-MIT))
+and the **Apache License, Version 2.0** ([`LICENSE-APACHE`](LICENSE-APACHE)),
+at your option.
 
 The `cavacore-rs` crate is a pure-Rust reimplementation of the analysis engine
 from [karlstav/cava](https://github.com/karlstav/cava) (MIT), built on the
