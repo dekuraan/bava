@@ -11,11 +11,7 @@ git_release_enable = false # release.yml creates the GitHub Release (with binari
 name = "bava"
 git_tag_name = "v{{ version }}"
 
-# Internal libs: versioned in-tree but not released on their own tags.
+# Internal lib: versioned in-tree but not released on its own tag.
 [[package]]
 name = "cavacore-rs"
-release = false
-
-[[package]]
-name = "cavacore-sys"
 release = false

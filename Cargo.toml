@@ -1,7 +1,6 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/cavacore-sys",
     "crates/cavacore-rs",
     "crates/bava",
 ]
@@ -12,7 +11,6 @@ license = "GPL-3.0-or-later"
 repository = "https://github.com/dekuraan/bava"
 
 [workspace.dependencies]
-cavacore-sys = { path = "crates/cavacore-sys" }
 cavacore-rs = { path = "crates/cavacore-rs" }
 
 # Compile dependencies with optimizations even in dev builds; Bevy is unusably

@@ -32,7 +32,6 @@ jobs:
             clang \
             libclang-dev \
             libasound2-dev \
-            libfftw3-dev \
             libdbus-1-dev \
             libwayland-dev \
             libxkbcommon-dev \
@@ -82,26 +81,6 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Install fftw3 (Windows)
-        shell: pwsh
-        run: |
-          Invoke-WebRequest -Uri "https://fftw.org/pub/fftw/fftw-3.3.5-dll64.zip" -OutFile fftw.zip
-          Expand-Archive fftw.zip -DestinationPath fftw_extract
-          # Locate the directory holding fftw3.h (handles any zip nesting)
-          $fftwDir = (Get-ChildItem fftw_extract -Recurse -Filter "fftw3.h" |
-                      Select-Object -First 1).DirectoryName
-          # The zip ships .def files but no .lib; generate the MSVC import library.
-          $vsPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
-              -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
-              -property installationPath
-          $libExe = (Get-ChildItem "$vsPath\VC\Tools\MSVC" -Recurse -Filter lib.exe |
-              Where-Object { $_.FullName -match 'Hostx64\\x64' } |
-              Select-Object -First 1).FullName
-          $defFile = (Get-ChildItem $fftwDir -Filter "*fftw3-3.def" | Select-Object -First 1).FullName
-          & $libExe /machine:x64 /def:$defFile /out:"$fftwDir\fftw3.lib"
-          echo "LIB=$fftwDir;$env:LIB" >> $env:GITHUB_ENV
-          echo "INCLUDE=$fftwDir;$env:INCLUDE" >> $env:GITHUB_ENV
-
       - name: Build release
         run: cargo build --release -p bava
 
@@ -124,9 +103,6 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Install fftw3
-        run: brew install fftw
-
       - name: Build release
         run: cargo build --release -p bava --target aarch64-apple-darwin
 
@@ -142,9 +118,8 @@ jobs:
   # ── macOS x86_64 (Intel) ──────────────────────────────────────────────────
   # GitHub retired the free Intel `macos-13` runner (jobs sit queued until the
   # 24h timeout), so build the x86_64 binary by *cross-compiling* on the arm64
-  # `macos-latest` runner. The only native dep is FFTW; we install an x86_64
-  # build of it via an x86_64 Homebrew running under Rosetta, and point
-  # pkg-config (used by cavacore-sys' build.rs) at it.
+  # `macos-latest` runner. bava is pure Rust now (no FFTW/C), so the cross build
+  # needs nothing beyond the x86_64 target — the Apple SDK ships both arches.
   build-macos-x86:
     name: Build (macOS x86_64)
     runs-on: macos-latest
@@ -157,24 +132,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Install Rosetta
-        run: softwareupdate --install-rosetta --agree-to-license
-
-      - name: Install x86_64 FFTW via Rosetta Homebrew
-        run: |
-          # macos-latest is arm64 and ships only the /opt/homebrew (arm64) brew.
-          # Install a separate x86_64 brew under /usr/local (run via Rosetta) so
-          # we get an x86_64 libfftw3 to link the cross-compiled binary against.
-          if [ ! -x /usr/local/bin/brew ]; then
-            arch -x86_64 /bin/bash -c \
-              "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" </dev/null
-          fi
-          arch -x86_64 /usr/local/bin/brew install fftw
-
       - name: Build release (cross-compile to x86_64)
-        env:
-          PKG_CONFIG_ALLOW_CROSS: "1"
-          PKG_CONFIG_PATH: /usr/local/opt/fftw/lib/pkgconfig
         run: cargo build --release -p bava --target x86_64-apple-darwin
 
       - name: Strip binary

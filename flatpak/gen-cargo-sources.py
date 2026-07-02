@@ -40,7 +40,7 @@ def main() -> int:
     skipped: list[str] = []
     for pkg in lock.get("package", []):
         source = pkg.get("source")
-        # Local path crates (cavacore-sys/-rs, bava) have no source and are
+        # Local path crates (cavacore-rs, bava) have no source and are
         # built straight from the repo checkout — skip them silently.
         if source is None:
             continue

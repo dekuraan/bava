@@ -35,41 +35,14 @@ finish-args:
   - --talk-name=org.mpris.MediaPlayer2.*
 
 modules:
-  # FFTW (double precision) — cavacore links libfftw3 + libm. Not present in
-  # the Freedesktop runtime, so build it here. Only the double-precision
-  # library is needed; skip the single/long-double variants and the docs.
-  - name: fftw3
-    buildsystem: autotools
-    config-opts:
-      - --enable-shared
-      - --disable-static
-      - --disable-fortran
-      - --disable-doc
-    sources:
-      - type: archive
-        url: https://www.fftw.org/fftw-3.3.10.tar.gz
-        sha256: 56c932549852cddcfafdab3820b0200c7742675be92179e59e6215b340e26467
-    cleanup:
-      - /bin
-      - /include
-      - /lib/pkgconfig
-      - /lib/cmake
-      - /share
-
+  # bava is pure Rust (cavacore is reimplemented in the `cavacore-rs` crate on
+  # top of `realfft`), so there are no C/system libraries to build here.
   - name: bava
     buildsystem: simple
     build-options:
       append-path: /usr/lib/sdk/rust-stable/bin
       env:
         CARGO_HOME: /run/build/bava/cargo
-        # cavacore-sys' build.rs compiles vendored cavacore.c, which does
-        # `#include <fftw3.h>` from the *system* path — but the fftw3 module
-        # installs the header under /app/include, which is not on the C
-        # compiler's default search path. cc/gcc honour CPATH; LIBRARY_PATH
-        # mirrors it for the link step. (pkg-config supplies these natively,
-        # but build.rs only consults it for --libs, not --cflags.)
-        CPATH: /app/include
-        LIBRARY_PATH: /app/lib
     build-commands:
       - cargo build --offline --release -p bava
       - install -Dm755 target/release/bava /app/bin/bava

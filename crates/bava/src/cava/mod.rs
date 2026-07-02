@@ -170,8 +170,9 @@ impl AudioRing {
     }
 }
 
-/// cavacore state. Held as a **NonSend** resource because [`CavaPlan`] is `Send`
-/// but not `Sync`; it is executed exclusively on the main thread.
+/// cavacore state. Held as a **NonSend** resource: cava runs per-frame on the
+/// Bevy main thread, so the plan lives and executes there exclusively (there's
+/// no need to make it a `Send + Sync` resource just to keep it on one thread).
 struct CavaState {
     plan: CavaPlan,
     /// Captured samples awaiting a full chunk. cavacore's framerate estimate and

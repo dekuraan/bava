@@ -30,14 +30,14 @@ real-time. Now-playing metadata and album art are pulled from the OS media sessi
 
 ## Build & run
 
-Requires [Rust stable](https://rustup.rs/) **1.95 or newer** (Bevy 0.19) and
-fftw3 on all platforms.
+Requires [Rust stable](https://rustup.rs/) **1.95 or newer** (Bevy 0.19). bava is
+pure Rust — no C toolchain or FFTW is needed on any platform.
 
 ### Linux
 
 ```sh
 # Arch/CachyOS
-sudo pacman -S fftw pipewire libpulse dbus libxkbcommon wayland libx11 vulkan-icd-loader
+sudo pacman -S pipewire libpulse dbus libxkbcommon wayland libx11 vulkan-icd-loader
 
 cargo run -p bava
 # If the shell lacks a Wayland socket: WAYLAND_DISPLAY=wayland-1 cargo run -p bava
@@ -46,9 +46,6 @@ cargo run -p bava
 
 ### Windows
 
-Install [fftw3 pre-built DLLs](https://fftw.org/install/windows.html) and put
-them on `PATH`/`LIB`, then:
-
 ```sh
 cargo build --release -p bava
 ```
@@ -56,8 +53,6 @@ cargo build --release -p bava
 ### macOS (14.2+)
 
 ```sh
-brew install fftw
-
 # The mediaremote-adapter is required for now-playing metadata. Install it and
 # set BAVA_MEDIAREMOTE_ADAPTER_DIR to its directory before running:
 # https://github.com/ungive/mediaremote-adapter
@@ -79,8 +74,7 @@ cargo test -p bava --bin bava    # app unit/system/physics tests (headless)
 
 ```
 crates/
-  cavacore-sys/        # FFI + build.rs compiling vendored cavacore.c (links fftw3)
-  cavacore-rs/         # safe CavaConfig → CavaPlan wrapper; rigorous test suite
+  cavacore-rs/         # pure-Rust cavacore port (realfft); CavaConfig → CavaPlan; rigorous test suite
   bava/
     src/cava/          # CavaPlugin, Cava resource, capture thread, feed_cava system
     src/cava/capture/  # AudioCapture trait; backends: pipewire.rs / pulse.rs / wasapi.rs / coreaudio.rs
@@ -118,9 +112,9 @@ examples.
 ## License
 
 bava is licensed under the **GNU General Public License v3.0 or later**
-(GPL-3.0-or-later); see [`LICENSE`](LICENSE). The project links FFTW3
-(GPL-2.0-or-later) via cavacore, so distributed binaries are a combined work
-conveyed under the GPL.
+(GPL-3.0-or-later); see [`LICENSE`](LICENSE).
 
-Vendors `cavacore.c` / `cavacore.h` from [karlstav/cava](https://github.com/karlstav/cava)
-(MIT, GPL-compatible; terms preserved in `crates/cavacore-sys/vendor/cava/LICENSE`).
+The `cavacore-rs` crate is a pure-Rust reimplementation of the analysis engine
+from [karlstav/cava](https://github.com/karlstav/cava) (MIT), built on the
+[`realfft`](https://crates.io/crates/realfft) FFT crate — no C or FFTW is
+linked.
