@@ -77,7 +77,7 @@ bevy_capture = "0.6"
 
 # Audio-file decoding for offline rendering (pure Rust). The defaults cover
 # flac/ogg/vorbis/wav/pcm; mp3 + m4a/aac are added on top.
-symphonia = { version = "0.5", features = ["mp3", "aac", "isomp4"] }
+symphonia = { version = "0.6", features = ["mp3", "aac", "isomp4"] }
 
 # Configuration: CLI args (clap) layered over a TOML config file.
 clap = { version = "4", features = ["derive"] }
