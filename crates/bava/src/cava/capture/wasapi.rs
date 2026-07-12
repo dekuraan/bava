@@ -205,7 +205,17 @@ impl WasapiCapture {
                 .map_err(|e| CaptureError::Init(format!("CreateEventW: {e}")))?
         };
 
-        let stream = Self::open_stream(&enumerator, event)?;
+        let stream = match Self::open_stream(&enumerator, event) {
+            Ok(s) => s,
+            Err(e) => {
+                // Drop never runs when construction fails — close the event
+                // here or it leaks one handle per failed open.
+                unsafe {
+                    let _ = CloseHandle(event);
+                }
+                return Err(e);
+            }
+        };
         Ok(Self {
             stream,
             enumerator,
@@ -462,6 +472,14 @@ impl AudioCapture for WasapiCapture {
                     }
                 }
                 PumpStatus::Lost => {
+                    // Bound this branch by the same deadline as Idle: on a
+                    // flapping endpoint (reopen succeeds but the very next
+                    // pump is invalidated again) the loop would otherwise
+                    // spin full stream setup/teardown with no deadline and
+                    // never return.
+                    if start.elapsed() >= IDLE_TIMEOUT {
+                        break;
+                    }
                     if !self.reopen() {
                         // Back off so read() doesn't spin at 100% CPU while
                         // the device is disconnected and no replacement exists.

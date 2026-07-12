@@ -35,41 +35,67 @@ pub(super) fn run(tx: Sender<NowPlayingMsg>) {
         }
     };
 
-    // Refetch art only when the track identity changes.
-    let mut last_key: Option<(Option<String>, Option<String>, Option<String>)> = None;
+    // Refetch art only when the track identity — or thumbnail presence —
+    // changes. Presence is part of the key because GSMTC populates thumbnails
+    // asynchronously: the first snapshot of a track routinely has none, and
+    // keying on identity alone would latch `Art(None)` for the whole track.
+    let mut last_key: Option<(Option<String>, Option<String>, Option<String>, bool)> = None;
 
     loop {
         match read_session(&manager) {
-            Some((track, props)) => {
-                let key = (track.title.clone(), track.artist.clone(), track.album.clone());
+            SessionRead::Track(track, props) => {
+                let thumb = props.Thumbnail().ok();
+                let key = (
+                    track.title.clone(),
+                    track.artist.clone(),
+                    track.album.clone(),
+                    thumb.is_some(),
+                );
                 let _ = tx.send(NowPlayingMsg::Track(track));
                 // Reading + decoding the thumbnail is expensive, so only do it
-                // when the track actually changed, not on every poll.
+                // when the track (or thumbnail availability) actually changed.
                 if last_key.as_ref() != Some(&key) {
                     last_key = Some(key);
-                    let art = props.Thumbnail().ok().and_then(read_thumbnail);
+                    let art = thumb.and_then(read_thumbnail);
                     let _ = tx.send(NowPlayingMsg::Art(art));
                 }
             }
-            None => {
+            SessionRead::NoSession => {
                 // No session right now; clear state once.
                 if last_key.take().is_some() {
                     let _ = tx.send(NowPlayingMsg::Track(NowPlaying::default()));
                     let _ = tx.send(NowPlayingMsg::Art(None));
                 }
             }
+            // Keep the current HUD; the next poll usually succeeds.
+            SessionRead::Transient => {}
         }
 
         thread::sleep(Duration::from_millis(500));
     }
 }
 
-/// Read the current session's metadata, returning it alongside the raw
-/// `MediaProperties` so the caller can lazily read the thumbnail only when the
-/// track changed. `None` if there is no current session or it can't be read.
-fn read_session(manager: &SessionManager) -> Option<(NowPlaying, MediaProperties)> {
-    let session = manager.GetCurrentSession().ok()?;
-    let props = session.TryGetMediaPropertiesAsync().ok()?.join().ok()?;
+/// One poll of the current session.
+enum SessionRead {
+    /// Metadata read OK; the raw `MediaProperties` ride along so the caller
+    /// can lazily read the thumbnail only when the track changed.
+    Track(NowPlaying, MediaProperties),
+    /// There is no current media session — the HUD should clear.
+    NoSession,
+    /// A session exists but reading its properties failed. This happens
+    /// routinely for one poll during track transitions; blanking the HUD for
+    /// it would flicker (and force a pointless thumbnail re-decode after).
+    Transient,
+}
+
+/// Read the current session's metadata.
+fn read_session(manager: &SessionManager) -> SessionRead {
+    let Ok(session) = manager.GetCurrentSession() else {
+        return SessionRead::NoSession;
+    };
+    let Ok(props) = session.TryGetMediaPropertiesAsync().and_then(|op| op.join()) else {
+        return SessionRead::Transient;
+    };
 
     let track = NowPlaying {
         title: props.Title().ok().and_then(hstring_opt),
@@ -79,7 +105,7 @@ fn read_session(manager: &SessionManager) -> Option<(NowPlaying, MediaProperties
         art_url: None,
     };
 
-    Some((track, props))
+    SessionRead::Track(track, props)
 }
 
 /// Map an `HSTRING` to `Some(String)`, treating empty as absent.

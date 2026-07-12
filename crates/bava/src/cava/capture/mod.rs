@@ -97,8 +97,8 @@ pub trait AudioCapture: Send {
 pub enum CaptureError {
     /// The backend could not be initialized (no server, bad device, ...).
     Init(String),
-    /// A read failed; usually transient.
-    // Only constructed by the PulseAudio backend; retained for completeness.
+    /// A read failed; usually transient, but repeated failures mean the
+    /// backend handle is dead and the capture thread reopens it.
     #[allow(dead_code)]
     Read(String),
 }
@@ -122,7 +122,6 @@ impl std::error::Error for CaptureError {}
     allow(dead_code)
 )]
 pub(super) struct LinearResampler {
-    target_channels: usize,
     /// Previous device-rate frame (already down/up-mixed to target_channels).
     prev: Vec<f64>,
     has_prev: bool,
@@ -137,7 +136,6 @@ pub(super) struct LinearResampler {
 impl LinearResampler {
     pub(super) fn new(target_channels: usize) -> Self {
         Self {
-            target_channels,
             prev: vec![0.0; target_channels],
             has_prev: false,
             frac: 0.0,
@@ -175,8 +173,8 @@ impl LinearResampler {
         }
         if self.has_prev {
             while self.frac < 1.0 {
-                for c in 0..self.target_channels {
-                    pending.push_back(self.prev[c] + (cur[c] - self.prev[c]) * self.frac);
+                for (p, c) in self.prev.iter().zip(cur) {
+                    pending.push_back(p + (c - p) * self.frac);
                 }
                 self.frac += step;
             }

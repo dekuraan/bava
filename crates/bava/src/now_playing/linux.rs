@@ -29,6 +29,10 @@ pub(super) fn run(tx: Sender<NowPlayingMsg>) {
     };
 
     let mut last_art_url: Option<String> = None;
+    // Whether we've published a track since the last clear — art-URL presence
+    // is the wrong proxy (a track without art would otherwise leave the dead
+    // player's title/artist on the HUD forever after the player quits).
+    let mut published = false;
 
     loop {
         // Pick whichever player is currently active (spotifyd, a browser, ...).
@@ -36,7 +40,8 @@ pub(super) fn run(tx: Sender<NowPlayingMsg>) {
             Ok(p) => p,
             Err(_) => {
                 // No player right now; clear state once and wait.
-                if last_art_url.take().is_some() {
+                if std::mem::take(&mut published) {
+                    last_art_url = None;
                     let _ = tx.send(NowPlayingMsg::Track(NowPlaying::default()));
                     let _ = tx.send(NowPlayingMsg::Art(None));
                 }
@@ -64,6 +69,7 @@ pub(super) fn run(tx: Sender<NowPlayingMsg>) {
 
             let art_url = track.art_url.clone();
             let _ = tx.send(NowPlayingMsg::Track(track));
+            published = true;
 
             // Only refetch art when the URL changes.
             if art_url != last_art_url {

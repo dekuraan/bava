@@ -169,9 +169,14 @@ fn attach_capture(
     mut images: ResMut<Assets<Image>>,
     rec: Res<Recording>,
     camera: Query<Entity, With<VisCamera>>,
+    mut exit: MessageWriter<AppExit>,
 ) {
     let Ok(cam) = camera.single() else {
-        error!("bava: no vis camera to record from");
+        // Abort, don't just log: with no capture attached `drive_recording`
+        // never progresses, and a headless run (ScheduleRunnerPlugin, no
+        // window to close) would spin at 100% CPU forever instead of failing.
+        error!("bava: no vis camera to record from; aborting recording");
+        exit.write(AppExit::error());
         return;
     };
     let target = RenderTarget::target_headless(rec.width, rec.height, &mut images);

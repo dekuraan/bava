@@ -641,8 +641,12 @@ impl Config {
             // cavacore requires exactly 1 or 2 channels.
             bars_per_channel: self.cava.bars_per_channel.clamp(1, MAX_BARS_PER_CHANNEL),
             channels: self.audio.channels.clamp(1, 2),
-            rate: self.audio.rate,
-            frame_samples: self.audio.frame_samples,
+            // Same hand-edited-config hazard as bars: `rate` and
+            // `frame_samples` size the capture ring buffer and per-read chunk
+            // at startup, so unbounded values OOM (and rate feeds cavacore
+            // validation, which rejects 0 / > 384 kHz with a dead vis).
+            rate: self.audio.rate.clamp(8_000, 384_000),
+            frame_samples: self.audio.frame_samples.clamp(16, 65_536),
             autosens: self.cava.autosens,
             noise_reduction: self.cava.noise_reduction,
             low_cutoff_freq: self.cava.low_cutoff_freq,

@@ -30,7 +30,7 @@
 //! [`PhysicsDebugPlugin`] draws the live collider wireframes when
 //! `[physics] debug_draw` is on (toggle at runtime with **F3**).
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 
 use avian2d::prelude::*;
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
@@ -251,7 +251,7 @@ impl Plugin for PhysicsPlugin {
                 // `.set(PhysicsSchedulePlugin::new(..))` only moved the sim step
                 // and left the writeback in `FixedPostUpdate`, freezing transforms.
                 PhysicsPlugins::new(PostUpdate).with_length_unit(LENGTH_UNIT),
-                PhysicsDebugPlugin::default(),
+                PhysicsDebugPlugin,
                 FrameTimeDiagnosticsPlugin::default(),
             ))
             .add_systems(Startup, setup_physics)
@@ -274,6 +274,7 @@ impl Plugin for PhysicsPlugin {
                         .chain()
                         .after(on_mode_change),
                     (update_planet, planet_forces).chain().after(on_mode_change),
+                    reconcile_trails,
                     update_trails,
                     retint_balls,
                     toggle_physics_debug,
@@ -645,6 +646,13 @@ fn despawn_escaped_balls(
     balls: Query<(Entity, &Transform), With<Ball>>,
 ) {
     if !settings.enabled {
+        // Physics toggled off mid-session: cull every ball. The collider
+        // update systems all early-return while disabled, so surviving balls
+        // would keep simulating against colliders frozen at their last shape
+        // — drifting visibly from the still-animating rendered meshes.
+        for (entity, _) in &balls {
+            commands.entity(entity).despawn();
+        }
         return;
     }
     let Some(window) = windows.iter().next() else {
@@ -685,6 +693,7 @@ fn sample_height(values: &[f32], s: usize) -> f32 {
 /// Rebuild the **Wave** heightfield collider from the latest audio, time-smoothed.
 /// Parked offscreen unless WaveBox is active. Updates the shared [`Surface`] for
 /// [`push_balls`].
+#[allow(clippy::too_many_arguments)]
 fn update_surface(
     mode: Res<DrawingMode>,
     settings: Res<PhysicsSettings>,
@@ -726,8 +735,14 @@ fn update_surface(
     };
 
     let n = cava.bars_per_channel;
-    if !active || n == 0 {
-        // Relax the surface flat to the floor when inactive.
+    if !active {
+        // The body is parked offscreen the moment Wave deactivates, so no one
+        // can see a gradual relax — snap flat so `settled` below skips the
+        // collider/BVH rebuild immediately instead of reconstructing an
+        // unreachable heightfield for another second of easing.
+        surface.heights.fill(floor);
+    } else if n == 0 {
+        // Active but no audio yet: relax the surface flat to the floor.
         for hgt in &mut surface.heights {
             *hgt += (floor - *hgt) * alpha;
         }
@@ -752,8 +767,11 @@ fn update_surface(
         if !settled {
             *collider = Collider::heightfield(surface.heights.clone(), Vec2::new(eff_w, 1.0));
         }
-        transform.translation.x = if active { ox } else { 0.0 };
-        transform.translation.y = if active { 0.0 } else { -PARKED };
+        let (tx, ty) = if active { (ox, 0.0) } else { (0.0, -PARKED) };
+        if transform.translation.x != tx || transform.translation.y != ty {
+            transform.translation.x = tx;
+            transform.translation.y = ty;
+        }
     }
 }
 
@@ -867,6 +885,7 @@ fn spawn_column(commands: &mut Commands, settings: &PhysicsSettings, i: usize) {
 /// (reusing [`Layout`]/[`column_geom`] so the collider can't drift from the bar),
 /// caching each column top for [`push_columns`]. Parks the whole pool when the
 /// column shapes aren't the active mode.
+#[allow(clippy::too_many_arguments)]
 fn update_columns(
     mode: Res<DrawingMode>,
     settings: Res<PhysicsSettings>,
@@ -875,6 +894,11 @@ fn update_columns(
     windows: Query<&Window>,
     columns: ResMut<Columns>,
     mut bodies: Query<(&BarColumn, &mut Collider, &mut Transform)>,
+    // (floor, max_h) of the last frame the pool was active; `None` after a
+    // parked stretch. Any change means the delta about to land in `tops` is
+    // layout motion (resize, margin edit, re-entry over stale heights), not
+    // audio motion, and must not be read as one frame's rise.
+    mut last_geom: Local<Option<(f32, f32)>>,
 ) {
     if !settings.enabled {
         return;
@@ -885,11 +909,18 @@ fn update_columns(
     let columns = columns.into_inner();
 
     if !columns_active(*mode, &vis) {
+        let parked = Vec3::new(PARKED, PARKED, 0.0);
         for (_, _, mut transform) in &mut bodies {
-            transform.translation = Vec3::new(PARKED, PARKED, 0.0);
+            // Compare first: unconditionally rewriting the parked transform
+            // re-dirties every kinematic body for avian's sync, every frame,
+            // in every non-bar mode.
+            if transform.translation != parked {
+                transform.translation = parked;
+            }
         }
         // Keep tops flat so re-entry sees zero delta.
         columns.prev.copy_from_slice(&columns.tops);
+        *last_geom = None;
         return;
     }
 
@@ -908,6 +939,10 @@ fn update_columns(
     let values = mirror_values(&cava, &vis, n);
     let lyt = Layout::new_with_margin(w, h, n, false, vis.area_margin, vis.area_offset);
 
+    let geom = (lyt.floor, lyt.max_h);
+    let resync = columns.tops.len() != n || *last_geom != Some(geom);
+    *last_geom = Some(geom);
+
     if columns.tops.len() != n {
         columns.tops = vec![lyt.floor; n];
         columns.prev = columns.tops.clone();
@@ -918,7 +953,10 @@ fn update_columns(
     for (col, mut collider, mut transform) in &mut bodies {
         let i = col.0;
         if i >= n {
-            transform.translation = Vec3::new(PARKED, PARKED, 0.0);
+            let parked = Vec3::new(PARKED, PARKED, 0.0);
+            if transform.translation != parked {
+                transform.translation = parked;
+            }
             continue;
         }
         let mut v = values.get(i).copied().unwrap_or(0.0).clamp(0.0, 1.5);
@@ -931,6 +969,13 @@ fn update_columns(
         *collider = Collider::rectangle(half.x * 2.0, half.y * 2.0);
         transform.translation = Vec3::new(lyt.bar_x(i), cy, 0.0);
         columns.tops[i] = lyt.floor + bar_h;
+    }
+
+    if resync {
+        // The whole delta this frame is a layout change, not bar motion —
+        // zero it so `push_columns` doesn't compute rise = bar_h/dt and fling
+        // every resting ball (a ~300 px bar at 60 fps reads as ~29k px/s).
+        columns.prev.copy_from_slice(&columns.tops);
     }
 }
 
@@ -1023,6 +1068,7 @@ fn update_gravity_mode(
 /// Rebuild the planet blob collider from the rendered [`blob_ring`], cache its
 /// per-segment radii (this frame + last) for the radial forces, and park the body
 /// offscreen while a box mode is active.
+#[allow(clippy::too_many_arguments)]
 fn update_planet(
     mode: Res<DrawingMode>,
     settings: Res<PhysicsSettings>,
@@ -1031,6 +1077,10 @@ fn update_planet(
     windows: Query<&Window>,
     planet: ResMut<Planet>,
     mut body: Query<(&mut Collider, &mut Transform), With<PlanetBody>>,
+    // (extent, inner_radius, rotation) of the last active frame; `None` after
+    // a parked stretch. Same role as `update_columns`' guard: a geometry
+    // change must not read as one frame's radial expansion.
+    mut last_geom: Local<Option<(f32, f32, f32)>>,
 ) {
     if !settings.enabled {
         return;
@@ -1039,10 +1089,16 @@ fn update_planet(
         return;
     };
     if !planet_active(*mode) {
-        transform.translation = Vec3::new(PARKED, PARKED, 0.0);
+        let parked = Vec3::new(PARKED, PARKED, 0.0);
+        if transform.translation != parked {
+            transform.translation = parked;
+        }
+        *last_geom = None;
         return;
     }
-    transform.translation = Vec3::ZERO;
+    if transform.translation != Vec3::ZERO {
+        transform.translation = Vec3::ZERO;
+    }
 
     let Some(window) = windows.iter().next() else {
         return;
@@ -1061,6 +1117,9 @@ fn update_planet(
 
     // Cache radii (this frame + last) for the radial velocity field, and the
     // closed-loop indices (rebuilt only when the segment count changes).
+    let geom = (extent, vis.inner_radius, vis.rotation);
+    let resync = *last_geom != Some(geom);
+    *last_geom = Some(geom);
     let planet = planet.into_inner();
     if planet.radii.len() != n {
         planet.radii = ring.iter().map(|p| p.length()).collect();
@@ -1071,6 +1130,11 @@ fn update_planet(
         for (i, p) in ring.iter().enumerate() {
             planet.radii[i] = p.length();
         }
+    }
+    if resync {
+        // Resize / setting change / re-entry over stale radii: the radial
+        // delta is geometry, not blob expansion — zero it for `planet_forces`.
+        planet.prev.copy_from_slice(&planet.radii);
     }
 
     // Closed-loop polyline matching the rendered blob (positions change each
@@ -1219,6 +1283,52 @@ fn planet_forces(
                 vel.0 += outward * (target - along);
             }
         }
+    }
+}
+
+/// Keep trails in sync with the live [`PhysicsSettings::trails`] toggle so it
+/// applies to balls already on screen, not just newly spawned ones: when trails
+/// are on, give every ball that lacks one a fresh trail; when off, reap them all.
+/// New balls still get their trail at spawn time in [`spawn_one_ball`]; this only
+/// covers a mid-flight toggle, so it runs solely on the frames the settings change.
+fn reconcile_trails(
+    mut commands: Commands,
+    settings: Res<PhysicsSettings>,
+    vis: Res<VisSettings>,
+    balls: Query<(Entity, &Ball)>,
+    trails: Query<(Entity, &Trail)>,
+    trail_mat: Res<TrailMaterial>,
+    mut meshes: ResMut<Assets<Mesh>>,
+) {
+    if !settings.is_changed() {
+        return;
+    }
+    if !settings.trails {
+        // Trails turned off: reap every existing trail (new balls won't get one).
+        for (entity, _) in &trails {
+            commands.entity(entity).despawn();
+        }
+        return;
+    }
+    // Trails on: give any ball without a trail one, matching what it would have
+    // received at spawn — color from its fixed palette position, width from radius.
+    let has_trail: HashSet<Entity> = trails.iter().map(|(_, t)| t.ball).collect();
+    for (ball, b) in &balls {
+        if has_trail.contains(&ball) {
+            continue;
+        }
+        let color = sample_gradient(&vis.fg_stops(), b.tint, vis.glow_gain);
+        commands.spawn((
+            Mesh2d(meshes.add(empty_stroke_mesh())),
+            MeshMaterial2d(trail_mat.0.clone()),
+            Transform::from_xyz(0.0, 0.0, 0.9),
+            Trail {
+                ball,
+                points: VecDeque::with_capacity(settings.trail_length + 1),
+                color,
+                half_width: (b.radius * 0.7).max(1.0),
+            },
+        ));
     }
 }
 
@@ -1692,6 +1802,48 @@ mod tests {
     }
 
     #[test]
+    fn l2_reconcile_trails_follows_the_live_toggle() {
+        let mut app = bare_app();
+        app.insert_resource(Assets::<Mesh>::default());
+        app.insert_resource(Assets::<ColorMaterial>::default());
+        app.insert_resource(PhysicsSettings::default()); // trails: true
+        app.insert_resource(VisSettings::default());
+        let mat = app
+            .world_mut()
+            .resource_mut::<Assets<ColorMaterial>>()
+            .add(stroke_material());
+        app.insert_resource(TrailMaterial(mat));
+        app.add_systems(Update, reconcile_trails);
+
+        // Two balls with no trails yet — the state after spawning while trails
+        // were off (the bug: the toggle never reached balls already on screen).
+        app.world_mut().spawn(Ball { id: 0, radius: 8.0, tint: 0.2 });
+        app.world_mut().spawn(Ball { id: 1, radius: 8.0, tint: 0.8 });
+        let trails = |app: &mut App| {
+            let mut q = app.world_mut().query_filtered::<(), With<Trail>>();
+            q.iter(app.world()).count()
+        };
+
+        // Trails on (default): reconcile gives each pre-existing ball one.
+        app.update();
+        assert_eq!(trails(&mut app), 2, "each pre-existing ball gets a trail");
+
+        // Idempotent while settings are unchanged: no duplicates.
+        app.update();
+        assert_eq!(trails(&mut app), 2, "no duplicate trails when nothing changed");
+
+        // Toggle off → every trail is reaped.
+        app.world_mut().resource_mut::<PhysicsSettings>().trails = false;
+        app.update();
+        assert_eq!(trails(&mut app), 0, "toggling trails off reaps them");
+
+        // Toggle back on → trails restored for the still-living balls.
+        app.world_mut().resource_mut::<PhysicsSettings>().trails = true;
+        app.update();
+        assert_eq!(trails(&mut app), 2, "toggling trails on restores them");
+    }
+
+    #[test]
     fn l2_update_planet_builds_blob_when_active_parks_when_not() {
         let mut app = bare_app();
         app.insert_resource(PhysicsSettings::default());
@@ -1724,6 +1876,53 @@ mod tests {
         let mut bq = app.world_mut().query_filtered::<&Transform, With<PlanetBody>>();
         let parked = bq.single(app.world()).unwrap().translation;
         assert!(parked.x.abs() > 1e5 && parked.y.abs() > 1e5, "parked, got {parked:?}");
+    }
+
+    #[test]
+    fn l2_update_columns_zeroes_rise_on_bar_count_change() {
+        // Regression: resizing the column cache (bar-count change via Apply)
+        // used to leave `prev` at the floor while `tops` got fresh heights the
+        // same frame — push_columns then read rise = bar_h/dt and flung every
+        // resting ball. The resync must land with tops == prev exactly.
+        let mut app = bare_app();
+        app.insert_resource(PhysicsSettings::default());
+        app.insert_resource(VisSettings::default());
+        app.insert_resource(DrawingMode::BarsBox);
+        app.insert_resource(Cava {
+            bars: vec![0.5; 24],
+            bars_per_channel: 24,
+            channels: 1,
+        });
+        app.init_resource::<Columns>();
+        app.add_systems(Update, (reconcile_columns, update_columns).chain());
+        step(&mut app, 3);
+
+        // Change the bar count (and the levels) in one frame.
+        {
+            let mut cava = app.world_mut().resource_mut::<Cava>();
+            cava.bars = vec![0.9; 48];
+            cava.bars_per_channel = 48;
+        }
+        app.update();
+
+        let columns = app.world().resource::<Columns>();
+        assert_eq!(columns.tops.len(), 48);
+        let max_delta = columns
+            .tops
+            .iter()
+            .zip(&columns.prev)
+            .map(|(t, p)| (t - p).abs())
+            .fold(0.0f32, f32::max);
+        assert_eq!(
+            max_delta, 0.0,
+            "resize frame must report zero rise, got max delta {max_delta}"
+        );
+        // And the heights themselves must be real (not left at the floor).
+        let lyt = Layout::new_with_margin(1280.0, 720.0, 48, false, 0.0, Vec2::ZERO);
+        assert!(
+            columns.tops.iter().all(|t| *t > lyt.floor + 1.0),
+            "tops must hold the fresh bar heights"
+        );
     }
 
     #[test]

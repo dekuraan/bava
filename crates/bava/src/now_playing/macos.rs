@@ -99,8 +99,11 @@ fn stream_once(script: &PathBuf, framework: &PathBuf, tx: &Sender<NowPlayingMsg>
     };
 
     // Track identity of the last art we decoded, so we don't re-decode the same
-    // base64 on every (play/pause/elapsed) snapshot for one track.
-    let mut last_key: Option<(Option<String>, Option<String>, Option<String>)> = None;
+    // base64 on every (play/pause/elapsed) snapshot for one track. Artwork
+    // presence is part of the key: MediaRemote populates `artworkData`
+    // asynchronously, so a track's first snapshot routinely has none and
+    // keying on identity alone would latch `Art(None)` for the whole track.
+    let mut last_key: Option<(Option<String>, Option<String>, Option<String>, bool)> = None;
 
     for line in BufReader::new(stdout).lines() {
         let Ok(line) = line else { break };
@@ -125,7 +128,12 @@ fn stream_once(script: &PathBuf, framework: &PathBuf, tx: &Sender<NowPlayingMsg>
             // Art is delivered inline as base64, not via a URL.
             art_url: None,
         };
-        let key = (track.title.clone(), track.artist.clone(), track.album.clone());
+        let key = (
+            track.title.clone(),
+            track.artist.clone(),
+            track.album.clone(),
+            p.artwork_data.is_some(),
+        );
         let _ = tx.send(NowPlayingMsg::Track(track));
 
         if last_key.as_ref() != Some(&key) {

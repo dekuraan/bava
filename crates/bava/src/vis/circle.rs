@@ -194,7 +194,9 @@ fn update_circle_bars(
         // Wave (handled by the ring/fill) or a box mode: hide the radial pool.
         _ => {
             for (_, _, _, mut v) in &mut bars {
-                *v = Visibility::Hidden;
+                // set_if_neq: rewriting Hidden every frame would re-dirty the
+                // whole pool for visibility propagation in every other mode.
+                v.set_if_neq(Visibility::Hidden);
             }
             return;
         }
@@ -209,7 +211,7 @@ fn update_circle_bars(
     let n = values.len();
     if n == 0 {
         for (_, _, _, mut v) in &mut bars {
-            *v = Visibility::Hidden;
+            v.set_if_neq(Visibility::Hidden);
         }
         return;
     }
@@ -224,10 +226,10 @@ fn update_circle_bars(
 
     for (bar, mesh2d, mut transform, mut visibility) in &mut bars {
         if bar.0 >= n {
-            *visibility = Visibility::Hidden;
+            visibility.set_if_neq(Visibility::Hidden);
             continue;
         }
-        *visibility = Visibility::Visible;
+        visibility.set_if_neq(Visibility::Visible);
         let v = values[bar.0].clamp(0.0, 1.5);
         // Apply vis.rotation to the starting angle.
         let ang = bar.0 as f32 / n as f32 * TAU - FRAC_PI_2 + vis.rotation;
@@ -349,10 +351,18 @@ fn update_ring(
     let ring_active = mode.family() == VisFamily::Circle && mode.shape() == VisShape::Wave;
     let fill_active = ring_active && vis.filling;
     for mut v in &mut ring_q {
-        *v = if ring_active { Visibility::Visible } else { Visibility::Hidden };
+        v.set_if_neq(if ring_active {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        });
     }
     for mut v in &mut fill_q {
-        *v = if fill_active { Visibility::Visible } else { Visibility::Hidden };
+        v.set_if_neq(if fill_active {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        });
     }
     if !ring_active {
         return;

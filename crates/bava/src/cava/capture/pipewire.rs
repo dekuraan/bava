@@ -19,6 +19,7 @@
 //! back into the loop thread on drop.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -45,10 +46,12 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 /// smoothing (the Pulse backend blocks until a full real read is available, so
 /// it never does this). Only a genuinely idle source — sink suspended, no
 /// buffers arriving — hits this timeout; the bars then decay on the resulting
-/// silence, the same path as cava's `reset_output_buffers`. Kept below
-/// `feed_cava`'s 200 ms stall window so steady silence reaches the analysis
-/// before that net trips.
-const IDLE_TIMEOUT: Duration = Duration::from_millis(120);
+/// silence, the same path as cava's `reset_output_buffers`. Sized above the
+/// largest configurable quantum (8192 frames @ 48 kHz ≈ 171 ms, reachable when
+/// `default.clock.max-quantum` is raised) so active playback never times out
+/// mid-quantum, yet still below `feed_cava`'s 200 ms stall window so steady
+/// silence reaches the analysis before that net trips.
+const IDLE_TIMEOUT: Duration = Duration::from_millis(180);
 
 /// Hand-off between the realtime process callback (producer) and `read`
 /// (consumer): interleaved `f32` at the negotiated (target) format.
@@ -60,6 +63,11 @@ struct Shared {
     /// Hard cap (~4 s of target-rate audio) so a stalled consumer can't grow the
     /// queue without bound; oldest samples are dropped.
     cap: usize,
+    /// Set by `state_changed` when the stream errors *after* startup (server
+    /// restart, node removed). The process callback stops delivering but the
+    /// mainloop keeps running, so without this `read` would zero-fill `Ok`
+    /// forever and the capture thread would never notice the stream is gone.
+    dead: AtomicBool,
 }
 
 /// Startup handshake: the loop thread reports the negotiated format (or a fatal
@@ -105,10 +113,15 @@ impl PipeWireCapture {
     ) -> Result<Self, CaptureError> {
         let target_channels = target_channels.max(1) as usize;
 
+        let cap = (target_rate as usize * target_channels * 4).max(1);
         let shared = Arc::new(Shared {
-            queue: Mutex::new(VecDeque::new()),
+            // Preallocate cap plus one maximum quantum (8192 frames, stereo):
+            // the process callback pushes a whole quantum before trimming, and
+            // growing the deque there would malloc on a realtime thread.
+            queue: Mutex::new(VecDeque::with_capacity(cap + 8192 * target_channels)),
             filled: Condvar::new(),
-            cap: (target_rate as usize * target_channels * 4).max(1),
+            cap,
+            dead: AtomicBool::new(false),
         });
         let handshake = Arc::new((Mutex::new(Handshake::Pending), Condvar::new()));
 
@@ -200,6 +213,11 @@ impl AudioCapture for PipeWireCapture {
         let mut q = self.shared.queue.lock().unwrap();
         let start = Instant::now();
         while q.len() < need {
+            if self.shared.dead.load(Ordering::Relaxed) {
+                return Err(CaptureError::Read(
+                    "pipewire stream died (server restarted or node removed)".into(),
+                ));
+            }
             let remaining = match IDLE_TIMEOUT.checked_sub(start.elapsed()) {
                 Some(r) if !r.is_zero() => r,
                 _ => break,
@@ -320,12 +338,17 @@ fn run_loop(
             }
         })
         .state_changed(|_stream, ud, _old, new| {
-            if let pw::stream::StreamState::Error(msg) = new
-                && !ud.ready_signalled
-            {
-                let (lock, cv) = &*ud.handshake;
-                *lock.lock().unwrap() = Handshake::Failed(format!("stream error: {msg}"));
-                cv.notify_all();
+            if let pw::stream::StreamState::Error(msg) = new {
+                if ud.ready_signalled {
+                    // Post-startup death: flag it and wake a blocked `read` so
+                    // the capture thread's retry/reopen path takes over.
+                    ud.shared.dead.store(true, Ordering::Relaxed);
+                    ud.shared.filled.notify_all();
+                } else {
+                    let (lock, cv) = &*ud.handshake;
+                    *lock.lock().unwrap() = Handshake::Failed(format!("stream error: {msg}"));
+                    cv.notify_all();
+                }
             }
         })
         .process(|stream, ud| {
@@ -348,7 +371,7 @@ fn run_loop(
                 let Ok(mut q) = ud.shared.queue.try_lock() else {
                     continue;
                 };
-                for c in region.chunks_exact(4) {
+                for c in region.as_chunks::<4>().0 {
                     q.push_back(f32::from_le_bytes([c[0], c[1], c[2], c[3]]));
                 }
                 if q.len() > ud.shared.cap {

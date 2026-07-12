@@ -341,7 +341,9 @@ fn update_bars(
         Some(s @ (VisShape::Bars | VisShape::Levels | VisShape::Particles | VisShape::Spine)) => s,
         _ => {
             for (_, _, _, mut v) in &mut bars {
-                *v = Visibility::Hidden;
+                // set_if_neq: rewriting Hidden every frame would re-dirty the
+                // whole pool for visibility propagation in every non-bar mode.
+                v.set_if_neq(Visibility::Hidden);
             }
             return;
         }
@@ -367,10 +369,10 @@ fn update_bars(
 
     for (bar, mesh2d, mut transform, mut visibility) in &mut bars {
         if bar.0 >= n {
-            *visibility = Visibility::Hidden;
+            visibility.set_if_neq(Visibility::Hidden);
             continue;
         }
-        *visibility = Visibility::Visible;
+        visibility.set_if_neq(Visibility::Visible);
         let v = values.get(bar.0).copied().unwrap_or(0.0).clamp(0.0, 1.5);
         let color = gradient_color(lo, hi, v.min(1.0), glow);
 
@@ -486,7 +488,11 @@ fn update_box_lines(
     let shape = (mode.family() == VisFamily::Box).then(|| mode.shape());
     let active = matches!(shape, Some(VisShape::Wave | VisShape::Splitter));
     for mut v in &mut q {
-        *v = if active { Visibility::Visible } else { Visibility::Hidden };
+        v.set_if_neq(if active {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        });
     }
     if !active {
         return;

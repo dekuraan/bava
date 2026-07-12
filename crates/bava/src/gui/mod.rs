@@ -15,7 +15,7 @@
 use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts, EguiPrimaryContextPass};
 
-use crate::cava::{CavaRebuild, CavaSettings};
+use crate::cava::{CavaRebuild, CavaRebuildStatus, CavaSettings};
 use crate::config::{Config, ConfigHandle};
 use crate::vis::physics::PhysicsSettings;
 use crate::vis::{
@@ -86,6 +86,8 @@ impl Plugin for GuiPlugin {
 }
 
 /// The editor system: handles the toggle key and, when open, draws the window.
+// One parameter per edited resource; a Bevy system signature, not an API.
+#[allow(clippy::too_many_arguments)]
 fn editor_ui(
     mut contexts: EguiContexts,
     keys: Res<ButtonInput<KeyCode>>,
@@ -94,12 +96,19 @@ fn editor_ui(
     mut mode: ResMut<DrawingMode>,
     mut cava: ResMut<CavaSettings>,
     mut rebuild: ResMut<CavaRebuild>,
+    mut rebuild_status: ResMut<CavaRebuildStatus>,
     mut physics: ResMut<PhysicsSettings>,
     handle: Res<ConfigHandle>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else {
         return; // primary egui context not ready yet
     };
+
+    // Surface the rebuild outcome, replacing the "Rebuilding…" placeholder the
+    // Apply button set — otherwise a failed rebuild looks like a success.
+    if let Some(outcome) = rebuild_status.0.take() {
+        editor.status = outcome;
+    }
 
     // Toggle with the configured key (ignored while a text field has focus);
     // Escape closes.
@@ -108,7 +117,9 @@ fn editor_ui(
     if keys.just_pressed(editor.toggle_key) && !editor.capture_keyboard {
         editor.open = !editor.open;
     }
-    if editor.open && keys.just_pressed(KeyCode::Escape) {
+    // Escape also closes — but not while a text field has focus, where egui's
+    // own Escape-to-unfocus would otherwise vanish the whole window mid-typing.
+    if editor.open && keys.just_pressed(KeyCode::Escape) && !editor.capture_keyboard {
         editor.open = false;
     }
 
@@ -213,8 +224,8 @@ fn persistence_section(
                         );
                     }
                 });
-            if ui.button("Load").clicked() {
-                if let Some(name) = editor.selected_profile.clone() {
+            if ui.button("Load").clicked()
+                && let Some(name) = editor.selected_profile.clone() {
                     match Config::load_profile(&name) {
                         Some(cfg) => {
                             apply_config(&cfg, vis, mode, cava, rebuild, physics);
@@ -224,7 +235,6 @@ fn persistence_section(
                         None => editor.status = format!("Profile '{name}' not found"),
                     }
                 }
-            }
         });
 
         // Save the current settings as a new (or overwritten) profile.
@@ -390,15 +400,16 @@ fn colors_section(ui: &mut egui::Ui, vis: &mut VisSettings) {
                 }
             });
         if ui.button("+ profile").clicked() {
-            let mut p = ColorProfile::default();
-            p.name = format!("Profile {}", len + 1);
+            let p = ColorProfile {
+                name: format!("Profile {}", len + 1),
+                ..Default::default()
+            };
             vis.profiles.push(p);
             vis.active_profile = len;
         }
         if len > 1 && ui.button("🗑").clicked() {
             vis.profiles.remove(active);
             vis.active_profile = vis.active_profile.min(vis.profiles.len() - 1);
-            return;
         }
     });
 
@@ -446,11 +457,15 @@ fn audio_section(
     {
         cava.low_cutoff_freq = low;
     }
+    // Cap the slider at the running plan's Nyquist: a value above rate/2
+    // always fails `CavaConfig` validation at Apply time, so offering it
+    // (the old fixed 22 kHz max at, say, a 32 kHz rate) is a trap.
+    let high_max = (cava.rate / 2).saturating_sub(1).max(2_001);
     if ui
-        .add(egui::Slider::new(&mut high, 2_000..=22_000).text("high cutoff (Hz)"))
+        .add(egui::Slider::new(&mut high, 2_000..=high_max).text("high cutoff (Hz)"))
         .changed()
     {
-        cava.high_cutoff_freq = high;
+        cava.high_cutoff_freq = high.min(high_max);
     }
 
     if ui.button("Apply audio (rebuild plan)").clicked() {

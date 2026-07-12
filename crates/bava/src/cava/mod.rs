@@ -81,6 +81,13 @@ impl Default for CavaSettings {
 #[derive(Resource, Default)]
 pub struct CavaRebuild(pub bool);
 
+/// Outcome of the most recent [`rebuild_cava`] run, for the settings editor's
+/// status line — without it a failed rebuild is only visible on the console
+/// and the editor stays stuck on "Rebuilding cavacore plan…" as if it worked.
+/// The editor `take()`s the message once displayed.
+#[derive(Resource, Default)]
+pub struct CavaRebuildStatus(pub Option<String>);
+
 /// Latest visualization bars, refreshed each frame from the capture thread.
 ///
 /// For stereo, [`bars`](Self::bars) is all left-channel bars (low→high) followed
@@ -226,7 +233,8 @@ impl Plugin for CavaPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<CavaSettings>()
             .init_resource::<Cava>()
-            .init_resource::<CavaRebuild>();
+            .init_resource::<CavaRebuild>()
+            .init_resource::<CavaRebuildStatus>();
         let settings = app.world().resource::<CavaSettings>().clone();
 
         // Size the Cava resource up front.
@@ -369,6 +377,12 @@ fn capture_reader(settings: CavaSettings, ring: AudioRing) {
     let chunk = settings.frame_samples.max(1) * settings.channels.max(1);
     let mut buf = vec![0.0f64; chunk];
     let mut last_follow_check = std::time::Instant::now();
+    // A backend whose read() fails on every call (audio server restarted,
+    // source removed) never heals on its own — the handle is dead. After ~1 s
+    // of consecutive failures, reopen the backend instead of retrying the
+    // corpse forever.
+    const REOPEN_AFTER_FAILURES: u32 = 10;
+    let mut consecutive_failures = 0u32;
 
     while ring.running.load(Ordering::Relaxed) {
         if let Err(e) = capture.read(&mut buf) {
@@ -377,8 +391,23 @@ fn capture_reader(settings: CavaSettings, ring: AudioRing) {
             // a core at 100% and flood the log without this pause.
             error!("bava: {e}");
             thread::sleep(std::time::Duration::from_millis(100));
+            consecutive_failures += 1;
+            if consecutive_failures >= REOPEN_AFTER_FAILURES {
+                consecutive_failures = 0;
+                match open(&current_device) {
+                    Ok(c) => {
+                        capture = c;
+                        ring.negotiated_rate.store(capture.rate(), Ordering::Relaxed);
+                        ring.negotiated_channels
+                            .store(capture.channels(), Ordering::Relaxed);
+                        info!("bava: audio capture reopened after repeated read failures");
+                    }
+                    Err(e) => warn!("bava: audio capture reopen failed, will retry: {e}"),
+                }
+            }
             continue;
         }
+        consecutive_failures = 0;
         if let Ok(mut q) = ring.buf.lock() {
             q.extend(buf.iter().copied());
             while q.len() > ring.cap {
@@ -578,9 +607,13 @@ fn reconcile_capture_rate(
             cava.bars_per_channel = bars;
             cava.channels = channels;
             // Keep settings in sync so a later editor "Apply"/config save uses
-            // the real rate/channels rather than reintroducing the mismatch.
+            // the real rate/channels — and the clamped cutoff — rather than
+            // reintroducing the mismatch. Without the cutoff write-back, every
+            // subsequent Apply would fail validation against the (lower)
+            // negotiated Nyquist and silently keep the previous plan.
             settings.rate = negotiated;
             settings.channels = channels;
+            settings.high_cutoff_freq = high_cutoff;
             info!(
                 "bava: capture negotiated {negotiated} Hz / {channels} ch \
                  (requested {requested} Hz / {requested_channels} ch); \
@@ -600,6 +633,7 @@ fn reconcile_capture_rate(
 /// so those edits only take effect on the next launch (or after re-saving).
 fn rebuild_cava(
     mut request: ResMut<CavaRebuild>,
+    mut status: ResMut<CavaRebuildStatus>,
     state: Option<NonSendMut<CavaState>>,
     settings: Res<CavaSettings>,
     mut cava: ResMut<Cava>,
@@ -610,6 +644,7 @@ fn rebuild_cava(
     request.0 = false;
 
     let Some(mut state) = state else {
+        status.0 = Some("Rebuild skipped: audio capture never initialized".into());
         return; // cavacore never initialized; nothing to rebuild
     };
 
@@ -635,8 +670,12 @@ fn rebuild_cava(
             cava.bars_per_channel = bars;
             cava.channels = channels;
             info!("bava: rebuilt cavacore — {bars} bars/ch");
+            status.0 = Some(format!("Rebuilt cavacore — {bars} bars/ch"));
         }
-        Err(e) => error!("bava: cavacore rebuild failed: {e}; keeping previous plan"),
+        Err(e) => {
+            error!("bava: cavacore rebuild failed: {e}; keeping previous plan");
+            status.0 = Some(format!("Rebuild failed: {e} — kept previous plan"));
+        }
     }
 }
 
@@ -668,11 +707,10 @@ struct FeedStats {
 
 /// Signal the capture thread to stop when the app is exiting.
 fn stop_on_exit(mut exit: MessageReader<AppExit>, ring: Option<Res<AudioRing>>) {
-    if exit.read().next().is_some() {
-        if let Some(ring) = ring {
+    if exit.read().next().is_some()
+        && let Some(ring) = ring {
             ring.running.store(false, Ordering::Relaxed);
         }
-    }
 }
 
 #[cfg(test)]

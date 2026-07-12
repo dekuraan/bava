@@ -357,6 +357,24 @@ impl CavaPlan {
             cut_off_frequency[n] = relative_cut_off[n] * (rate as f32 / 2.0);
         }
 
+        // Sanitize the bin ranges the layout above produced. The C original's
+        // clump-push and zero-width fixups can leave a bar pointing one past
+        // the last FFT bin (a silent heap over-read in C, an index panic here)
+        // or spanning zero bins (the eq normalization below would divide by
+        // zero and NaN-poison the filter state forever). Both only happen for
+        // degenerate-but-valid configs (very low rates, near-Nyquist bands,
+        // max bar counts); clamping keeps every bar a non-empty range inside
+        // the FFT output `execute` actually indexes.
+        for n in 0..bars {
+            let max_bin = if (n as i32) < bass_cut_off_bar {
+                (fft_bass / 2) as i32
+            } else {
+                (fft_treble / 2) as i32
+            };
+            lower_cut_off[n] = lower_cut_off[n].clamp(0, max_bin);
+            upper_cut_off[n] = upper_cut_off[n].clamp(lower_cut_off[n], max_bin);
+        }
+
         // hard-coded eq
         let mut eq = vec![0f64; bars];
         for n in 0..bars {
