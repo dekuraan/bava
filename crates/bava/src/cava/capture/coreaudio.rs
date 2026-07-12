@@ -90,6 +90,10 @@ pub struct CoreAudioCapture {
     resampler: LinearResampler,
     /// Scratch buffer for one down/up-mixed frame (reused across frames).
     mixed: Vec<f64>,
+    /// Scratch for [`pump`](CoreAudioCapture::pump)'s queue snapshot,
+    /// preallocated to the queue cap so draining never allocates while
+    /// holding the lock the realtime IO proc try_locks.
+    scratch: Vec<f32>,
     /// Converted, target-rate interleaved samples awaiting consumption.
     pending: VecDeque<f64>,
     /// Set by [`format_listener`] when the aggregate device's nominal sample
@@ -184,10 +188,14 @@ impl CoreAudioCapture {
                 // 5. Register the IO proc and start IO. The client pointer is the
                 //    shared queue; it stays valid until Drop tears the proc down
                 //    before releasing the Arc.
+                // ~4 s of device-rate audio.
+                let cap = (device_rate as usize * device_channels * 4).max(1);
                 let shared = Arc::new(Shared {
-                    queue: Mutex::new(VecDeque::new()),
-                    // ~4 s of device-rate audio.
-                    cap: (device_rate as usize * device_channels * 4).max(1),
+                    // Preallocate cap plus one generous IO buffer: the IO proc
+                    // pushes a whole callback's frames before the cap trim, and
+                    // growing the deque would malloc on a realtime thread.
+                    queue: Mutex::new(VecDeque::with_capacity(cap + 8192 * device_channels)),
+                    cap,
                 });
                 let client = Arc::as_ptr(&shared) as *mut c_void;
 
@@ -243,6 +251,7 @@ impl CoreAudioCapture {
                     target_channels,
                     resampler: LinearResampler::new(target_channels),
                     mixed: vec![0.0; target_channels],
+                    scratch: Vec::with_capacity(cap),
                     pending: VecDeque::new(),
                     format_dirty,
                 })
@@ -259,16 +268,19 @@ impl CoreAudioCapture {
     /// and sample rate into `pending`. Returns whether any samples were consumed.
     fn pump(&mut self) -> bool {
         // Snapshot whole frames out from under the lock, then convert lock-free.
-        let frames: Vec<f32> = {
+        // `scratch` is preallocated to the queue cap, so the drain cannot
+        // reallocate while holding the lock the realtime IO proc try_locks.
+        self.scratch.clear();
+        {
             let mut q = self.shared.queue.lock().unwrap();
             if q.is_empty() {
                 return false;
             }
             // Only take complete device frames; leave any partial tail buffered.
             let whole = (q.len() / self.device_channels) * self.device_channels;
-            q.drain(..whole).collect()
-        };
-        if frames.is_empty() {
+            self.scratch.extend(q.drain(..whole));
+        }
+        if self.scratch.is_empty() {
             return false;
         }
         let step = if self.device_rate == self.target_rate {
@@ -276,12 +288,16 @@ impl CoreAudioCapture {
         } else {
             self.device_rate as f64 / self.target_rate as f64
         };
+        // Move `scratch` out so iterating it doesn't hold a borrow of `self`
+        // across the `downmix_into` calls; moved back (same allocation) after.
+        let frames = std::mem::take(&mut self.scratch);
         for frame in frames.chunks_exact(self.device_channels) {
             self.downmix_into(frame);
             // resampler, mixed, and pending are distinct fields; NLL permits
             // disjoint mutable + immutable borrows of separate struct fields.
             self.resampler.push(step, &self.mixed, &mut self.pending);
         }
+        self.scratch = frames;
         true
     }
 
@@ -333,6 +349,11 @@ impl AudioCapture for CoreAudioCapture {
                 let new_rate = (asbd.mSampleRate as u32).max(1);
                 let new_channels = asbd.mChannelsPerFrame.max(1) as usize;
                 if new_rate != self.device_rate || new_channels != self.device_channels {
+                    // Drop queued old-format samples: with a changed channel
+                    // stride, any remainder left at the queue front would shift
+                    // every later frame boundary permanently (L/R smear), and
+                    // old-rate samples would resample at the wrong ratio.
+                    self.shared.queue.lock().unwrap().clear();
                     self.device_rate = new_rate;
                     self.device_channels = new_channels;
                     self.resampler.reset();

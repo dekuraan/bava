@@ -9,13 +9,12 @@
 use std::fs::File;
 use std::path::Path;
 
-use symphonia::core::audio::SampleBuffer;
-use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
+use symphonia::core::codecs::audio::AudioDecoderOptions;
 use symphonia::core::errors::Error as SymphoniaError;
-use symphonia::core::formats::FormatOptions;
+use symphonia::core::formats::probe::Hint;
+use symphonia::core::formats::{FormatOptions, TrackType};
 use symphonia::core::io::MediaSourceStream;
-use symphonia::core::meta::{MetadataOptions, MetadataRevision, StandardTagKey};
-use symphonia::core::probe::Hint;
+use symphonia::core::meta::{MetadataOptions, MetadataRevision, StandardTag};
 
 use crate::now_playing::OfflineTrack;
 
@@ -54,53 +53,61 @@ pub fn decode(path: &Path) -> Result<DecodedTrack, String> {
         hint.with_extension(ext);
     }
 
-    // Gapless decoding trims mp3 LAME priming/padding, so our sample count
-    // matches the duration ffmpeg gives the muxed audio — otherwise the vis
-    // would lead the sound by the priming length (tens of ms).
-    let fmt_opts = FormatOptions {
-        enable_gapless: true,
-        ..FormatOptions::default()
-    };
-    let mut probed = symphonia::default::get_probe()
-        .format(&hint, mss, &fmt_opts, &MetadataOptions::default())
+    let mut format = symphonia::default::get_probe()
+        .probe(&hint, mss, FormatOptions::default(), MetadataOptions::default())
         .map_err(|e| format!("unrecognized audio format in {}: {e}", path.display()))?;
 
     let mut tags = TagScratch::default();
-    // Tags can live in the probe metadata (ID3v2 sits *before* the container,
-    // e.g. on mp3) or in the container itself (FLAC/OGG/MP4); read both, letting
-    // whichever revision is seen later fill gaps rather than overwrite.
-    if let Some(rev) = probed.metadata.get().as_ref().and_then(|m| m.current()) {
-        merge_metadata(&mut tags, rev);
-    }
-    let mut format = probed.format;
-    if let Some(rev) = format.metadata().current() {
-        merge_metadata(&mut tags, rev);
+    // Tags can live before the container (ID3v2 on mp3) or inside it
+    // (FLAC/OGG/MP4); the probe queues every revision it saw onto the reader's
+    // metadata log, oldest first. Walk them all, letting later revisions fill
+    // gaps rather than overwrite.
+    {
+        let mut md = format.metadata();
+        if let Some(rev) = md.current() {
+            merge_metadata(&mut tags, rev);
+        }
+        while md.pop().is_some() {
+            if let Some(rev) = md.current() {
+                merge_metadata(&mut tags, rev);
+            }
+        }
     }
     let track_meta = tags.into_track();
 
     let track = format
-        .tracks()
-        .iter()
-        .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
+        .default_track(TrackType::Audio)
         .ok_or_else(|| format!("{}: no decodable audio track", path.display()))?;
     let track_id = track.id;
     // Known for most formats (from headers / the LAME tag); lets the sample
     // buffer allocate once instead of doubling its way through hundreds of MB.
-    let n_frames_hint = track.codec_params.n_frames;
+    let n_frames_hint = track.num_frames;
 
+    let audio_params = track
+        .codec_params
+        .as_ref()
+        .and_then(|p| p.audio())
+        .ok_or_else(|| format!("{}: no decodable audio track", path.display()))?;
+
+    // Gapless decoding trims mp3 LAME priming/padding, so our sample count
+    // matches the duration ffmpeg gives the muxed audio — otherwise the vis
+    // would lead the sound by the priming length (tens of ms).
+    let dec_opts = AudioDecoderOptions::default().gapless(true);
     let mut decoder = symphonia::default::get_codecs()
-        .make(&track.codec_params, &DecoderOptions::default())
+        .make_audio_decoder(audio_params, &dec_opts)
         .map_err(|e| format!("{}: unsupported codec: {e}", path.display()))?;
 
     let mut samples: Vec<f64> = Vec::new();
     let mut rate = 0u32;
     let mut src_channels = 0usize;
-    let mut sample_buf: Option<SampleBuffer<f64>> = None;
+    let mut scratch: Vec<f64> = Vec::new();
 
     loop {
         let packet = match format.next_packet() {
-            Ok(p) => p,
-            // End of stream (or a truncated file — decode what we got).
+            Ok(Some(p)) => p,
+            // End of stream.
+            Ok(None) => break,
+            // A truncated file — decode what we got.
             Err(SymphoniaError::IoError(e))
                 if e.kind() == std::io::ErrorKind::UnexpectedEof =>
             {
@@ -109,7 +116,7 @@ pub fn decode(path: &Path) -> Result<DecodedTrack, String> {
             Err(SymphoniaError::ResetRequired) => break,
             Err(e) => return Err(format!("{}: read error: {e}", path.display())),
         };
-        if packet.track_id() != track_id {
+        if packet.track_id != track_id {
             continue;
         }
         let decoded = match decoder.decode(&packet) {
@@ -124,20 +131,17 @@ pub fn decode(path: &Path) -> Result<DecodedTrack, String> {
             Err(e) => return Err(format!("{}: decode error: {e}", path.display())),
         };
 
-        let spec = *decoded.spec();
         if rate == 0 {
-            rate = spec.rate;
-            src_channels = spec.channels.count();
+            let spec = decoded.spec();
+            rate = spec.rate();
+            src_channels = spec.channels().count();
             if let Some(n) = n_frames_hint {
                 samples.reserve_exact((n as usize).saturating_mul(src_channels));
             }
         }
 
-        let buf = sample_buf.get_or_insert_with(|| {
-            SampleBuffer::<f64>::new(decoded.capacity() as u64, spec)
-        });
-        buf.copy_interleaved_ref(decoded);
-        samples.extend_from_slice(buf.samples());
+        decoded.copy_to_vec_interleaved(&mut scratch);
+        samples.extend_from_slice(&scratch);
     }
 
     if rate == 0 || samples.is_empty() {
@@ -196,24 +200,22 @@ impl TagScratch {
 }
 
 /// Fold one metadata revision into `out`, filling only missing fields (called
-/// probe-metadata first, then container metadata).
+/// oldest revision first).
 fn merge_metadata(out: &mut TagScratch, rev: &MetadataRevision) {
-    for tag in rev.tags() {
-        let value = tag.value.to_string();
-        if value.is_empty() {
-            continue;
-        }
-        match tag.std_key {
-            Some(StandardTagKey::TrackTitle) => out.title.get_or_insert(value),
-            Some(StandardTagKey::Artist) => out.artist.get_or_insert(value),
-            Some(StandardTagKey::AlbumArtist) => out.album_artist.get_or_insert(value),
-            Some(StandardTagKey::Album) => out.album.get_or_insert(value),
+    for tag in &rev.media.tags {
+        let (slot, value) = match &tag.std {
+            Some(StandardTag::TrackTitle(s)) => (&mut out.title, s),
+            Some(StandardTag::Artist(s)) => (&mut out.artist, s),
+            Some(StandardTag::AlbumArtist(s)) => (&mut out.album_artist, s),
+            Some(StandardTag::Album(s)) => (&mut out.album, s),
             _ => continue,
         };
-    }
-    if out.art.is_none() {
-        if let Some(visual) = rev.visuals().first() {
-            out.art = Some(visual.data.to_vec());
+        if !value.is_empty() {
+            slot.get_or_insert_with(|| value.to_string());
         }
     }
+    if out.art.is_none()
+        && let Some(visual) = rev.media.visuals.first() {
+            out.art = Some(visual.data.to_vec());
+        }
 }

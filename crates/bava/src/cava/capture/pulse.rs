@@ -115,7 +115,7 @@ impl AudioCapture for PulseCapture {
             .read(&mut self.byte_buf)
             .map_err(|e| CaptureError::Read(format!("{e}")))?;
 
-        for (i, chunk) in self.byte_buf.chunks_exact(4).enumerate() {
+        for (i, chunk) in self.byte_buf.as_chunks::<4>().0.iter().enumerate() {
             let sample = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
             buf[i] = sample as f64;
         }
@@ -266,6 +266,6 @@ pub fn active_monitor_source() -> Option<String> {
         }
     }
 
-    let m = monitor.borrow_mut().take();
-    m
+    
+    monitor.borrow_mut().take()
 }

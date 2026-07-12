@@ -351,44 +351,46 @@ impl Default for VisSettings {
 }
 
 impl VisSettings {
-    /// The active color profile, clamped to a valid index. Falls back to a
-    /// default profile if the list is somehow empty.
-    pub fn profile(&self) -> ColorProfile {
-        if self.profiles.is_empty() {
-            return ColorProfile::default();
-        }
-        let i = self.active_profile.min(self.profiles.len() - 1);
-        self.profiles[i].clone()
-    }
-
     /// Active foreground color stops: the dynamic album-art palette (clamped to
     /// [`dynamic_color_count`](Self::dynamic_color_count)) when dynamic colors are
     /// on and a palette is available, else the active profile's `fg` stops. Always
     /// non-empty (falls back to white). Drives every renderer and the physics balls.
     pub fn fg_stops(&self) -> Vec<Color> {
+        match self.active_fg() {
+            Some(fg) => fg.to_vec(),
+            None => vec![Color::WHITE],
+        }
+    }
+
+    /// Borrow the active fg stops without allocating: the dynamic album-art palette
+    /// (clamped to [`dynamic_color_count`](Self::dynamic_color_count)) when dynamic
+    /// colors are on and available, else the active profile's `fg`. `None` means
+    /// there are no stops and callers fall back to white. Lets `fg_lo`/`fg_hi` read
+    /// a single stop without cloning a whole [`ColorProfile`] per call.
+    fn active_fg(&self) -> Option<&[Color]> {
         if self.dynamic_colors
             && let Some(colors) = &self.dynamic_fg
             && !colors.is_empty()
         {
             let n = self.dynamic_color_count.clamp(2, colors.len());
-            return colors[..n].to_vec();
+            return Some(&colors[..n]);
         }
-        let fg = self.profile().fg;
-        if fg.is_empty() {
-            vec![Color::WHITE]
-        } else {
-            fg
+        if self.profiles.is_empty() {
+            return None;
         }
+        let i = self.active_profile.min(self.profiles.len() - 1);
+        let fg = &self.profiles[i].fg;
+        (!fg.is_empty()).then_some(fg.as_slice())
     }
 
     /// Low-amplitude foreground gradient end (the first active stop).
     pub fn fg_lo(&self) -> Color {
-        self.fg_stops().first().copied().unwrap_or(Color::WHITE)
+        self.active_fg().and_then(|s| s.first().copied()).unwrap_or(Color::WHITE)
     }
 
     /// Full-amplitude foreground gradient end (the last active stop).
     pub fn fg_hi(&self) -> Color {
-        self.fg_stops().last().copied().unwrap_or(Color::WHITE)
+        self.active_fg().and_then(|s| s.last().copied()).unwrap_or(Color::WHITE)
     }
 }
 
@@ -399,23 +401,21 @@ pub(crate) fn spread_monstercat(values: &mut [f32], factor: f32) {
     if factor <= 1.0 {
         return;
     }
-    let n = values.len();
-    let src: Vec<f32> = values.to_vec();
-    for z in 0..n {
-        let peak = src[z];
-        if peak <= 0.0 {
-            continue;
-        }
-        for (m, out) in values.iter_mut().enumerate() {
-            if m == z {
-                continue;
-            }
-            let dist = (z as i32 - m as i32).unsigned_abs() as f32;
-            let spread = peak / factor.powf(dist);
-            if spread > *out {
-                *out = spread;
-            }
-        }
+    // Each output is `max over z of values[z] / factor^|z - m|`, which
+    // decomposes into a forward then a backward running-peak sweep (the peak
+    // decays by one `factor` per step) — O(n) instead of the naive O(n²)
+    // pairwise loop, and safe to run in place: a peak relayed through an
+    // already-spread neighbour decays over a path at least as long as the
+    // direct distance, so it can never exceed the direct spread.
+    let mut running = 0.0f32;
+    for v in values.iter_mut() {
+        running = (running / factor).max(*v);
+        *v = running;
+    }
+    let mut running = 0.0f32;
+    for v in values.iter_mut().rev() {
+        running = (running / factor).max(*v);
+        *v = running;
     }
 }
 
@@ -485,6 +485,11 @@ fn cycle_mode(
     editor: Res<crate::gui::EditorState>,
 ) {
     if editor.capture_keyboard {
+        return;
+    }
+    // If the user rebound the editor toggle to Space ([gui] toggle_key), that
+    // binding wins — otherwise every editor toggle would also cycle the mode.
+    if editor.toggle_key == KeyCode::Space {
         return;
     }
     if keys.just_pressed(KeyCode::Space) {
@@ -658,6 +663,46 @@ mod tests {
     }
 
     #[test]
+    fn spread_monstercat_matches_naive_pairwise_reference() {
+        // The O(n) two-sweep must agree with the original O(n²) definition:
+        // out[m] = max over z of src[z] / factor^|z-m|.
+        fn naive(values: &mut [f32], factor: f32) {
+            let src: Vec<f32> = values.to_vec();
+            for (m, out) in values.iter_mut().enumerate() {
+                for (z, &peak) in src.iter().enumerate() {
+                    let dist = (z as i32 - m as i32).unsigned_abs() as f32;
+                    let spread = peak / factor.powf(dist);
+                    if spread > *out {
+                        *out = spread;
+                    }
+                }
+            }
+        }
+        // Deterministic pseudo-random spectrum (LCG), several factors.
+        let mut seed = 0x2545F491u32;
+        let src: Vec<f32> = (0..64)
+            .map(|_| {
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                (seed >> 8) as f32 / (1u32 << 24) as f32
+            })
+            .collect();
+        for factor in [1.1f32, 1.5, 2.0, 4.0] {
+            let mut fast = src.clone();
+            let mut slow = src.clone();
+            spread_monstercat(&mut fast, factor);
+            naive(&mut slow, factor);
+            for i in 0..src.len() {
+                assert!(
+                    (fast[i] - slow[i]).abs() < 1e-4,
+                    "factor {factor} bar {i}: fast {} vs naive {}",
+                    fast[i],
+                    slow[i]
+                );
+            }
+        }
+    }
+
+    #[test]
     fn gradient_color_clamps_and_brightens_with_amplitude() {
         let lo = Color::srgb(0.1, 0.2, 0.3);
         let hi = Color::srgb(0.9, 0.8, 0.7);
@@ -672,18 +717,19 @@ mod tests {
     }
 
     #[test]
-    fn vis_settings_profile_clamps_index_and_handles_empty() {
+    fn active_profile_index_clamps_and_empty_is_safe() {
         let mut s = VisSettings::default();
+        let red = Color::srgb(1.0, 0.0, 0.0);
         s.profiles = vec![
             ColorProfile { name: "a".into(), fg: vec![Color::BLACK], ..ColorProfile::default() },
-            ColorProfile { name: "b".into(), fg: vec![Color::WHITE], ..ColorProfile::default() },
+            ColorProfile { name: "b".into(), fg: vec![red], ..ColorProfile::default() },
         ];
-        s.active_profile = 99; // out of range → clamps to last
-        assert_eq!(s.profile().name, "b");
+        s.active_profile = 99; // out of range → clamps to last ("b")
+        assert_eq!(s.fg_lo(), red);
 
         s.profiles.clear();
-        // Empty list → a default profile, never a panic.
-        assert_eq!(s.profile().name, ColorProfile::default().name);
+        // Empty list → white fallback, never a panic.
+        assert_eq!(s.fg_stops(), vec![Color::WHITE]);
     }
 
     #[test]

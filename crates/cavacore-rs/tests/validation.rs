@@ -211,6 +211,34 @@ fn misaligned_stereo_input_never_poisons_the_plan() {
 }
 
 #[test]
+fn degenerate_layouts_never_panic_or_emit_nan() {
+    // Valid-but-degenerate configs used to break the bin layout: the C
+    // original's zero-width-bar fixup could point one past the last FFT bin
+    // (an index panic in the port), and a bar collapsing to zero bins made the
+    // eq normalization divide by zero, NaN-poisoning the filter state forever.
+    // All of these passed `build()` validation; none may panic or go non-finite.
+    let cases = [
+        // OOB fixup: very low rate, band pinned at Nyquist.
+        CavaConfig { bars: 16, channels: 1, rate: 200, low_cutoff_freq: 99, high_cutoff_freq: 100, ..Default::default() },
+        CavaConfig { bars: 257, channels: 1, rate: 200, low_cutoff_freq: 50, high_cutoff_freq: 100, ..Default::default() },
+        // Zero-width bar: 1-bin band ending exactly at Nyquist.
+        CavaConfig { bars: 1, channels: 1, rate: 44_100, low_cutoff_freq: 22_049, high_cutoff_freq: 22_050, ..Default::default() },
+        // More bars than the default band has usable bins.
+        CavaConfig { bars: 2049, channels: 1, rate: 44_100, ..Default::default() },
+    ];
+    for (i, cfg) in cases.iter().enumerate() {
+        let mut plan = cfg.build().unwrap_or_else(|e| panic!("case {i} failed to build: {e}"));
+        for frame in 0..20 {
+            let out = plan.execute(&[0.5f64; 512]);
+            assert!(
+                out.iter().all(|v| v.is_finite()),
+                "case {i} frame {frame} produced non-finite output"
+            );
+        }
+    }
+}
+
+#[test]
 fn varying_chunk_sizes_are_accepted() {
     // Async capture delivers irregular chunk sizes; the API must tolerate it.
     let mut plan = CavaConfig { bars: 16, channels: 2, ..Default::default() }

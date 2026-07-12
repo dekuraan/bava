@@ -211,6 +211,21 @@ fn apply_now_playing_updates(
 /// all platform backends. Also extracts the `(primary, secondary)` accent colors
 /// here, on the (background) decode thread, so the render loop never pays for it.
 fn decode_art_bytes(bytes: &[u8]) -> Option<DecodedArt> {
+    // Check the header dimensions before decoding: the fetch paths cap the
+    // *encoded* size, but a small PNG can declare enormous dimensions (a
+    // 16 MiB file claiming 40 000×40 000 would allocate ~6.4 GB as RGBA8) —
+    // and art URLs are fed by arbitrary MPRIS players. 8192² (256 MiB RGBA)
+    // is far beyond any real cover.
+    const MAX_ART_DIM: u32 = 8192;
+    let (w, h) = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()?;
+    if w == 0 || h == 0 || w > MAX_ART_DIM || h > MAX_ART_DIM {
+        warn!("bava: ignoring album art with implausible dimensions {w}x{h}");
+        return None;
+    }
     let img = image::load_from_memory(bytes).ok()?;
     let rgba = img.to_rgba8();
     let (width, height) = rgba.dimensions();

@@ -129,11 +129,19 @@ fn update_background(
     art: Res<AlbumArt>,
     windows: Query<&Window>,
     mut q: Query<&mut Sprite, With<ArtBackground>>,
+    mut last_size: Local<Vec2>,
 ) {
     let Some(window) = windows.iter().next() else {
         return;
     };
     let (ww, wh) = (window.width(), window.height());
+    // The sprite only depends on the art and the window size; rewriting it
+    // every frame would re-dirty the sprite (and re-clone the handle) at 60 Hz.
+    let size = Vec2::new(ww, wh);
+    if !art.is_changed() && *last_size == size {
+        return;
+    }
+    *last_size = size;
 
     for mut sprite in &mut q {
         match (&art.image, art.size) {
@@ -180,6 +188,8 @@ fn update_label(
 /// Cover-fit, tint, and show one user image `layer` on its sprite (or hide the
 /// sprite when the layer has no path). `asset_server.load` returns the cached
 /// handle for an already-loaded path, so re-issuing it each frame is cheap.
+/// Returns `true` once the layer is settled (no image configured, or the image
+/// is loaded and the final cover-fit size has been applied).
 fn apply_image_layer(
     layer: &ImageLayer,
     ww: f32,
@@ -188,31 +198,37 @@ fn apply_image_layer(
     images: &Assets<Image>,
     sprite: &mut Sprite,
     visibility: &mut Visibility,
-) {
+) -> bool {
     let Some(path) = &layer.path else {
         sprite.color = Color::NONE;
         *visibility = Visibility::Hidden;
-        return;
+        return true;
     };
     let handle: Handle<Image> = asset_server.load(path.clone());
     // Cover-fit to window when the image's dimensions are known.
-    if let Some(img) = images.get(&handle) {
+    let loaded = if let Some(img) = images.get(&handle) {
         let (iw, ih) = (img.width() as f32, img.height() as f32);
         if iw > 0.0 && ih > 0.0 {
             let scale = (ww / iw).max(wh / ih) * layer.scale;
             sprite.custom_size = Some(Vec2::new(iw * scale, ih * scale));
         }
+        true
     } else {
         // Image not yet loaded; fill window at the configured scale.
         sprite.custom_size = Some(Vec2::new(ww, wh) * layer.scale);
-    }
+        false
+    };
     sprite.image = handle;
     sprite.color = Color::srgba(1.0, 1.0, 1.0, layer.alpha);
     *visibility = Visibility::Visible;
+    loaded
 }
 
 /// Load and display user-configured background / foreground images from
 /// [`VisSettings::background`] and [`VisSettings::foreground`].
+// A Bevy system signature: one param per queried layer + the change-guard
+// Locals; the disjoint With/Without filters are what keep the queries sound.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn update_user_images(
     vis: Res<VisSettings>,
     asset_server: Res<AssetServer>,
@@ -220,16 +236,31 @@ fn update_user_images(
     windows: Query<&Window>,
     mut bg: Query<(&mut Sprite, &mut Visibility), (With<UserBackground>, Without<UserForeground>)>,
     mut fg: Query<(&mut Sprite, &mut Visibility), (With<UserForeground>, Without<UserBackground>)>,
+    mut last_size: Local<Vec2>,
+    mut settled: Local<bool>,
 ) {
     let Some(window) = windows.iter().next() else {
         return;
     };
     let (ww, wh) = (window.width(), window.height());
+    // Only re-apply when the settings or window changed, or while a configured
+    // image is still loading (its cover-fit size isn't final until then) —
+    // otherwise this would hit the asset server and dirty both sprites at 60 Hz.
+    let size = Vec2::new(ww, wh);
+    if vis.is_changed() || *last_size != size {
+        *settled = false;
+        *last_size = size;
+    }
+    if *settled {
+        return;
+    }
 
+    let mut all_loaded = true;
     for (mut sprite, mut visibility) in &mut bg {
-        apply_image_layer(&vis.background, ww, wh, &asset_server, &images, &mut sprite, &mut visibility);
+        all_loaded &= apply_image_layer(&vis.background, ww, wh, &asset_server, &images, &mut sprite, &mut visibility);
     }
     for (mut sprite, mut visibility) in &mut fg {
-        apply_image_layer(&vis.foreground, ww, wh, &asset_server, &images, &mut sprite, &mut visibility);
+        all_loaded &= apply_image_layer(&vis.foreground, ww, wh, &asset_server, &images, &mut sprite, &mut visibility);
     }
+    *settled = all_loaded;
 }
