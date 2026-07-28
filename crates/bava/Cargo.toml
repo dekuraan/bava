@@ -105,7 +105,7 @@ mpris = "2"
 # HTTP fetch for remote album art (e.g. spotifyd's http artUrl).
 ureq = "3"
 # Decode `data:…;base64,…` artUrls (jellyfin-desktop embeds the cover inline).
-base64 = "0.22"
+base64 = "0.23"
 
 # --- Windows backends: WASAPI loopback capture + GSMTC now-playing. ---
 [target.'cfg(target_os = "windows")'.dependencies]
@@ -130,7 +130,7 @@ windows = { version = "0.62", features = [
 objc2 = "0.6"
 # Parse the mediaremote-adapter JSON stream + its base64 `artworkData`.
 serde_json = "1"
-base64 = "0.22"
+base64 = "0.23"
 # CoreAudio bindings: process taps, aggregate devices, IO procs. `AudioHardware`
 # turns on the CFDictionary-based aggregate-device API; the default features
 # already enable objc2 + objc2-foundation + objc2-core-audio-types + block2.
