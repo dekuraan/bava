@@ -77,6 +77,18 @@ jobs:
   # 22.04. Pinned to the oldest LTS runner GitHub still offers — bump it to the
   # next-oldest when this image retires, and the compatibility floor rises with
   # it.
+  #
+  # All three artifacts are the **PulseAudio-only** build, and that follows from
+  # the pin. 22.04 ships PipeWire 0.3.48 headers from 2022, which the `libspa`
+  # crate no longer compiles against:
+  #   error[E0425]: cannot find function `spa_meta_first` in crate `spa_sys`
+  #   error[E0609]: no field `flags` on type `spa_video_info_raw`
+  # Keeping the native backend would mean building on 24.04, whose glibc 2.39
+  # locks out Debian 12 (2.36) and Ubuntu 22.04 — the exact machines this job
+  # exists to serve. The PulseAudio path reaches PipeWire hosts through
+  # pipewire-pulse, so the trade buys broad installability for a backend most
+  # users arrive at indirectly anyway. Anyone wanting the native backend has the
+  # `bava-linux-x86_64` binary, the AUR package, or a source build.
   package-linux:
     name: Package (deb, rpm, AppImage)
     runs-on: ubuntu-22.04
@@ -92,9 +104,6 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
             libpulse-dev \
-            libpipewire-0.3-dev \
-            clang \
-            libclang-dev \
             libasound2-dev \
             libdbus-1-dev \
             libwayland-dev \
@@ -118,22 +127,18 @@ jobs:
       - name: Install packaging tools
         run: cargo install --locked cargo-deb cargo-generate-rpm
 
-      # .deb and .rpm ship the *default* (native PipeWire) build: both distros
-      # package libpipewire, and cargo-deb's `$auto` / cargo-generate-rpm's
-      # auto-req read the ELF and declare that dependency for us.
-      - name: Build release (native PipeWire)
-        run: cargo build --release -p bava
+      # One build feeds all three artifacts — see the job header for why it is
+      # the PulseAudio-only one. cargo-deb's `$auto` and cargo-generate-rpm's
+      # auto-req both read this ELF, so their dependency lists follow whatever
+      # it actually links rather than a hand-kept list.
+      - name: Build release (PulseAudio-only)
+        run: cargo build --release -p bava --no-default-features
 
       - name: Build .deb
         run: cargo deb -p bava --no-build
 
       - name: Build .rpm
         run: cargo generate-rpm -p crates/bava
-
-      # The AppImage ships the PulseAudio-only build instead — see the header
-      # comment in build-appimage.sh for why bundling libpipewire is a trap.
-      - name: Build release (PulseAudio-only)
-        run: cargo build --release -p bava --no-default-features
 
       # Strip the tag's leading `v`: cargo-deb and cargo-generate-rpm both name
       # their output from the crate version (`bava_0.4.0_amd64.deb`), so passing

@@ -96,25 +96,36 @@ No review queue, no account: the `package-linux` job builds all three on every
 `v*` tag and attaches them to the GitHub release. Locally:
 
 ```sh
-cargo build --release -p bava
-cargo deb -p bava --no-build                 # target/debian/bava_<ver>_amd64.deb
-cargo generate-rpm -p crates/bava            # target/generate-rpm/bava-<ver>.x86_64.rpm
-
+# One build feeds all three.
 cargo build --release -p bava --no-default-features
+cargo deb -p bava --no-build                 # target/debian/bava_<ver>-1_amd64.deb
+cargo generate-rpm -p crates/bava            # target/generate-rpm/bava-<ver>-1.x86_64.rpm
 packaging/appimage/build-appimage.sh target/release/bava 0.4.0
 ```
 
-Two deliberate choices:
+Three deliberate choices:
 
 - The job is pinned to the **oldest LTS runner** GitHub still offers. glibc is
   forward- but not backward-compatible, so a package built on 24.04 refuses to
   start on 22.04. Bump the pin when the image retires; the compatibility floor
   rises with it.
-- The **AppImage ships the PulseAudio-only build**. The default build links
-  `libpipewire-0.3.so`, and bundling a PipeWire *client* library into a portable
-  archive is a trap — it talks to whatever daemon the host runs, and skewed
-  client/daemon pairs misbehave. The PulseAudio path works on pure-PulseAudio
-  hosts *and* on PipeWire hosts via pipewire-pulse.
+- **All three ship the PulseAudio-only build**, and that follows from the pin.
+  22.04 carries PipeWire 0.3.48 headers from 2022, which the `libspa` crate no
+  longer compiles against (`cannot find function spa_meta_first`, `no field
+  flags on type spa_video_info_raw`). Keeping the native backend would mean
+  building on 24.04, whose glibc 2.39 locks out Debian 12 (2.36) and Ubuntu
+  22.04 — the machines this job exists to serve. The PulseAudio path reaches
+  PipeWire hosts through pipewire-pulse, so the trade buys installability for a
+  backend most users arrive at indirectly anyway. For the native backend: the
+  `bava-linux-x86_64` release binary, the AUR package, or a source build.
+- Bundling a PipeWire *client* library into a portable archive would be a trap
+  independently of the above — it talks to whatever daemon the host runs, and
+  skewed client/daemon pairs misbehave.
+
+The packaging tools are **built from source** in CI rather than fetched as
+prebuilts: `taiki-e/install-action` now serves a `cargo-deb` needing GLIBC_2.39,
+which the 22.04 pin cannot satisfy, so the tooling — not the output — was what
+failed to start.
 
 `cargo deb`'s `$auto` and `cargo generate-rpm`'s auto-req both read the built
 ELF, so the shared-library dependency lists can't drift from what we link. On a
