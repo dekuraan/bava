@@ -340,13 +340,22 @@ Normalizes to the 120-char prefix
 collider drift. update_columns reads cava.mono directly instead of bars::mirror_values, so reverse_order is ignored.
 ```
 
-and `fp "src/vis/physics.rs:212" "$body"` yields **`f94d4359b5`**. Reflowing that same body onto one
+and `fp "src/vis/physics.rs:212" "$body"` yields **`f94d4359b5`**. Reflowing the *prose* onto one
 line, adding stray spaces, and changing the `Reviewed commit:` SHA yields `f94d4359b5` again — that
 stability is the entire property being bought. Changing the line to `:999` yields `1ba54a3fcd`, and
 hashing it as a top-level comment (empty key, 160-char window) yields `86e2442d7c`. If your
-implementation disagrees with those four values on that input, it is wrong — fix it rather than
+implementation disagrees with those three values on that input, it is wrong — fix it rather than
 proceeding, because a drifting fingerprint silently defeats cross-cycle deduping and you will
 re-triage declined items forever.
+
+**Known limitation — the trailer strip is line-anchored.** `sed -E '/^…Reviewed commit:/d'` deletes
+the trailer only when it occupies its own line, which is how the review action actually emits it. If
+a body ever arrives with the trailer merged mid-line, the SHA regex still removes the hex but the
+literal words `reviewed commit:` survive into the hashed window — that variant of the example above
+hashes to `07dcfae07f`, not `f94d4359b5`. Do **not** "fix" this by stripping the phrase
+unanchored: `Reviewed commit:` appearing in the middle of a sentence is more likely to be a reviewer
+quoting something than a trailer, and deleting it there would corrupt real content. The
+substance-match rule is the backstop for this case, as it is for any rewording.
 
 For a top-level comment with no file/line the key is empty (so the string starts with `|`) and the
 window is 160 chars, not 120.
