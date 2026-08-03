@@ -237,7 +237,14 @@ async function startCapture(currentTab) {
     );
     return false;
   }
-  await stopCapture();
+  // Deliberately *not* `await stopCapture()` here. Tearing the old source down
+  // awaits `AudioContext.close()`, which is real async work, and transient
+  // activation does not survive it — so re-entering while a source is already
+  // live (paste-anywhere, a second "Start visualizing", Retry) would reach
+  // `getDisplayMedia` gestureless and fail with `NotAllowedError`, reported as
+  // a cancelled picker. The old source keeps playing behind the picker and is
+  // stopped once a new stream is actually granted; if the user dismisses the
+  // picker, it keeps running, which is what "cancel" should mean anyway.
 
   let stream;
   try {
@@ -289,6 +296,10 @@ async function startCapture(currentTab) {
   // it. Disabling blanks it at the source; *stopping* it would end the share.
   for (const track of stream.getVideoTracks()) track.enabled = false;
 
+  // The gesture has done its job — now it is safe to tear down whatever was
+  // playing before, ahead of building this stream's graph.
+  await stopCapture();
+
   const context = new AudioContext();
   // Chrome starts an AudioContext suspended unless it can attribute it to a
   // gesture; the picker interaction counts, but resume() is cheap insurance.
@@ -329,8 +340,11 @@ async function startFile(file) {
   // tainted DOM text and `createObjectURL` as taint-preserving, so it reads
   // this as user text reaching a URL sink. `createObjectURL` only ever returns
   // a same-origin `blob:` URL — none of the file's own bytes or name survive
-  // into it — and `<audio>.src` doesn't interpret HTML regardless.
-  audioEl.src = url; // codeql[js/xss-through-dom]
+  // into it — and `<audio>.src` doesn't interpret HTML regardless. Code
+  // scanning does not honour inline `codeql[...]` suppression comments, so the
+  // alert is dismissed in the security tab instead; this comment is the record
+  // of why, for whoever sees it re-raised if the line ever moves.
+  audioEl.src = url;
   audioEl.loop = true;
   if (FILE_SECTION) FILE_SECTION.hidden = false;
   // Re-picking the same File isn't possible programmatically, but re-opening
