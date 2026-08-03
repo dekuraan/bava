@@ -78,6 +78,56 @@ jobs:
       - name: Test (bava)
         run: cargo test -p bava --bin bava
 
+  # ── Formatting + lints ────────────────────────────────────────────────────
+  # Its own job so a formatting nit reports separately from a real compile
+  # failure, and so `fmt` gives its answer in seconds without waiting on the
+  # dependency build clippy needs.
+  #
+  # `cargo fmt` is the one check here that sees *every* file regardless of
+  # `cfg(target_os)`, which is the point: `coreaudio.rs` can be neither built
+  # nor clippy'd on a Linux runner, and it is exactly the file that drifted
+  # when this check didn't exist. Clippy is Linux-target only — the Windows and
+  # macOS backends are still covered for compilation by their own jobs above.
+  lint:
+    name: Lint (fmt + clippy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      # Same set the `linux` job installs: clippy type-checks bava for real, so
+      # it needs libpipewire + libclang for libspa-sys' bindgen like any build.
+      - name: Install system deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libpulse-dev \
+            libpipewire-0.3-dev \
+            clang \
+            libclang-dev \
+            libasound2-dev \
+            libdbus-1-dev \
+            libwayland-dev \
+            libxkbcommon-dev \
+            libx11-dev \
+            libxcursor-dev \
+            libxrandr-dev \
+            libxi-dev \
+            libvulkan-dev
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
   # ── Windows: native typecheck (real windows crate + MSVC toolchain) ────────
   windows:
     name: Windows (x86_64)
