@@ -14,7 +14,7 @@ use std::time::Duration;
 use bevy::prelude::*;
 use crossbeam_channel::Sender;
 
-use super::{decode_art_bytes, DecodedArt, NowPlaying, NowPlayingMsg};
+use super::{DecodedArt, NowPlaying, NowPlayingMsg, decode_art_bytes};
 
 /// Background poll loop. Tolerant of a missing D-Bus / no active player.
 pub(super) fn run(tx: Sender<NowPlayingMsg>) {
@@ -117,8 +117,10 @@ fn percent_decode(s: &str) -> Vec<u8> {
     while i < bytes.len() {
         if bytes[i] == b'%'
             && i + 2 < bytes.len()
-            && let (Some(h), Some(l)) =
-                ((bytes[i + 1] as char).to_digit(16), (bytes[i + 2] as char).to_digit(16))
+            && let (Some(h), Some(l)) = (
+                (bytes[i + 1] as char).to_digit(16),
+                (bytes[i + 2] as char).to_digit(16),
+            )
         {
             out.push((h * 16 + l) as u8);
             i += 3;
@@ -139,7 +141,10 @@ fn decode_data_uri(url: &str) -> Option<Vec<u8>> {
     let rest = url.strip_prefix("data:")?;
     // `<mediatype>[;base64],<data>` — split on the first comma.
     let (meta, data) = rest.split_once(',')?;
-    if meta.rsplit(';').any(|seg| seg.eq_ignore_ascii_case("base64")) {
+    if meta
+        .rsplit(';')
+        .any(|seg| seg.eq_ignore_ascii_case("base64"))
+    {
         // Tolerate whitespace and either alphabet; the payload is large.
         base64::engine::general_purpose::STANDARD
             .decode(data.trim())

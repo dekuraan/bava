@@ -12,8 +12,8 @@
 use std::io::Write;
 use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use bevy::prelude::Image;
 use bevy_capture::encoder::{Encoder, Result};
@@ -76,7 +76,14 @@ impl FfmpegEncoder {
             .args(["-c:v", "libx264", "-preset", "veryfast", "-crf", "18"])
             .args(["-profile:v", "high", "-pix_fmt", "yuv420p"])
             .args(["-g", &(fps / 2).max(1).to_string(), "-bf", "2"])
-            .args(["-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709"])
+            .args([
+                "-colorspace",
+                "bt709",
+                "-color_primaries",
+                "bt709",
+                "-color_trc",
+                "bt709",
+            ])
             // Audio: AAC-LC 384 kbps stereo (YouTube's recommended maximum).
             .args(["-c:a", "aac", "-b:a", "384k"])
             // Exact output length (the video's frame count / fps, known up
@@ -159,12 +166,10 @@ impl Encoder for FfmpegEncoder {
             }
         };
         // Don't overwrite an earlier FAILED from a write error.
-        let _ = self.status.0.compare_exchange(
-            RUNNING,
-            outcome,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        );
+        let _ =
+            self.status
+                .0
+                .compare_exchange(RUNNING, outcome, Ordering::AcqRel, Ordering::Acquire);
     }
 }
 

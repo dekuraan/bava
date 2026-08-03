@@ -28,7 +28,7 @@ use bevy::prelude::*;
 use crossbeam_channel::Sender;
 use serde::Deserialize;
 
-use super::{decode_art_bytes, NowPlayingMsg, NowPlaying};
+use super::{NowPlaying, NowPlayingMsg, decode_art_bytes};
 
 /// One line of the adapter's `stream` output.
 #[derive(Deserialize)]

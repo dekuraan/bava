@@ -22,9 +22,13 @@ fn settle(plan: &mut cavacore_rs::CavaPlan, signal: &[f64], iterations: usize) -
 
 #[test]
 fn silence_is_near_zero() {
-    let mut plan = CavaConfig { bars: 16, channels: 1, ..Default::default() }
-        .build()
-        .unwrap();
+    let mut plan = CavaConfig {
+        bars: 16,
+        channels: 1,
+        ..Default::default()
+    }
+    .build()
+    .unwrap();
     let silence = vec![0.0f64; 512];
     let out = settle(&mut plan, &silence, 300);
     let max = out.iter().cloned().fold(0.0f64, f64::max);
@@ -35,7 +39,12 @@ fn silence_is_near_zero() {
 fn low_tone_peaks_lower_than_high_tone() {
     let rate = 44_100;
     // 16 bars across 50..10000 Hz, mono.
-    let cfg = CavaConfig { bars: 16, channels: 1, rate, ..Default::default() };
+    let cfg = CavaConfig {
+        bars: 16,
+        channels: 1,
+        rate,
+        ..Default::default()
+    };
 
     let mut low_plan = cfg.build().unwrap();
     let low = sine_interleaved(150.0, rate, 512, &[0.8]);
@@ -49,8 +58,14 @@ fn low_tone_peaks_lower_than_high_tone() {
     let high_peak = argmax(&high_out);
 
     // Each tone must produce a clear peak...
-    assert!(low_out[low_peak] > 0.1, "low tone produced no clear peak: {low_out:?}");
-    assert!(high_out[high_peak] > 0.1, "high tone produced no clear peak: {high_out:?}");
+    assert!(
+        low_out[low_peak] > 0.1,
+        "low tone produced no clear peak: {low_out:?}"
+    );
+    assert!(
+        high_out[high_peak] > 0.1,
+        "high tone produced no clear peak: {high_out:?}"
+    );
     // ...and the low tone's peak bar must be below the high tone's.
     assert!(
         low_peak < high_peak,
@@ -62,9 +77,14 @@ fn low_tone_peaks_lower_than_high_tone() {
 fn stereo_channels_are_separated() {
     let rate = 44_100;
     let bars = 16;
-    let mut plan = CavaConfig { bars, channels: 2, rate, ..Default::default() }
-        .build()
-        .unwrap();
+    let mut plan = CavaConfig {
+        bars,
+        channels: 2,
+        rate,
+        ..Default::default()
+    }
+    .build()
+    .unwrap();
 
     // Tone only in the LEFT channel; right channel silent.
     let signal = sine_interleaved(1000.0, rate, 512, &[0.8, 0.0]);
@@ -74,7 +94,10 @@ fn stereo_channels_are_separated() {
     let left_energy: f64 = left.iter().sum();
     let right_energy: f64 = right.iter().sum();
 
-    assert!(left_energy > 0.1, "left channel should have energy, got {left_energy}");
+    assert!(
+        left_energy > 0.1,
+        "left channel should have energy, got {left_energy}"
+    );
     assert!(
         right_energy < left_energy * 0.1,
         "right channel should be near-silent: left={left_energy} right={right_energy}"
@@ -122,7 +145,10 @@ fn noise_reduction_slows_decay() {
             reference += plan.execute(&tone)[peak_bar];
         }
         reference /= 10.0;
-        assert!(reference > 1e-6, "tone failed to settle for nr={nr}: ref={reference}");
+        assert!(
+            reference > 1e-6,
+            "tone failed to settle for nr={nr}: ref={reference}"
+        );
 
         // Integrate the bar value as it decays through a long silence window.
         let mut area = 0.0;
@@ -150,9 +176,14 @@ fn noise_reduction_slows_decay() {
 fn e2e_streamed_signal_is_well_behaved_and_reactive() {
     let rate = 44_100;
     let bars = 24usize;
-    let mut plan = CavaConfig { bars: bars as u32, channels: 2, rate, ..Default::default() }
-        .build()
-        .unwrap();
+    let mut plan = CavaConfig {
+        bars: bars as u32,
+        channels: 2,
+        rate,
+        ..Default::default()
+    }
+    .build()
+    .unwrap();
 
     let frame = 512usize;
     let total_frames = rate as usize * 2; // ~2 seconds
@@ -190,5 +221,8 @@ fn e2e_streamed_signal_is_well_behaved_and_reactive() {
     let low_band: f64 = final_left[..bars / 3].iter().sum();
     let high_band: f64 = final_left[2 * bars / 3..].iter().sum();
     assert!(low_band > 0.05, "expected low-band energy, got {low_band}");
-    assert!(high_band > 0.05, "expected high-band energy, got {high_band}");
+    assert!(
+        high_band > 0.05,
+        "expected high-band energy, got {high_band}"
+    );
 }

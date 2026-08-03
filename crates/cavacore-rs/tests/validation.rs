@@ -72,39 +72,65 @@ fn rejects_out_of_range_noise_reduction() {
 fn rejects_bad_cutoff_band() {
     // low == 0
     assert!(matches!(
-        CavaConfig { low_cutoff_freq: 0, ..Default::default() }.build(),
+        CavaConfig {
+            low_cutoff_freq: 0,
+            ..Default::default()
+        }
+        .build(),
         Err(CavaError::InvalidCutoff { .. })
     ));
     // high <= low
     assert!(matches!(
-        CavaConfig { low_cutoff_freq: 5000, high_cutoff_freq: 5000, ..Default::default() }.build(),
+        CavaConfig {
+            low_cutoff_freq: 5000,
+            high_cutoff_freq: 5000,
+            ..Default::default()
+        }
+        .build(),
         Err(CavaError::InvalidCutoff { .. })
     ));
     // high >= nyquist
     assert!(matches!(
-        CavaConfig { rate: 44_100, high_cutoff_freq: 30_000, ..Default::default() }.build(),
+        CavaConfig {
+            rate: 44_100,
+            high_cutoff_freq: 30_000,
+            ..Default::default()
+        }
+        .build(),
         Err(CavaError::InvalidCutoff { .. })
     ));
 }
 
 #[test]
 fn output_len_matches_mono_and_stereo() {
-    let mono = CavaConfig { bars: 24, channels: 1, ..Default::default() }
-        .build()
-        .unwrap();
+    let mono = CavaConfig {
+        bars: 24,
+        channels: 1,
+        ..Default::default()
+    }
+    .build()
+    .unwrap();
     assert_eq!(mono.output_len(), 24);
 
-    let stereo = CavaConfig { bars: 24, channels: 2, ..Default::default() }
-        .build()
-        .unwrap();
+    let stereo = CavaConfig {
+        bars: 24,
+        channels: 2,
+        ..Default::default()
+    }
+    .build()
+    .unwrap();
     assert_eq!(stereo.output_len(), 48);
 }
 
 #[test]
 fn execute_returns_exact_output_len_for_any_input_size() {
-    let mut plan = CavaConfig { bars: 16, channels: 2, ..Default::default() }
-        .build()
-        .unwrap();
+    let mut plan = CavaConfig {
+        bars: 16,
+        channels: 2,
+        ..Default::default()
+    }
+    .build()
+    .unwrap();
     let want = plan.output_len();
 
     // empty, tiny, normal, and larger-than-internal-buffer inputs must all be
@@ -114,15 +140,23 @@ fn execute_returns_exact_output_len_for_any_input_size() {
         let input = vec![0.0f64; len];
         let out = plan.execute(&input);
         assert_eq!(out.len(), want, "input len {len} produced wrong output len");
-        assert!(out.iter().all(|v| v.is_finite()), "non-finite output for len {len}");
+        assert!(
+            out.iter().all(|v| v.is_finite()),
+            "non-finite output for len {len}"
+        );
     }
 }
 
 #[test]
 fn output_is_bounded_and_nonnegative_with_autosens() {
-    let mut plan = CavaConfig { bars: 16, channels: 1, autosens: true, ..Default::default() }
-        .build()
-        .unwrap();
+    let mut plan = CavaConfig {
+        bars: 16,
+        channels: 1,
+        autosens: true,
+        ..Default::default()
+    }
+    .build()
+    .unwrap();
     // Drive a loud signal through many frames, then check the contract that
     // autosens keeps output in a sane bounded, non-negative range.
     let signal = common::sine_interleaved(440.0, 44_100, 512, &[0.9]);
@@ -149,9 +183,13 @@ fn build_drop_loop_does_not_crash() {
 
 #[test]
 fn plan_is_send_to_another_thread() {
-    let mut plan: CavaPlan = CavaConfig { bars: 12, channels: 1, ..Default::default() }
-        .build()
-        .unwrap();
+    let mut plan: CavaPlan = CavaConfig {
+        bars: 12,
+        channels: 1,
+        ..Default::default()
+    }
+    .build()
+    .unwrap();
     let handle = std::thread::spawn(move || {
         let input = common::sine_interleaved(1000.0, 44_100, 512, &[0.5]);
         let out = plan.execute(&input);
@@ -191,9 +229,13 @@ fn misaligned_stereo_input_never_poisons_the_plan() {
     // emit NaN, which then propagates through the integral filter and ruins all
     // subsequent frames. The wrapper must floor to whole frames so this can't
     // happen — even interleaving deliberately odd-length chunks.
-    let mut plan = CavaConfig { bars: 16, channels: 2, ..Default::default() }
-        .build()
-        .unwrap();
+    let mut plan = CavaConfig {
+        bars: 16,
+        channels: 2,
+        ..Default::default()
+    }
+    .build()
+    .unwrap();
     let tone = common::sine_interleaved(440.0, 44_100, 256, &[0.6, 0.6]);
 
     for &odd in &[1usize, 3, 5, 511, 513] {
@@ -219,15 +261,43 @@ fn degenerate_layouts_never_panic_or_emit_nan() {
     // All of these passed `build()` validation; none may panic or go non-finite.
     let cases = [
         // OOB fixup: very low rate, band pinned at Nyquist.
-        CavaConfig { bars: 16, channels: 1, rate: 200, low_cutoff_freq: 99, high_cutoff_freq: 100, ..Default::default() },
-        CavaConfig { bars: 257, channels: 1, rate: 200, low_cutoff_freq: 50, high_cutoff_freq: 100, ..Default::default() },
+        CavaConfig {
+            bars: 16,
+            channels: 1,
+            rate: 200,
+            low_cutoff_freq: 99,
+            high_cutoff_freq: 100,
+            ..Default::default()
+        },
+        CavaConfig {
+            bars: 257,
+            channels: 1,
+            rate: 200,
+            low_cutoff_freq: 50,
+            high_cutoff_freq: 100,
+            ..Default::default()
+        },
         // Zero-width bar: 1-bin band ending exactly at Nyquist.
-        CavaConfig { bars: 1, channels: 1, rate: 44_100, low_cutoff_freq: 22_049, high_cutoff_freq: 22_050, ..Default::default() },
+        CavaConfig {
+            bars: 1,
+            channels: 1,
+            rate: 44_100,
+            low_cutoff_freq: 22_049,
+            high_cutoff_freq: 22_050,
+            ..Default::default()
+        },
         // More bars than the default band has usable bins.
-        CavaConfig { bars: 2049, channels: 1, rate: 44_100, ..Default::default() },
+        CavaConfig {
+            bars: 2049,
+            channels: 1,
+            rate: 44_100,
+            ..Default::default()
+        },
     ];
     for (i, cfg) in cases.iter().enumerate() {
-        let mut plan = cfg.build().unwrap_or_else(|e| panic!("case {i} failed to build: {e}"));
+        let mut plan = cfg
+            .build()
+            .unwrap_or_else(|e| panic!("case {i} failed to build: {e}"));
         for frame in 0..20 {
             let out = plan.execute(&[0.5f64; 512]);
             assert!(
@@ -241,9 +311,13 @@ fn degenerate_layouts_never_panic_or_emit_nan() {
 #[test]
 fn varying_chunk_sizes_are_accepted() {
     // Async capture delivers irregular chunk sizes; the API must tolerate it.
-    let mut plan = CavaConfig { bars: 16, channels: 2, ..Default::default() }
-        .build()
-        .unwrap();
+    let mut plan = CavaConfig {
+        bars: 16,
+        channels: 2,
+        ..Default::default()
+    }
+    .build()
+    .unwrap();
     for &chunk in &[64usize, 128, 300, 512, 1024, 17] {
         let input = vec![0.01f64; chunk * 2];
         let out = plan.execute(&input);

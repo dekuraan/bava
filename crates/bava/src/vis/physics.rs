@@ -38,11 +38,11 @@ use bevy::prelude::*;
 
 use crate::cava::Cava;
 use crate::gui::EditorState;
-use crate::vis::bars::{column_geom, mirror_values, Layout, LEVEL_STEPS, MAX_HEIGHT_FRAC};
+use crate::vis::bars::{LEVEL_STEPS, Layout, MAX_HEIGHT_FRAC, column_geom, mirror_values};
 use crate::vis::circle::blob_ring;
-use crate::vis::stroke::{empty_stroke_mesh, stroke_material, MeshBatch, STROKE_FEATHER};
+use crate::vis::stroke::{MeshBatch, STROKE_FEATHER, empty_stroke_mesh, stroke_material};
 use crate::vis::{
-    sample_gradient, spread_monstercat, DrawingMode, MirrorMode, VisFamily, VisSettings, VisShape,
+    DrawingMode, MirrorMode, VisFamily, VisSettings, VisShape, sample_gradient, spread_monstercat,
 };
 
 /// 1 physics "metre" = this many world pixels. Scales avian's internal
@@ -303,11 +303,7 @@ impl Plugin for PhysicsPlugin {
             // Ball and trail geometry is built from the *simulated* transforms,
             // so it has to run after avian writes them back — in `Update` it
             // would render every ball and trail head one frame stale.
-            .add_systems(
-                PostUpdate,
-                update_trails.after(PhysicsSystems::Writeback),
-            );
-
+            .add_systems(PostUpdate, update_trails.after(PhysicsSystems::Writeback));
     }
 }
 
@@ -422,7 +418,10 @@ fn setup_physics(
     commands.spawn((
         DebugOverlay,
         Text::new(""),
-        TextFont { font_size: 16.0.into(), ..default() },
+        TextFont {
+            font_size: 16.0.into(),
+            ..default()
+        },
         TextColor(Color::srgb(0.2, 1.0, 0.4)),
         Node {
             position_type: PositionType::Absolute,
@@ -448,7 +447,12 @@ fn setup_physics(
         .map(|win| (win.width(), win.height()))
         .unwrap_or((1280.0, 720.0));
 
-    for side in [WallSide::Left, WallSide::Right, WallSide::Top, WallSide::Bottom] {
+    for side in [
+        WallSide::Left,
+        WallSide::Right,
+        WallSide::Top,
+        WallSide::Bottom,
+    ] {
         let (size, pos) = wall_geometry(side, w, h);
         commands.spawn((
             RigidBody::Static,
@@ -488,10 +492,16 @@ fn setup_physics(
 fn wall_geometry(side: WallSide, w: f32, h: f32) -> (Vec2, Vec2) {
     let t = WALL_THICKNESS;
     match side {
-        WallSide::Left => (Vec2::new(t, h + 2.0 * t), Vec2::new(-w / 2.0 - t / 2.0, 0.0)),
+        WallSide::Left => (
+            Vec2::new(t, h + 2.0 * t),
+            Vec2::new(-w / 2.0 - t / 2.0, 0.0),
+        ),
         WallSide::Right => (Vec2::new(t, h + 2.0 * t), Vec2::new(w / 2.0 + t / 2.0, 0.0)),
         WallSide::Top => (Vec2::new(w + 2.0 * t, t), Vec2::new(0.0, h / 2.0 + t / 2.0)),
-        WallSide::Bottom => (Vec2::new(w + 2.0 * t, t), Vec2::new(0.0, -h / 2.0 - t / 2.0)),
+        WallSide::Bottom => (
+            Vec2::new(w + 2.0 * t, t),
+            Vec2::new(0.0, -h / 2.0 - t / 2.0),
+        ),
     }
 }
 
@@ -644,7 +654,13 @@ fn spawn_one_ball(
         let mass = settings.mass * (radius / settings.radius).powi(2);
         (radius, restitution, damping, mass, fastrand::f32())
     } else {
-        (settings.radius, settings.restitution, settings.air_resistance, settings.mass, 0.5)
+        (
+            settings.radius,
+            settings.restitution,
+            settings.air_resistance,
+            settings.mass,
+            0.5,
+        )
     };
 
     // Sample the full active palette so balls span every dynamic color, not just
@@ -1364,7 +1380,10 @@ fn planet_forces(
                     best = hi;
                 }
             }
-            (planet.radii[best], (planet.radii[best] - planet.prev[best]) / dt)
+            (
+                planet.radii[best],
+                (planet.radii[best] - planet.prev[best]) / dt,
+            )
         } else {
             (0.0, 0.0)
         };
@@ -1597,7 +1616,11 @@ fn update_debug_overlay(
         return;
     };
     let show = settings.enabled && settings.debug_draw;
-    *visibility = if show { Visibility::Visible } else { Visibility::Hidden };
+    *visibility = if show {
+        Visibility::Visible
+    } else {
+        Visibility::Hidden
+    };
     if !show {
         return;
     }
@@ -1743,13 +1766,21 @@ mod tests {
                 Mass(1.0),
                 ball_ccd(&PhysicsSettings::default()).expect("CCD on by default"),
                 Transform::from_translation(pos.extend(1.0)),
-                Ball { id: 0, radius, tint: 0.5 },
+                Ball {
+                    id: 0,
+                    radius,
+                    tint: 0.5,
+                },
             ))
             .id()
     }
 
     fn pos_of(app: &App, e: Entity) -> Vec2 {
-        app.world().get::<Transform>(e).unwrap().translation.truncate()
+        app.world()
+            .get::<Transform>(e)
+            .unwrap()
+            .translation
+            .truncate()
     }
 
     // --- L1: pure helpers ---------------------------------------------------
@@ -1761,7 +1792,10 @@ mod tests {
         // surface balls rest on when they fall between columns.
         let (size, pos) = wall_geometry(WallSide::Bottom, w, h);
         let top_face = pos.y + size.y / 2.0;
-        assert!((top_face - (-h / 2.0)).abs() < 1e-3, "floor top at {top_face}");
+        assert!(
+            (top_face - (-h / 2.0)).abs() < 1e-3,
+            "floor top at {top_face}"
+        );
         // Side walls span taller than the window and sit just outside it.
         let (lsize, lpos) = wall_geometry(WallSide::Left, w, h);
         assert!(lpos.x < -w / 2.0, "left wall must be outside the view");
@@ -1817,10 +1851,18 @@ mod tests {
 
         // physics_supported is the union.
         let vis = VisSettings::default();
-        for m in [DrawingMode::WaveCircle, DrawingMode::BarsBox, DrawingMode::WaveBox] {
+        for m in [
+            DrawingMode::WaveCircle,
+            DrawingMode::BarsBox,
+            DrawingMode::WaveBox,
+        ] {
             assert!(physics_supported(m, &vis), "{m:?} should be supported");
         }
-        for m in [DrawingMode::SpineBox, DrawingMode::ParticlesCircle, DrawingMode::SplitterBox] {
+        for m in [
+            DrawingMode::SpineBox,
+            DrawingMode::ParticlesCircle,
+            DrawingMode::SplitterBox,
+        ] {
             assert!(!physics_supported(m, &vis), "{m:?} should be inert");
         }
     }
@@ -1848,11 +1890,19 @@ mod tests {
         // First update establishes the baseline mode.
         app.update();
         for id in 0..3 {
-            app.world_mut().spawn(Ball { id, radius: 10.0, tint: 0.5 });
+            app.world_mut().spawn(Ball {
+                id,
+                radius: 10.0,
+                tint: 0.5,
+            });
         }
         // No mode change → balls survive.
         app.update();
-        assert_eq!(ball_count(&mut app), 3, "balls cleared without a mode change");
+        assert_eq!(
+            ball_count(&mut app),
+            3,
+            "balls cleared without a mode change"
+        );
 
         // Switch mode → all balls despawned.
         *app.world_mut().resource_mut::<DrawingMode>() = DrawingMode::WaveBox;
@@ -1893,7 +1943,11 @@ mod tests {
         });
         app.add_systems(Update, enforce_ball_cap);
         for id in 0..6 {
-            app.world_mut().spawn(Ball { id, radius: 10.0, tint: 0.5 });
+            app.world_mut().spawn(Ball {
+                id,
+                radius: 10.0,
+                tint: 0.5,
+            });
         }
         app.update();
         let mut ids: Vec<u64> = {
@@ -1964,7 +2018,11 @@ mod tests {
         app.add_systems(Update, reconcile_ccd);
         let ball = app
             .world_mut()
-            .spawn(Ball { id: 0, radius: 8.0, tint: 0.5 })
+            .spawn(Ball {
+                id: 0,
+                radius: 8.0,
+                tint: 0.5,
+            })
             .id();
         let has_ccd = |app: &App| app.world().get::<SweptCcd>(ball).is_some();
 
@@ -1986,7 +2044,11 @@ mod tests {
         // The whole point of the tuned config: no ball-vs-ball sweeping and no
         // rotational sweep.
         assert!(!on.include_dynamic, "no ball-vs-ball sweeping");
-        assert_eq!(on.mode, SweepMode::Linear, "circles have no meaningful rotation");
+        assert_eq!(
+            on.mode,
+            SweepMode::Linear,
+            "circles have no meaningful rotation"
+        );
 
         let off = ball_ccd(&PhysicsSettings {
             ccd: false,
@@ -2010,8 +2072,16 @@ mod tests {
 
         // Two balls with no trails yet — the state after spawning while trails
         // were off (the bug: the toggle never reached balls already on screen).
-        app.world_mut().spawn(Ball { id: 0, radius: 8.0, tint: 0.2 });
-        app.world_mut().spawn(Ball { id: 1, radius: 8.0, tint: 0.8 });
+        app.world_mut().spawn(Ball {
+            id: 0,
+            radius: 8.0,
+            tint: 0.2,
+        });
+        app.world_mut().spawn(Ball {
+            id: 1,
+            radius: 8.0,
+            tint: 0.8,
+        });
         let trails = |app: &mut App| {
             let mut q = app.world_mut().query_filtered::<(), With<Trail>>();
             q.iter(app.world()).count()
@@ -2023,7 +2093,11 @@ mod tests {
 
         // Idempotent while settings are unchanged: no duplicates.
         app.update();
-        assert_eq!(trails(&mut app), 2, "no duplicate trails when nothing changed");
+        assert_eq!(
+            trails(&mut app),
+            2,
+            "no duplicate trails when nothing changed"
+        );
 
         // Toggle off → every trail is reaped.
         app.world_mut().resource_mut::<PhysicsSettings>().trails = false;
@@ -2056,19 +2130,33 @@ mod tests {
             let planet = app.world().resource::<Planet>();
             assert!(planet.radii.len() >= 3, "blob ring sampled");
             assert!(planet.radii.iter().all(|&r| r > 0.0), "rim radii positive");
-            assert_eq!(planet.indices.len(), planet.radii.len(), "closed loop indices");
+            assert_eq!(
+                planet.indices.len(),
+                planet.radii.len(),
+                "closed loop indices"
+            );
         }
         // Active → body sits at the origin.
-        let mut bq = app.world_mut().query_filtered::<&Transform, With<PlanetBody>>();
+        let mut bq = app
+            .world_mut()
+            .query_filtered::<&Transform, With<PlanetBody>>();
         let at_origin = bq.single(app.world()).unwrap().translation.truncate();
-        assert!(at_origin.length() < 1.0, "active blob centered, got {at_origin:?}");
+        assert!(
+            at_origin.length() < 1.0,
+            "active blob centered, got {at_origin:?}"
+        );
 
         // Switch to a box mode → body parked far offscreen.
         *app.world_mut().resource_mut::<DrawingMode>() = DrawingMode::WaveBox;
         app.update();
-        let mut bq = app.world_mut().query_filtered::<&Transform, With<PlanetBody>>();
+        let mut bq = app
+            .world_mut()
+            .query_filtered::<&Transform, With<PlanetBody>>();
         let parked = bq.single(app.world()).unwrap().translation;
-        assert!(parked.x.abs() > 1e5 && parked.y.abs() > 1e5, "parked, got {parked:?}");
+        assert!(
+            parked.x.abs() > 1e5 && parked.y.abs() > 1e5,
+            "parked, got {parked:?}"
+        );
     }
 
     #[test]
@@ -2134,7 +2222,13 @@ mod tests {
             prev: vec![top - 2.0],
         });
         // Ball resting right on the column top, centered over the bar.
-        let ball = spawn_ball(&mut app, Vec2::new(lyt.bar_x(0), top), 10.0, 0.5, Vec2::ZERO);
+        let ball = spawn_ball(
+            &mut app,
+            Vec2::new(lyt.bar_x(0), top),
+            10.0,
+            0.5,
+            Vec2::ZERO,
+        );
         app.add_systems(Update, push_columns);
         // Bevy's very first frame reports a zero `delta`, so push (which divides
         // the rise by dt) no-ops then; step twice so a real 60 Hz frame lands.
@@ -2154,7 +2248,12 @@ mod tests {
 
     fn spawn_walls(app: &mut App) {
         let (w, h) = (1280.0, 720.0);
-        for side in [WallSide::Left, WallSide::Right, WallSide::Top, WallSide::Bottom] {
+        for side in [
+            WallSide::Left,
+            WallSide::Right,
+            WallSide::Top,
+            WallSide::Bottom,
+        ] {
             let (size, pos) = wall_geometry(side, w, h);
             app.world_mut().spawn((
                 RigidBody::Static,
@@ -2224,7 +2323,10 @@ mod tests {
     #[test]
     fn l4_ball_spawned_dead_center_leaves_the_orb_surface() {
         let mut app = physics_app(DrawingMode::WaveCircle);
-        app.add_systems(Update, (update_gravity_mode, update_planet, planet_forces).chain());
+        app.add_systems(
+            Update,
+            (update_gravity_mode, update_planet, planet_forces).chain(),
+        );
         spawn_planet_body(&mut app);
 
         let radius = 12.0;
@@ -2248,7 +2350,10 @@ mod tests {
     #[test]
     fn l4_interior_ball_is_ejected_not_left_stuck() {
         let mut app = physics_app(DrawingMode::WaveCircle);
-        app.add_systems(Update, (update_gravity_mode, update_planet, planet_forces).chain());
+        app.add_systems(
+            Update,
+            (update_gravity_mode, update_planet, planet_forces).chain(),
+        );
         spawn_planet_body(&mut app);
 
         // Prime the rim so we can spawn comfortably inside it.
@@ -2264,7 +2369,10 @@ mod tests {
         }
 
         // It must reach the surface (escape the interior)...
-        assert!(max_r > rim, "interior ball never reached the surface: max_r={max_r}, rim={rim}");
+        assert!(
+            max_r > rim,
+            "interior ball never reached the surface: max_r={max_r}, rim={rim}"
+        );
         // ...and not be sitting buried deep inside at the end.
         let final_r = pos_of(&app, ball).length();
         assert!(
@@ -2286,7 +2394,11 @@ mod tests {
         app.insert_resource(PhysicsSettings::default());
         app.insert_resource(VisSettings::default());
         app.insert_resource(DrawingMode::WaveCircle);
-        app.insert_resource(Cava { bars: vec![0.3; 24], bars_per_channel: 24, channels: 1 });
+        app.insert_resource(Cava {
+            bars: vec![0.3; 24],
+            bars_per_channel: 24,
+            channels: 1,
+        });
         app.init_resource::<Planet>();
         app.init_resource::<BallCounter>();
         spawn_planet_body(&mut app);
@@ -2305,7 +2417,13 @@ mod tests {
         let r = pos.length();
         assert!(r > 1.0, "ball was not ejected outward: r={r}");
         let tangent = Vec2::new(-pos.y, pos.x) / r;
-        let v_t = app.world().get::<LinearVelocity>(ball).unwrap().0.dot(tangent).abs();
+        let v_t = app
+            .world()
+            .get::<LinearVelocity>(ball)
+            .unwrap()
+            .0
+            .dot(tangent)
+            .abs();
         // The floor is a fraction of orbital speed at the ejection radius.
         let orbit = (PhysicsSettings::default().central_gravity * r).sqrt();
         assert!(
@@ -2329,12 +2447,20 @@ mod tests {
         app.insert_resource(PhysicsSettings::default());
         // monstercat 1.0 → spread is a no-op, so the spectrum reaches the ring
         // unchanged; a quarter turn moves the buggy lookup 90° off the truth.
-        let vis = VisSettings { rotation: FRAC_PI_2, monstercat: 1.0, ..VisSettings::default() };
+        let vis = VisSettings {
+            rotation: FRAC_PI_2,
+            monstercat: 1.0,
+            ..VisSettings::default()
+        };
         app.insert_resource(vis);
         app.insert_resource(DrawingMode::WaveCircle);
         // Silent on one side, loud past it → the rim radius varies strongly with
         // angle, so the mis-sampled segment is clearly the wrong distance.
-        app.insert_resource(Cava { bars: vec![0.0, 1.0], bars_per_channel: 2, channels: 1 });
+        app.insert_resource(Cava {
+            bars: vec![0.0, 1.0],
+            bars_per_channel: 2,
+            channels: 1,
+        });
         app.init_resource::<Planet>();
         app.init_resource::<BallCounter>();
         spawn_planet_body(&mut app);
@@ -2361,7 +2487,13 @@ mod tests {
 
         // Spawn the ball deep inside along +X, then let the force field eject it.
         let radius = 12.0;
-        let ball = spawn_ball(&mut app, Vec2::new(correct * 0.4, 0.0), radius, 0.9, Vec2::ZERO);
+        let ball = spawn_ball(
+            &mut app,
+            Vec2::new(correct * 0.4, 0.0),
+            radius,
+            0.9,
+            Vec2::ZERO,
+        );
         app.add_systems(Update, planet_forces.after(update_planet));
         app.update();
 
@@ -2394,7 +2526,11 @@ mod tests {
         app.insert_resource(VisSettings::default());
         app.insert_resource(DrawingMode::WaveCircle);
         // Steady, uniform spectrum → a smooth, non-pulsing rim.
-        app.insert_resource(Cava { bars: vec![0.3; 24], bars_per_channel: 24, channels: 1 });
+        app.insert_resource(Cava {
+            bars: vec![0.3; 24],
+            bars_per_channel: 24,
+            channels: 1,
+        });
         app.init_resource::<Planet>();
         app.init_resource::<BallCounter>();
         spawn_planet_body(&mut app);
@@ -2445,7 +2581,11 @@ mod tests {
         app.insert_resource(PhysicsSettings::default());
         app.insert_resource(VisSettings::default()); // rotation 0
         app.insert_resource(DrawingMode::WaveCircle);
-        app.insert_resource(Cava { bars: vec![0.3; 24], bars_per_channel: 24, channels: 1 });
+        app.insert_resource(Cava {
+            bars: vec![0.3; 24],
+            bars_per_channel: 24,
+            channels: 1,
+        });
         app.init_resource::<BallCounter>();
 
         // A flat rim at 100px with a single 200px spike. The ball sits on the +X
@@ -2460,7 +2600,9 @@ mod tests {
         app.insert_resource(Planet {
             radii: radii.clone(),
             prev: radii, // steady → no expansion fling; escape must come from unstick
-            indices: (0..n as u32).map(|k| [k, (k as u32 + 1) % n as u32]).collect(),
+            indices: (0..n as u32)
+                .map(|k| [k, (k as u32 + 1) % n as u32])
+                .collect(),
         });
 
         // Clear Bevy's zero-dt first frame (planet_forces no-ops on dt==0) before
@@ -2472,11 +2614,20 @@ mod tests {
         // Resting on the valley floor: center at valley + radius. The old sample
         // reads `surf_r == valley`, so `r == surf_r + radius` is *not* `<` it and
         // the unstick is skipped — central gravity then pulls the ball inward.
-        let ball = spawn_ball(&mut app, Vec2::new(valley + radius, 0.0), radius, 0.9, Vec2::ZERO);
+        let ball = spawn_ball(
+            &mut app,
+            Vec2::new(valley + radius, 0.0),
+            radius,
+            0.9,
+            Vec2::ZERO,
+        );
 
         // Sanity: the spike really is within the ball's angular span at this r.
         let span = (radius / (valley + radius)).asin() / (TAU / n as f32);
-        assert!(span >= 3.0, "test mis-tuned: spike outside the ball's arc (span={span})");
+        assert!(
+            span >= 3.0,
+            "test mis-tuned: spike outside the ball's arc (span={span})"
+        );
 
         app.update();
 

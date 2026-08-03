@@ -102,23 +102,23 @@ fn main() {
     });
     app.add_plugins(default_plugins)
         .add_plugins(EguiPlugin::default())
-    // Dark backdrop so the visualizer pops.
-    .insert_resource(ClearColor(Color::srgb(0.02, 0.02, 0.04)))
-    // Pipeline + vis config from CLI/TOML; inserted before the plugins so their
-    // `init_resource` defaults don't override them.
-    .insert_resource(settings)
-    .insert_resource(vis_settings)
-    .insert_resource(physics_settings)
-    .insert_resource(vis_mode)
-    // Where the editor saves/reloads, and whether it starts open.
-    .insert_resource(ConfigHandle { path })
-    .insert_resource(EditorState::new(cli.gui, config.gui_toggle_key()))
-    .add_plugins((
-        CavaPlugin::default(),
-        NowPlayingPlugin::default(),
-        VisPlugin,
-        GuiPlugin,
-    ));
+        // Dark backdrop so the visualizer pops.
+        .insert_resource(ClearColor(Color::srgb(0.02, 0.02, 0.04)))
+        // Pipeline + vis config from CLI/TOML; inserted before the plugins so their
+        // `init_resource` defaults don't override them.
+        .insert_resource(settings)
+        .insert_resource(vis_settings)
+        .insert_resource(physics_settings)
+        .insert_resource(vis_mode)
+        // Where the editor saves/reloads, and whether it starts open.
+        .insert_resource(ConfigHandle { path })
+        .insert_resource(EditorState::new(cli.gui, config.gui_toggle_key()))
+        .add_plugins((
+            CavaPlugin::default(),
+            NowPlayingPlugin::default(),
+            VisPlugin,
+            GuiPlugin,
+        ));
 
     #[cfg(feature = "profile")]
     app.add_plugins(profiling::PuffinPlugin);

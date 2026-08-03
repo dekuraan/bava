@@ -18,7 +18,11 @@ use crate::vis::{
 
 /// Command-line arguments. Anything provided here overrides the config file.
 #[derive(Parser, Debug)]
-#[command(name = "bava", version, about = "A cavacore-driven Bevy music visualizer")]
+#[command(
+    name = "bava",
+    version,
+    about = "A cavacore-driven Bevy music visualizer"
+)]
 pub struct Cli {
     /// Path to the config file (default: ~/.config/bava/config.toml).
     #[arg(long, value_name = "FILE")]
@@ -550,7 +554,10 @@ impl Config {
                     );
                     let cfg = Config::default();
                     if let Err(we) = cfg.write(path) {
-                        eprintln!("bava: could not write fresh config to {}: {we}", path.display());
+                        eprintln!(
+                            "bava: could not write fresh config to {}: {we}",
+                            path.display()
+                        );
                     }
                     cfg
                 }
@@ -565,7 +572,10 @@ impl Config {
                 cfg
             }
             Err(e) => {
-                eprintln!("bava: could not read {}: {e}; using defaults", path.display());
+                eprintln!(
+                    "bava: could not read {}: {e}; using defaults",
+                    path.display()
+                );
                 Config::default()
             }
         }
@@ -701,7 +711,9 @@ impl Config {
             bloom_intensity: v.bloom_intensity,
             glow_gain: v.glow_gain,
             dynamic_colors: v.dynamic_colors,
-            dynamic_color_count: v.dynamic_color_count.clamp(2, crate::now_playing::MAX_DYNAMIC_COLORS),
+            dynamic_color_count: v
+                .dynamic_color_count
+                .clamp(2, crate::now_playing::MAX_DYNAMIC_COLORS),
             dynamic_color_fade: v.dynamic_color_fade.max(0.0),
             dynamic_fg: None,
         }
@@ -761,26 +773,64 @@ const DEFAULT_TOGGLE_KEY: &str = "p";
 /// The first entry for a given [`KeyCode`] is its canonical name (used when
 /// writing the config back); later duplicates are accepted aliases.
 const KEY_NAMES: &[(&str, KeyCode)] = &[
-    ("a", KeyCode::KeyA), ("b", KeyCode::KeyB), ("c", KeyCode::KeyC), ("d", KeyCode::KeyD),
-    ("e", KeyCode::KeyE), ("f", KeyCode::KeyF), ("g", KeyCode::KeyG), ("h", KeyCode::KeyH),
-    ("i", KeyCode::KeyI), ("j", KeyCode::KeyJ), ("k", KeyCode::KeyK), ("l", KeyCode::KeyL),
-    ("m", KeyCode::KeyM), ("n", KeyCode::KeyN), ("o", KeyCode::KeyO), ("p", KeyCode::KeyP),
-    ("q", KeyCode::KeyQ), ("r", KeyCode::KeyR), ("s", KeyCode::KeyS), ("t", KeyCode::KeyT),
-    ("u", KeyCode::KeyU), ("v", KeyCode::KeyV), ("w", KeyCode::KeyW), ("x", KeyCode::KeyX),
-    ("y", KeyCode::KeyY), ("z", KeyCode::KeyZ),
-    ("0", KeyCode::Digit0), ("1", KeyCode::Digit1), ("2", KeyCode::Digit2),
-    ("3", KeyCode::Digit3), ("4", KeyCode::Digit4), ("5", KeyCode::Digit5),
-    ("6", KeyCode::Digit6), ("7", KeyCode::Digit7), ("8", KeyCode::Digit8),
+    ("a", KeyCode::KeyA),
+    ("b", KeyCode::KeyB),
+    ("c", KeyCode::KeyC),
+    ("d", KeyCode::KeyD),
+    ("e", KeyCode::KeyE),
+    ("f", KeyCode::KeyF),
+    ("g", KeyCode::KeyG),
+    ("h", KeyCode::KeyH),
+    ("i", KeyCode::KeyI),
+    ("j", KeyCode::KeyJ),
+    ("k", KeyCode::KeyK),
+    ("l", KeyCode::KeyL),
+    ("m", KeyCode::KeyM),
+    ("n", KeyCode::KeyN),
+    ("o", KeyCode::KeyO),
+    ("p", KeyCode::KeyP),
+    ("q", KeyCode::KeyQ),
+    ("r", KeyCode::KeyR),
+    ("s", KeyCode::KeyS),
+    ("t", KeyCode::KeyT),
+    ("u", KeyCode::KeyU),
+    ("v", KeyCode::KeyV),
+    ("w", KeyCode::KeyW),
+    ("x", KeyCode::KeyX),
+    ("y", KeyCode::KeyY),
+    ("z", KeyCode::KeyZ),
+    ("0", KeyCode::Digit0),
+    ("1", KeyCode::Digit1),
+    ("2", KeyCode::Digit2),
+    ("3", KeyCode::Digit3),
+    ("4", KeyCode::Digit4),
+    ("5", KeyCode::Digit5),
+    ("6", KeyCode::Digit6),
+    ("7", KeyCode::Digit7),
+    ("8", KeyCode::Digit8),
     ("9", KeyCode::Digit9),
-    ("f1", KeyCode::F1), ("f2", KeyCode::F2), ("f3", KeyCode::F3), ("f4", KeyCode::F4),
-    ("f5", KeyCode::F5), ("f6", KeyCode::F6), ("f7", KeyCode::F7), ("f8", KeyCode::F8),
-    ("f9", KeyCode::F9), ("f10", KeyCode::F10), ("f11", KeyCode::F11), ("f12", KeyCode::F12),
-    ("backquote", KeyCode::Backquote), ("grave", KeyCode::Backquote), ("tilde", KeyCode::Backquote),
+    ("f1", KeyCode::F1),
+    ("f2", KeyCode::F2),
+    ("f3", KeyCode::F3),
+    ("f4", KeyCode::F4),
+    ("f5", KeyCode::F5),
+    ("f6", KeyCode::F6),
+    ("f7", KeyCode::F7),
+    ("f8", KeyCode::F8),
+    ("f9", KeyCode::F9),
+    ("f10", KeyCode::F10),
+    ("f11", KeyCode::F11),
+    ("f12", KeyCode::F12),
+    ("backquote", KeyCode::Backquote),
+    ("grave", KeyCode::Backquote),
+    ("tilde", KeyCode::Backquote),
     ("tab", KeyCode::Tab),
     ("insert", KeyCode::Insert),
     ("space", KeyCode::Space),
-    ("escape", KeyCode::Escape), ("esc", KeyCode::Escape),
-    ("enter", KeyCode::Enter), ("return", KeyCode::Enter),
+    ("escape", KeyCode::Escape),
+    ("esc", KeyCode::Escape),
+    ("enter", KeyCode::Enter),
+    ("return", KeyCode::Enter),
     ("backslash", KeyCode::Backslash),
     ("minus", KeyCode::Minus),
     ("equal", KeyCode::Equal),
@@ -851,7 +901,9 @@ mod store {
             .filter_map(|e| {
                 let path = e.ok()?.path();
                 if path.extension().and_then(|s| s.to_str()) == Some("toml") {
-                    path.file_stem().and_then(|s| s.to_str()).map(str::to_string)
+                    path.file_stem()
+                        .and_then(|s| s.to_str())
+                        .map(str::to_string)
                 } else {
                     None
                 }
@@ -967,9 +1019,7 @@ pub fn parse_cli() -> Cli {
             // change). This runs before the `App` exists, so Bevy's `warn!`
             // would have no subscriber to write to and vanish — go straight to
             // the console.
-            web_sys::console::warn_1(
-                &format!("bava: ignoring query string {query:?}: {e}").into(),
-            );
+            web_sys::console::warn_1(&format!("bava: ignoring query string {query:?}: {e}").into());
             Cli::try_parse_from(["bava"]).expect("bava: empty arg list must parse")
         }
     }
@@ -1206,7 +1256,10 @@ mod tests {
         // Canonical name round-trips; aliases resolve to the canonical one.
         assert_eq!(key_to_name(KeyCode::KeyP), Some("p"));
         assert_eq!(key_to_name(KeyCode::Backquote), Some("backquote"));
-        assert_eq!(parse_key(key_to_name(KeyCode::Space).unwrap()), Some(KeyCode::Space));
+        assert_eq!(
+            parse_key(key_to_name(KeyCode::Space).unwrap()),
+            Some(KeyCode::Space)
+        );
     }
 
     #[test]

@@ -235,7 +235,9 @@ impl CavaPlan {
         let rate = cfg.rate;
 
         if rate > 384_000 {
-            return Err(format!("cava_init called with illegal sample rate: {rate}\n"));
+            return Err(format!(
+                "cava_init called with illegal sample rate: {rate}\n"
+            ));
         }
 
         let base = fft_buffer_size(rate);
@@ -254,11 +256,14 @@ impl CavaPlan {
 
         // Hann windows.
         let bass_multiplier: Vec<f64> = (0..fft_bass)
-            .map(|i| 0.5 * (1.0 - (2.0 * std::f64::consts::PI * i as f64 / (fft_bass - 1) as f64).cos()))
+            .map(|i| {
+                0.5 * (1.0 - (2.0 * std::f64::consts::PI * i as f64 / (fft_bass - 1) as f64).cos())
+            })
             .collect();
         let multiplier: Vec<f64> = (0..fft_treble)
             .map(|i| {
-                0.5 * (1.0 - (2.0 * std::f64::consts::PI * i as f64 / (fft_treble - 1) as f64).cos())
+                0.5 * (1.0
+                    - (2.0 * std::f64::consts::PI * i as f64 / (fft_treble - 1) as f64).cos())
             })
             .collect();
 
@@ -537,7 +542,11 @@ impl CavaPlan {
         // Execute the FFTs. `process_with_scratch` may mutate the input buffers,
         // which is fine — they are fully rewritten every call above.
         self.bass_fft
-            .process_with_scratch(&mut self.in_bass_l, &mut self.out_bass_l, &mut self.bass_scratch)
+            .process_with_scratch(
+                &mut self.in_bass_l,
+                &mut self.out_bass_l,
+                &mut self.bass_scratch,
+            )
             .expect("bass fft (left) length invariant");
         self.treble_fft
             .process_with_scratch(&mut self.in_l, &mut self.out_l, &mut self.treble_scratch)
@@ -604,8 +613,8 @@ impl CavaPlan {
         for n in 0..bars * channels {
             // falloff
             if self.out[n] < self.prev_cava_out[n] && self.noise_reduction > 0.1 {
-                self.out[n] =
-                    self.cava_peak[n] * (1.0 - (self.cava_fall[n] * self.cava_fall[n] * gravity_mod));
+                self.out[n] = self.cava_peak[n]
+                    * (1.0 - (self.cava_fall[n] * self.cava_fall[n] * gravity_mod));
                 if self.out[n] < 0.0 {
                     self.out[n] = 0.0;
                 }

@@ -17,18 +17,18 @@
 //! hidden while a blocky shape is active. All shapes share the [`Cava`] resource
 //! and the monstercat neighbour-spreading pass.
 
+use bevy::camera::Hdr;
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
-use bevy::camera::Hdr;
 
 use crate::cava::Cava;
 use crate::vis::stroke::{
-    apply_stroke, empty_stroke_mesh, stroke_material, MeshBatch, STROKE_FEATHER,
+    MeshBatch, STROKE_FEATHER, apply_stroke, empty_stroke_mesh, stroke_material,
 };
 use crate::vis::{
-    gradient_color, spread_monstercat, Direction, DrawingMode, MirrorMode, VisFamily, VisSettings,
-    VisShape,
+    Direction, DrawingMode, MirrorMode, VisFamily, VisSettings, VisShape, gradient_color,
+    spread_monstercat,
 };
 
 /// Fraction of window height a full-scale bar occupies.
@@ -141,10 +141,7 @@ fn setup(
 /// Push the live [`VisSettings::tonemapping`] choice onto the camera whenever it
 /// changes (editor edit / profile load), so the tone mapper updates the same
 /// frame without a restart.
-fn apply_tonemapping(
-    vis: Res<VisSettings>,
-    mut cameras: Query<&mut Tonemapping, With<VisCamera>>,
-) {
+fn apply_tonemapping(vis: Res<VisSettings>, mut cameras: Query<&mut Tonemapping, With<VisCamera>>) {
     if !vis.is_changed() {
         return;
     }
@@ -243,7 +240,11 @@ pub(crate) fn mirror_values(cava: &Cava, vis: &VisSettings, n: usize) -> Vec<f32
             } else {
                 spread(cava.right().to_vec())
             };
-            let (a, b) = if vis.reverse_mirror { (&right, &left) } else { (&left, &right) };
+            let (a, b) = if vis.reverse_mirror {
+                (&right, &left)
+            } else {
+                (&left, &right)
+            };
             let half = n.div_ceil(2);
             (0..n)
                 .map(|i| {
@@ -371,18 +372,30 @@ fn update_bars(
                 let (cy, half) = match bar_shape {
                     VisShape::Bars => {
                         let bh = (v * max_h).max(1.0);
-                        let cy = if up { floor + bh * 0.5 } else { ceil - bh * 0.5 };
+                        let cy = if up {
+                            floor + bh * 0.5
+                        } else {
+                            ceil - bh * 0.5
+                        };
                         (cy, Vec2::new(bar_w * 0.5, bh * 0.5))
                     }
                     VisShape::Levels => {
                         let stepped = (v * LEVEL_STEPS).round() / LEVEL_STEPS;
                         let bh = (stepped * max_h).max(1.0);
-                        let cy = if up { floor + bh * 0.5 } else { ceil - bh * 0.5 };
+                        let cy = if up {
+                            floor + bh * 0.5
+                        } else {
+                            ceil - bh * 0.5
+                        };
                         (cy, Vec2::new(bar_w * 0.5, bh * 0.5))
                     }
                     VisShape::Particles => {
                         let dot = bar_w.min(slot_w).max(2.0);
-                        let cy = if up { floor + v * max_h } else { ceil - v * max_h };
+                        let cy = if up {
+                            floor + v * max_h
+                        } else {
+                            ceil - v * max_h
+                        };
                         (cy, Vec2::splat(dot * 0.5))
                     }
                     VisShape::Spine => {
@@ -408,18 +421,30 @@ fn update_bars(
                 let (cx, half) = match bar_shape {
                     VisShape::Bars => {
                         let bw = (v * max_w).max(1.0);
-                        let cx = if ltr { left + bw * 0.5 } else { right - bw * 0.5 };
+                        let cx = if ltr {
+                            left + bw * 0.5
+                        } else {
+                            right - bw * 0.5
+                        };
                         (cx, Vec2::new(bw * 0.5, bar_h * 0.5))
                     }
                     VisShape::Levels => {
                         let stepped = (v * LEVEL_STEPS).round() / LEVEL_STEPS;
                         let bw = (stepped * max_w).max(1.0);
-                        let cx = if ltr { left + bw * 0.5 } else { right - bw * 0.5 };
+                        let cx = if ltr {
+                            left + bw * 0.5
+                        } else {
+                            right - bw * 0.5
+                        };
                         (cx, Vec2::new(bw * 0.5, bar_h * 0.5))
                     }
                     VisShape::Particles => {
                         let dot = bar_h.max(2.0);
-                        let cx = if ltr { left + v * max_w } else { right - v * max_w };
+                        let cx = if ltr {
+                            left + v * max_w
+                        } else {
+                            right - v * max_w
+                        };
                         (cx, Vec2::splat(dot * 0.5))
                     }
                     VisShape::Spine => {
@@ -449,7 +474,10 @@ pub(crate) fn column_geom(lyt: &Layout, bar_h: f32, centered: bool) -> (f32, Vec
     if centered {
         (0.0, Vec2::new(lyt.bar_w * 0.5, bar_h))
     } else {
-        (lyt.floor + bar_h * 0.5, Vec2::new(lyt.bar_w * 0.5, bar_h * 0.5))
+        (
+            lyt.floor + bar_h * 0.5,
+            Vec2::new(lyt.bar_w * 0.5, bar_h * 0.5),
+        )
     }
 }
 
@@ -508,7 +536,11 @@ fn update_box_lines(
                     let t = k as f32 / WAVE_SEGMENTS as f32;
                     let v = sample_h(&values, t).clamp(0.0, 1.5);
                     let x = left + t * eff_w;
-                    let y = if up { floor + v * max_h } else { ceil - v * max_h };
+                    let y = if up {
+                        floor + v * max_h
+                    } else {
+                        ceil - v * max_h
+                    };
                     (Vec2::new(x, y), gradient_color(lo, hi, v.min(1.0), glow))
                 })
                 .collect()
@@ -525,7 +557,11 @@ fn update_box_lines(
                     let t = k as f32 / WAVE_SEGMENTS as f32;
                     let v = sample_h(&values, t).clamp(0.0, 1.5);
                     let y = top - t * eff_h;
-                    let x = if ltr { left + v * max_w } else { right - v * max_w };
+                    let x = if ltr {
+                        left + v * max_w
+                    } else {
+                        right - v * max_w
+                    };
                     (Vec2::new(x, y), gradient_color(lo, hi, v.min(1.0), glow))
                 })
                 .collect()
@@ -568,7 +604,13 @@ fn update_box_lines(
     };
 
     if let Some(mut mesh) = meshes.get_mut(&line.mesh) {
-        apply_stroke(&mut mesh, &pts, vis.line_thickness * 0.5, STROKE_FEATHER, false);
+        apply_stroke(
+            &mut mesh,
+            &pts,
+            vis.line_thickness * 0.5,
+            STROKE_FEATHER,
+            false,
+        );
     }
 }
 
@@ -694,7 +736,10 @@ mod tests {
         assert_eq!(got, want);
 
         // reverse_order flips the result.
-        let vis_rev = VisSettings { reverse_order: true, ..vis };
+        let vis_rev = VisSettings {
+            reverse_order: true,
+            ..vis
+        };
         let mut rev = mirror_values(&cava, &vis_rev, 4);
         rev.reverse();
         assert_eq!(rev, got);
@@ -715,7 +760,10 @@ mod tests {
         };
         let out = mirror_values(&cava, &vis, 8);
         for i in 0..out.len() {
-            assert!((out[i] - out[out.len() - 1 - i]).abs() < 1e-6, "asymmetry at {i}");
+            assert!(
+                (out[i] - out[out.len() - 1 - i]).abs() < 1e-6,
+                "asymmetry at {i}"
+            );
         }
     }
 }

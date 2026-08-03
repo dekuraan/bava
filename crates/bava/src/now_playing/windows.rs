@@ -11,15 +11,15 @@ use std::time::Duration;
 
 use bevy::prelude::*;
 use crossbeam_channel::Sender;
-use windows::core::HSTRING;
 use windows::Media::Control::{
     GlobalSystemMediaTransportControlsSessionManager as SessionManager,
     GlobalSystemMediaTransportControlsSessionMediaProperties as MediaProperties,
 };
 use windows::Storage::Streams::{DataReader, IRandomAccessStreamReference};
-use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
+use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx};
+use windows::core::HSTRING;
 
-use super::{decode_art_bytes, DecodedArt, NowPlayingMsg, NowPlaying};
+use super::{DecodedArt, NowPlaying, NowPlayingMsg, decode_art_bytes};
 
 /// Background poll loop. Tolerant of there being no current session.
 pub(super) fn run(tx: Sender<NowPlayingMsg>) {
@@ -93,7 +93,10 @@ fn read_session(manager: &SessionManager) -> SessionRead {
     let Ok(session) = manager.GetCurrentSession() else {
         return SessionRead::NoSession;
     };
-    let Ok(props) = session.TryGetMediaPropertiesAsync().and_then(|op| op.join()) else {
+    let Ok(props) = session
+        .TryGetMediaPropertiesAsync()
+        .and_then(|op| op.join())
+    else {
         return SessionRead::Transient;
     };
 

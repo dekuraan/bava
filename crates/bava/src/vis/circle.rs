@@ -29,10 +29,10 @@ use bevy::prelude::*;
 use crate::cava::Cava;
 use crate::vis::bars::{BAR_GAP, LEVEL_STEPS};
 use crate::vis::stroke::{
-    apply_stroke, empty_stroke_mesh, stroke_material, MeshBatch, STROKE_FEATHER,
+    MeshBatch, STROKE_FEATHER, apply_stroke, empty_stroke_mesh, stroke_material,
 };
 use crate::vis::{
-    gradient_color, spread_monstercat, DrawingMode, VisFamily, VisSettings, VisShape,
+    DrawingMode, VisFamily, VisSettings, VisShape, gradient_color, spread_monstercat,
 };
 
 /// Segments around the ring. Higher = smoother curve.
@@ -207,12 +207,20 @@ fn update_circle_bars(
         let (radius, half, rot) = match bar_shape {
             VisShape::Bars => {
                 let len = (amp * v).max(1.0);
-                (base + len * 0.5, Vec2::new(bar_w * 0.5, len * 0.5), ang - FRAC_PI_2)
+                (
+                    base + len * 0.5,
+                    Vec2::new(bar_w * 0.5, len * 0.5),
+                    ang - FRAC_PI_2,
+                )
             }
             VisShape::Levels => {
                 let stepped = (v * LEVEL_STEPS).round() / LEVEL_STEPS;
                 let len = (amp * stepped).max(1.0);
-                (base + len * 0.5, Vec2::new(bar_w * 0.5, len * 0.5), ang - FRAC_PI_2)
+                (
+                    base + len * 0.5,
+                    Vec2::new(bar_w * 0.5, len * 0.5),
+                    ang - FRAC_PI_2,
+                )
             }
             VisShape::Particles => {
                 let dot = bar_w.max(2.0);
@@ -250,7 +258,10 @@ fn fan_mesh() -> Mesh {
         indices.push(1 + ((k + 1) % SEGMENTS) as u32);
     }
 
-    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    );
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
@@ -282,9 +293,16 @@ fn sample(values: &[f32], t: f32) -> f32 {
 /// rendered outline/fill. `extent` is the smaller window dimension,
 /// `inner_radius` and `rotation` mirror the live [`VisSettings`] so the physics
 /// collider tracks the visual exactly.
-pub(crate) fn blob_ring(values: &[f32], extent: f32, inner_radius: f32, rotation: f32) -> Vec<Vec2> {
+pub(crate) fn blob_ring(
+    values: &[f32],
+    extent: f32,
+    inner_radius: f32,
+    rotation: f32,
+) -> Vec<Vec2> {
     let (base, amp) = circle_radii(extent, inner_radius);
-    (0..SEGMENTS).map(|k| ring_point(values, k, base, amp, rotation).0).collect()
+    (0..SEGMENTS)
+        .map(|k| ring_point(values, k, base, amp, rotation).0)
+        .collect()
 }
 
 /// Position of ring point `k` for a given spectrum, base radius, amplitude and
@@ -361,7 +379,13 @@ fn update_ring(
             .iter()
             .map(|(pos, v)| (*pos, gradient_color(lo, hi, v.min(1.0), glow)))
             .collect();
-        apply_stroke(&mut mesh, &pts, vis.line_thickness * 0.5, STROKE_FEATHER, true);
+        apply_stroke(
+            &mut mesh,
+            &pts,
+            vis.line_thickness * 0.5,
+            STROKE_FEATHER,
+            true,
+        );
     }
 
     if !fill_active {
@@ -379,7 +403,8 @@ fn update_ring(
 
         // Tint the fill by loudness; keep it translucent so art shows through.
         if let Some(mut mat) = materials.get_mut(&fill.material) {
-            mat.color = gradient_color(vis.fg_lo(), vis.fg_hi(), peak, vis.glow_gain).with_alpha(0.28);
+            mat.color =
+                gradient_color(vis.fg_lo(), vis.fg_hi(), peak, vis.glow_gain).with_alpha(0.28);
         }
     }
 }
@@ -429,7 +454,10 @@ mod tests {
         let silent = blob_ring(&vec![0.0; 16], extent, 0.38, 0.0);
         assert_eq!(silent.len(), SEGMENTS);
         for p in &silent {
-            assert!((p.length() - base).abs() < 1e-2, "silent rim should be the base radius");
+            assert!(
+                (p.length() - base).abs() < 1e-2,
+                "silent rim should be the base radius"
+            );
         }
 
         // Loud → radii grow with amplitude, bounded by base + amp·v.
@@ -437,7 +465,10 @@ mod tests {
         for p in &loud {
             let r = p.length();
             assert!(r > base + 1.0, "loud rim should expand past base");
-            assert!(r <= base + amp * 1.5 + 1e-2, "rim within the clamped budget");
+            assert!(
+                r <= base + amp * 1.5 + 1e-2,
+                "rim within the clamped budget"
+            );
         }
     }
 

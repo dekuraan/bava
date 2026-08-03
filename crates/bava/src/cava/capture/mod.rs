@@ -130,10 +130,7 @@ impl std::error::Error for CaptureError {}
 // resampling to do (the graph hands us the `AudioContext` rate and the plan is
 // rebuilt to match), so it is left out entirely there.
 #[cfg(not(target_arch = "wasm32"))]
-#[cfg_attr(
-    not(any(target_os = "windows", target_os = "macos")),
-    allow(dead_code)
-)]
+#[cfg_attr(not(any(target_os = "windows", target_os = "macos")), allow(dead_code))]
 pub(super) struct LinearResampler {
     /// Previous device-rate frame (already down/up-mixed to target_channels).
     prev: Vec<f64>,
@@ -143,10 +140,7 @@ pub(super) struct LinearResampler {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-#[cfg_attr(
-    not(any(target_os = "windows", target_os = "macos")),
-    allow(dead_code)
-)]
+#[cfg_attr(not(any(target_os = "windows", target_os = "macos")), allow(dead_code))]
 impl LinearResampler {
     pub(super) fn new(target_channels: usize) -> Self {
         Self {

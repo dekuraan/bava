@@ -81,14 +81,14 @@ impl PulseCapture {
         };
 
         let simple = Simple::new(
-            None,             // default server
-            "bava",           // application name
+            None,   // default server
+            "bava", // application name
             Direction::Record,
-            device,           // monitor source
-            "visualizer",     // stream description
+            device,       // monitor source
+            "visualizer", // stream description
             &spec,
-            None,         // default channel map
-            Some(&attr),  // low-latency, steady-cadence buffering
+            None,        // default channel map
+            Some(&attr), // low-latency, steady-cadence buffering
         )
         .map_err(|e| CaptureError::Init(format!("{e} (device={device:?})")))?;
 
@@ -152,7 +152,9 @@ pub fn default_monitor_source() -> Result<String, CaptureError> {
         match mainloop.iterate(true) {
             IterateResult::Success(_) => {}
             IterateResult::Quit(_) => {
-                return Err(CaptureError::Init("pulse mainloop quit during connect".into()));
+                return Err(CaptureError::Init(
+                    "pulse mainloop quit during connect".into(),
+                ));
             }
             IterateResult::Err(e) => {
                 return Err(CaptureError::Init(format!("pulse mainloop error: {e}")));
@@ -170,17 +172,21 @@ pub fn default_monitor_source() -> Result<String, CaptureError> {
     // Query the default sink name.
     let sink_name: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
     let sink_name_cb = sink_name.clone();
-    let op = context.introspect().get_server_info(move |info: &ServerInfo| {
-        if let Some(name) = &info.default_sink_name {
-            *sink_name_cb.borrow_mut() = Some(name.to_string());
-        }
-    });
+    let op = context
+        .introspect()
+        .get_server_info(move |info: &ServerInfo| {
+            if let Some(name) = &info.default_sink_name {
+                *sink_name_cb.borrow_mut() = Some(name.to_string());
+            }
+        });
 
     while op.get_state() == OperationState::Running {
         match mainloop.iterate(true) {
             IterateResult::Success(_) => {}
             IterateResult::Quit(_) | IterateResult::Err(_) => {
-                return Err(CaptureError::Init("pulse mainloop error during query".into()));
+                return Err(CaptureError::Init(
+                    "pulse mainloop error during query".into(),
+                ));
             }
         }
     }
@@ -252,13 +258,15 @@ pub fn active_monitor_source() -> Option<String> {
     // Resolve that sink's monitor source name.
     let monitor: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
     let monitor_cb = monitor.clone();
-    let op = context.introspect().get_sink_info_by_index(sink_idx, move |res| {
-        if let ListResult::Item(info) = res
-            && let Some(name) = &info.monitor_source_name
-        {
-            *monitor_cb.borrow_mut() = Some(name.to_string());
-        }
-    });
+    let op = context
+        .introspect()
+        .get_sink_info_by_index(sink_idx, move |res| {
+            if let ListResult::Item(info) = res
+                && let Some(name) = &info.monitor_source_name
+            {
+                *monitor_cb.borrow_mut() = Some(name.to_string());
+            }
+        });
     while op.get_state() == OperationState::Running {
         match mainloop.iterate(true) {
             IterateResult::Success(_) => {}
@@ -266,6 +274,5 @@ pub fn active_monitor_source() -> Option<String> {
         }
     }
 
-    
     monitor.borrow_mut().take()
 }
