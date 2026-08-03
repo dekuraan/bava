@@ -462,6 +462,14 @@ pub fn run(cli: &Cli, config: &Config) -> Result<(), String> {
         synchronous_pipeline_compilation: true,
         ..default()
     });
+    // Same puffin bridge as the live app — a headless `--input` render is the
+    // reproducible harness for A/B-ing renderer changes (deterministic frames,
+    // no display needed). See `crate::profiling`.
+    #[cfg(feature = "profile")]
+    let default_plugins = default_plugins.set(bevy::log::LogPlugin {
+        custom_layer: crate::profiling::layer,
+        ..default()
+    });
     if headless {
         app.add_plugins((
             default_plugins
@@ -518,6 +526,9 @@ pub fn run(cli: &Cli, config: &Config) -> Result<(), String> {
                 spec,
             },
         ));
+
+    #[cfg(feature = "profile")]
+    app.add_plugins(crate::profiling::PuffinPlugin);
 
     match app.run() {
         AppExit::Success => Ok(()),

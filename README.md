@@ -13,6 +13,33 @@ real-time. Now-playing metadata and album art are pulled from the OS media sessi
 | macOS 14.2+ | Core Audio process tap (no extra install) | MediaRemote adapter |
 | Web (Chrome) | Tab share via `getDisplayMedia` | YouTube IFrame API + thumbnail |
 
+![bava rendering a spectrum](docs/screenshot.png)
+
+## Install
+
+```sh
+# Arch (AUR)
+paru -S bava              # or bava-git to track HEAD
+
+# Flatpak
+flatpak install flathub io.github.dekuraan.bava
+
+# Nix
+nix run github:dekuraan/bava
+
+# Snap
+sudo snap install bava && sudo snap connect bava:audio-record
+```
+
+Every tagged release also ships a `.deb`, an `.rpm`, a self-contained
+`.AppImage`, and plain binaries for Linux, Windows, and macOS on the
+[releases page](https://github.com/dekuraan/bava/releases). Building from source
+is below.
+
+> The store listings above go live as each channel is published —
+> [`packaging/README.md`](packaging/README.md) tracks which are up and what each
+> one still needs.
+
 ## Features
 
 - **11 visualizer modes** — Space cycles: Bars, Levels, Particles, Spine, Wave,

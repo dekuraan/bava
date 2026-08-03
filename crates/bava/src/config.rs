@@ -116,6 +116,12 @@ pub struct Cli {
     /// Render only the first SECONDS of the track (for quick tests of --input).
     #[arg(long, value_name = "SECONDS")]
     pub duration: Option<f64>,
+
+    /// Spawn N balls spread across the drawing area at launch, instead of
+    /// starting empty and waiting for mouse clicks. Overrides
+    /// `[physics] spawn_on_launch`.
+    #[arg(long, value_name = "N")]
+    pub spawn_balls: Option<usize>,
 }
 
 /// Top-level config file model.
@@ -308,6 +314,11 @@ pub struct PhysicsConfig {
     pub randomize: bool,
     /// Minimum delay between right-click spray bursts while held, in milliseconds.
     pub spawn_debounce_ms: u64,
+    /// Balls to spawn across the drawing area at launch (0 = start empty). Also
+    /// what `--spawn-balls N` sets; the ball/trail simulation is bava's heaviest
+    /// workload, so this is how you reproduce a loaded scene — for a benchmark or
+    /// just to start with the playground already full.
+    pub spawn_on_launch: usize,
     /// Spectrum-surface smoothing time constant, in seconds (larger = smoother).
     pub bar_smoothing: f32,
     /// Restitution of the spectrum surface.
@@ -316,6 +327,11 @@ pub struct PhysicsConfig {
     pub bar_push: f32,
     /// Planet mode: radial acceleration pulling balls toward the center, px/s².
     pub central_gravity: f32,
+    /// Continuous collision detection for balls: stops very fast ones from
+    /// passing through a bar or the floor. On by default. This is the most
+    /// expensive part of the ball simulation, so turning it off is the biggest
+    /// single physics saving if you run a lot of balls.
+    pub ccd: bool,
     /// Draw a fading color trail behind each ball.
     pub trails: bool,
     /// Trail length: how many recent positions each trail keeps.
@@ -422,10 +438,12 @@ impl Config {
                 max_balls: physics.max_balls,
                 randomize: physics.randomize,
                 spawn_debounce_ms: physics.spawn_debounce_ms,
+                spawn_on_launch: physics.spawn_on_launch,
                 bar_smoothing: physics.bar_smoothing,
                 bar_restitution: physics.bar_restitution,
                 bar_push: physics.bar_push,
                 central_gravity: physics.central_gravity,
+                ccd: physics.ccd,
                 trails: physics.trails,
                 trail_length: physics.trail_length,
                 debug_draw: physics.debug_draw,
@@ -620,6 +638,9 @@ impl Config {
         if let Some(monstercat) = cli.monstercat {
             self.vis.monstercat = monstercat;
         }
+        if let Some(n) = cli.spawn_balls {
+            self.physics.spawn_on_launch = n;
+        }
     }
 
     /// Convert into the runtime [`CavaSettings`] resource.
@@ -699,12 +720,14 @@ impl Config {
             max_balls: p.max_balls,
             randomize: p.randomize,
             spawn_debounce_ms: p.spawn_debounce_ms,
+            spawn_on_launch: p.spawn_on_launch,
             bar_smoothing: p.bar_smoothing,
             bar_restitution: p.bar_restitution,
             bar_push: p.bar_push,
             // Inward pull magnitude; negative values would make the orbit
             // launch speed `sqrt(central_gravity * r)` NaN (see `spawn_one_ball`).
             central_gravity: p.central_gravity.max(0.0),
+            ccd: p.ccd,
             trails: p.trails,
             trail_length: p.trail_length,
             debug_draw: p.debug_draw,

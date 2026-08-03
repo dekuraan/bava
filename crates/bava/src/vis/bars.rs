@@ -11,20 +11,20 @@
 //! - **Wave** — a smooth gradient waveform line across the width.
 //! - **Splitter** — a zig-zag line alternating above/below the axis.
 //!
-//! The first four reuse a one-mesh-per-bar pool of rounded-rect [`Mesh2d`]s
-//! (kept in sync with the live bar count by [`reconcile_bars`], rounded per
-//! `items_roundness` with feather-antialiased edges); the last two are a single
-//! antialiased stroke mesh, hidden while a blocky shape is active. All shapes
-//! share the [`Cava`] resource and the monstercat neighbour-spreading pass.
+//! The first four draw one rounded rect per bar, all of them accumulated into a
+//! **single** batched [`Mesh2d`] (rounded per `items_roundness`, with
+//! feather-antialiased edges); the last two are a single antialiased stroke mesh,
+//! hidden while a blocky shape is active. All shapes share the [`Cava`] resource
+//! and the monstercat neighbour-spreading pass.
 
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
 use bevy::camera::Hdr;
 
-use crate::cava::{Cava, CavaSettings};
+use crate::cava::Cava;
 use crate::vis::stroke::{
-    apply_rounded_rect, apply_stroke, empty_stroke_mesh, stroke_material, STROKE_FEATHER,
+    apply_stroke, empty_stroke_mesh, stroke_material, MeshBatch, STROKE_FEATHER,
 };
 use crate::vis::{
     gradient_color, spread_monstercat, Direction, DrawingMode, MirrorMode, VisFamily, VisSettings,
@@ -46,13 +46,19 @@ const WAVE_SEGMENTS: usize = 192;
 #[derive(Component)]
 pub struct VisCamera;
 
-/// Marks a bar mesh and records which Cava bar index it renders.
+/// Marks the single entity holding **every** bar of the blocky box shapes.
+///
+/// One batched mesh rather than one mesh per bar: see [`MeshBatch`] for why (in
+/// short, Bevy re-allocates every modified mesh each frame, so a pool of N
+/// per-frame-rewritten meshes costs N allocations and N draw calls per frame).
 #[derive(Component)]
-struct Bar(usize);
+struct BarBatch;
 
-/// Shared blend material for the bar meshes (per-vertex color supplies the hue).
+/// Handle for the batched bar mesh, rebuilt each frame.
 #[derive(Resource)]
-struct BarMaterial(Handle<ColorMaterial>);
+struct BarHandles {
+    mesh: Handle<Mesh>,
+}
 
 /// Handle for the line-shape (Wave/Splitter) stroke mesh, rebuilt each frame.
 #[derive(Resource)]
@@ -70,9 +76,10 @@ pub struct BarsPlugin;
 impl Plugin for BarsPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, setup)
-            // Reconcile the sprite pool first so a live bar-count change (editor
-            // "Apply" / profile load) is reflected the same frame it converges.
-            .add_systems(Update, (reconcile_bars, update_bars, update_box_lines).chain())
+            // The bar geometry is one batched mesh rebuilt from scratch each
+            // frame, so a live bar-count change (editor "Apply" / profile load)
+            // needs no pool reconciliation — it just draws the new count.
+            .add_systems(Update, (update_bars, update_box_lines).chain())
             // Keep camera post-process in sync with the live editor settings.
             .add_systems(Update, (apply_tonemapping, apply_bloom));
     }
@@ -84,7 +91,6 @@ impl Plugin for BarsPlugin {
 /// mesh edges stay smooth.
 fn setup(
     mut commands: Commands,
-    settings: Res<CavaSettings>,
     vis: Res<VisSettings>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
@@ -107,13 +113,17 @@ fn setup(
         },
     ));
 
-    // One shared blend material; each bar mesh carries its own per-vertex color.
-    let bar_material = materials.add(stroke_material());
-    let n = settings.bars_per_channel.max(1);
-    for i in 0..n {
-        spawn_bar(&mut commands, &mut meshes, &bar_material, i);
-    }
-    commands.insert_resource(BarMaterial(bar_material));
+    // Every bar lives in one mesh on one entity; the per-vertex color carries the
+    // gradient, so a single blend material covers the whole spectrum.
+    let bar_mesh = meshes.add(empty_stroke_mesh());
+    commands.spawn((
+        Mesh2d(bar_mesh.clone()),
+        MeshMaterial2d(materials.add(stroke_material())),
+        Transform::from_xyz(0.0, 0.0, 0.0),
+        Visibility::Hidden,
+        BarBatch,
+    ));
+    commands.insert_resource(BarHandles { mesh: bar_mesh });
 
     // Reusable antialiased stroke for the line shapes (Wave / Splitter); only one
     // is active at a time, so a single entity suffices.
@@ -153,49 +163,6 @@ fn apply_bloom(vis: Res<VisSettings>, mut blooms: Query<&mut Bloom, With<VisCame
     }
     for mut bloom in &mut blooms {
         bloom.intensity = vis.bloom_intensity;
-    }
-}
-
-/// Spawn a single bar as its own (initially empty) rounded-rect mesh, carrying
-/// its Cava bar index and sharing the blend material.
-fn spawn_bar(
-    commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    material: &Handle<ColorMaterial>,
-    i: usize,
-) {
-    commands.spawn((
-        Mesh2d(meshes.add(empty_stroke_mesh())),
-        MeshMaterial2d(material.clone()),
-        Transform::from_xyz(0.0, 0.0, 0.0),
-        Visibility::Hidden,
-        Bar(i),
-    ));
-}
-
-/// Grow or shrink the bar-mesh pool to match the live [`Cava::bars_per_channel`],
-/// which the settings editor can change at runtime (the startup pool is fixed).
-/// Indices stay contiguous `0..target`, so [`update_bars`] addresses them safely.
-fn reconcile_bars(
-    mut commands: Commands,
-    cava: Res<Cava>,
-    material: Res<BarMaterial>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    bars: Query<(Entity, &Bar)>,
-) {
-    let target = cava.bars_per_channel.max(1);
-    let current = bars.iter().count();
-    if current < target {
-        for i in current..target {
-            spawn_bar(&mut commands, &mut meshes, &material.0, i);
-        }
-    } else if current > target {
-        // Drop the highest indices, keeping a contiguous 0..target range.
-        for (entity, bar) in &bars {
-            if bar.0 >= target {
-                commands.entity(entity).despawn();
-            }
-        }
     }
 }
 
@@ -324,25 +291,33 @@ fn resample(src: &[f32], pos: usize, slots: usize) -> f32 {
     src[(pos * (m - 1) / slots.saturating_sub(1).max(1)).min(m - 1)]
 }
 
-/// Rebuild each bar mesh for the blocky shapes (Bars/Levels/Particles/Spine) as
-/// a rounded rect, or hide the pool when a line shape (Wave/Splitter) or a circle
-/// mode is active. All four [`Direction`] variants are supported.
+/// Rebuild the batched bar mesh for the blocky shapes (Bars/Levels/Particles/
+/// Spine) as one rounded rect per bar, or hide it when a line shape
+/// (Wave/Splitter) or a circle mode is active. All four [`Direction`] variants
+/// are supported.
+///
+/// Every bar goes into a single [`MeshBatch`] written to one mesh on one entity,
+/// so the cost of a frame is one allocation and one draw call regardless of the
+/// bar count (see [`MeshBatch`] for the measurements behind that).
+#[allow(clippy::too_many_arguments)]
 fn update_bars(
     mode: Res<DrawingMode>,
     cava: Res<Cava>,
     vis: Res<VisSettings>,
     windows: Query<&Window>,
+    handles: Res<BarHandles>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut bars: Query<(&Bar, &Mesh2d, &mut Transform, &mut Visibility)>,
+    mut batch: Local<MeshBatch>,
+    mut bars: Query<&mut Visibility, With<BarBatch>>,
 ) {
     let shape = (mode.family() == VisFamily::Box).then(|| mode.shape());
-    // Line shapes and circle modes don't use the bar-mesh pool.
+    // Line shapes and circle modes don't use the bar batch.
     let bar_shape = match shape {
         Some(s @ (VisShape::Bars | VisShape::Levels | VisShape::Particles | VisShape::Spine)) => s,
         _ => {
-            for (_, _, _, mut v) in &mut bars {
-                // set_if_neq: rewriting Hidden every frame would re-dirty the
-                // whole pool for visibility propagation in every non-bar mode.
+            for mut v in &mut bars {
+                // set_if_neq: rewriting Hidden every frame would re-dirty
+                // visibility propagation in every non-bar mode.
                 v.set_if_neq(Visibility::Hidden);
             }
             return;
@@ -355,9 +330,18 @@ fn update_bars(
     let (w, h) = (window.width(), window.height());
     let n = cava.bars_per_channel;
     if n == 0 {
+        for mut v in &mut bars {
+            v.set_if_neq(Visibility::Hidden);
+        }
         return;
     }
-    let values = mirror_values(&cava, &vis, n);
+    for mut v in &mut bars {
+        v.set_if_neq(Visibility::Visible);
+    }
+    let values = {
+        crate::profile_scope!("mirror_values");
+        mirror_values(&cava, &vis, n)
+    };
     let (lo, hi) = (vis.fg_lo(), vis.fg_hi());
     let m = vis.area_margin;
     let off = vis.area_offset;
@@ -367,13 +351,10 @@ fn update_bars(
     let oy = off.y * h * 0.5;
     let glow = vis.glow_gain;
 
-    for (bar, mesh2d, mut transform, mut visibility) in &mut bars {
-        if bar.0 >= n {
-            visibility.set_if_neq(Visibility::Hidden);
-            continue;
-        }
-        visibility.set_if_neq(Visibility::Visible);
-        let v = values.get(bar.0).copied().unwrap_or(0.0).clamp(0.0, 1.5);
+    crate::profile_scope!("bar_meshes");
+    batch.clear();
+    for index in 0..n {
+        let v = values.get(index).copied().unwrap_or(0.0).clamp(0.0, 1.5);
         let color = gradient_color(lo, hi, v.min(1.0), glow);
 
         // Compute center and half-extents based on direction.
@@ -383,7 +364,7 @@ fn update_bars(
                 let bar_w = (slot_w - BAR_GAP).max(1.0);
                 let max_h = eff_h * MAX_HEIGHT_FRAC;
                 let left = -eff_w * 0.5 + ox;
-                let x = left + slot_w * (bar.0 as f32 + 0.5);
+                let x = left + slot_w * (index as f32 + 0.5);
                 let floor = -eff_h * 0.5 + oy;
                 let ceil = eff_h * 0.5 + oy;
                 let up = vis.direction == Direction::BottomTop;
@@ -420,7 +401,7 @@ fn update_bars(
                 let bar_h = (slot_h - BAR_GAP).max(1.0);
                 let max_w = eff_w * MAX_HEIGHT_FRAC;
                 let top = eff_h * 0.5 + oy;
-                let y = top - slot_h * (bar.0 as f32 + 0.5);
+                let y = top - slot_h * (index as f32 + 0.5);
                 let left = -eff_w * 0.5 + ox;
                 let right = eff_w * 0.5 + ox;
                 let ltr = vis.direction == Direction::LeftRight;
@@ -453,13 +434,12 @@ fn update_bars(
             }
         };
 
-        transform.translation.x = center.x;
-        transform.translation.y = center.y;
+        let radius = vis.items_roundness.clamp(0.0, 1.0) * half.x.min(half.y);
+        batch.push_rounded_rect(center, half, 0.0, radius, STROKE_FEATHER, color);
+    }
 
-        if let Some(mut mesh) = meshes.get_mut(&mesh2d.0) {
-            let radius = vis.items_roundness.clamp(0.0, 1.0) * half.x.min(half.y);
-            apply_rounded_rect(&mut mesh, half, radius, STROKE_FEATHER, color);
-        }
+    if let Some(mut mesh) = meshes.get_mut(&handles.mesh) {
+        batch.write(&mut mesh);
     }
 }
 

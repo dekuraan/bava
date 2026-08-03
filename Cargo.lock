@@ -229,6 +229,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "anyhow"
+version = "1.0.104"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
+
+[[package]]
 name = "approx"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -490,10 +496,14 @@ dependencies = [
  "objc2-core-foundation",
  "objc2-foundation 0.3.2",
  "pipewire",
+ "puffin",
+ "puffin_http",
  "serde",
  "serde_json",
  "symphonia",
  "toml",
+ "tracing",
+ "tracing-subscriber",
  "ureq",
  "wasm-bindgen",
  "web-sys",
@@ -507,6 +517,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "950238d3049d81006a6fd6b898a34cfc01bb5462a7668795a54d640aed19fd0a"
 dependencies = [
  "bevy_internal",
+ "tracing",
 ]
 
 [[package]]
@@ -613,6 +624,7 @@ dependencies = [
  "downcast-rs 2.0.2",
  "log",
  "thiserror 2.0.18",
+ "tracing",
  "variadics_please 1.1.0",
  "wasm-bindgen",
  "web-sys",
@@ -856,6 +868,7 @@ dependencies = [
  "slotmap",
  "smallvec",
  "thiserror 2.0.18",
+ "tracing",
  "variadics_please 1.1.0",
 ]
 
@@ -1196,6 +1209,7 @@ dependencies = [
  "bevy_platform",
  "bevy_utils",
  "tracing",
+ "tracing-error",
  "tracing-log",
  "tracing-oslog",
  "tracing-subscriber",
@@ -1505,6 +1519,7 @@ dependencies = [
  "naga",
  "nonmax",
  "offset-allocator",
+ "profiling",
  "send_wrapper",
  "smallvec",
  "thiserror 2.0.18",
@@ -1907,6 +1922,15 @@ dependencies = [
  "wasm-bindgen",
  "web-sys",
  "winit",
+]
+
+[[package]]
+name = "bincode"
+version = "1.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1f45e9417d87227c7a56d22e471c6206462cba514c7590c09aff4cf6d1ddcad"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
@@ -3911,6 +3935,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
 
 [[package]]
+name = "lz4_flex"
+version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7ef0d4ed8669f8f8826eb00dc878084aa8f253506c4fd5e8f58f5bce72ddb97e"
+
+[[package]]
 name = "matchers"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4963,6 +4993,49 @@ name = "profiling"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d595e54a326bc53c1c197b32d295e14b169e3cfeaa8dc82b529f947fba6bcf5"
+dependencies = [
+ "profiling-procmacros",
+ "tracing",
+]
+
+[[package]]
+name = "profiling-procmacros"
+version = "1.0.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4488a4a36b9a4ba6b9334a32a39971f77c1436ec82c38707bce707699cc3bbcb"
+dependencies = [
+ "quote",
+ "syn 2.0.118",
+]
+
+[[package]]
+name = "puffin"
+version = "0.20.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "84b514d95a258be801fde8a1ff1c974f4a4841d9750f5d1d6690fc07a5ad4049"
+dependencies = [
+ "anyhow",
+ "bincode",
+ "byteorder",
+ "cfg-if",
+ "itertools 0.14.0",
+ "lz4_flex",
+ "parking_lot",
+ "serde",
+]
+
+[[package]]
+name = "puffin_http"
+version = "0.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4f912991aab1adae69d2be9455e8db0f41e5ad3da87706ab2de64908678c2c76"
+dependencies = [
+ "anyhow",
+ "crossbeam-channel",
+ "log",
+ "parking_lot",
+ "puffin",
+]
 
 [[package]]
 name = "pxfm"
@@ -6211,6 +6284,16 @@ checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
 dependencies = [
  "once_cell",
  "valuable",
+]
+
+[[package]]
+name = "tracing-error"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b1581020d7a273442f5b45074a6a57d5757ad0a47dac0e9f0bd57b81936f3db"
+dependencies = [
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
