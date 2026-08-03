@@ -25,6 +25,21 @@ lto = "thin"
 codegen-units = 1
 strip = true
 
+# For `trunk serve --cargo-profile web-dev`. A dev-profile wasm is unusable in
+# the browser: `[profile.dev.package."*"]` optimizes dependencies but leaves
+# bava's own per-frame code (bars, stroke, physics) at opt-level 0, and the
+# debug info alone takes the module past 100 MB — which the browser then has to
+# fetch, parse and instantiate on every reload.
+#
+# This is release codegen minus the three things that make a true release build
+# slow to produce: LTO, the single codegen unit, and debug info. Builds in a
+# fraction of the time and runs within noise of the shipped artifact.
+[profile.web-dev]
+inherits = "release"
+lto = false
+codegen-units = 16
+debug = false
+
 # For `cargo run --profile profiling --features profile`: release-grade codegen
 # (dev's opt-level 0 on our own crates would make every measurement meaningless)
 # but without release's LTO + single codegen unit, which relink the whole binary

@@ -32,6 +32,11 @@
     />
     <link data-trunk rel="copy-file" href="audio-worklet.js" />
     <link data-trunk rel="copy-file" href="bava.js" />
+    <!-- Registered from bava.js; caches the hashed wasm forever so repeat
+         visits skip the tens-of-MB download. -->
+    <link data-trunk rel="copy-file" href="sw.js" />
+    <!-- The no-screen-share entry point: redirects to `?source=file`. -->
+    <link data-trunk rel="copy-file" href="local.html" />
     <link data-trunk rel="css" href="style.css" />
     <script type="module" src="./bava.js"></script>
   </head>
@@ -57,7 +62,41 @@
       </header>
 
       <section>
-        <h2>1 · Play something</h2>
+        <h2>Start</h2>
+        <button id="start" type="button" class="primary big">
+          Start visualizing
+        </button>
+        <p id="start-sub" class="hint">
+          Plays the video below and captures this tab in one go — your browser
+          will ask you to confirm the share. Clicking the visualizer or pasting
+          a YouTube link anywhere does the same thing.
+        </p>
+        <div class="buttons">
+          <button id="capture-other" type="button">Capture another tab</button>
+          <button id="pick-file" type="button">Play a file</button>
+          <button id="capture-stop" type="button" hidden>Stop</button>
+        </div>
+        <input id="file-input" type="file" accept="audio/*" hidden />
+        <p class="hint">
+          In the share dialog, pick a <strong>tab</strong> and make sure
+          <strong>“Also share tab audio”</strong> is on — a window or whole
+          screen carries no audio on Linux or macOS. You can switch which tab is
+          being shared from the browser's own sharing bar, without coming back
+          here.
+        </p>
+        <p id="capture-status" class="status" role="status">Not capturing.</p>
+        <button id="capture-retry" type="button" hidden>Try again</button>
+      </section>
+
+      <section id="file-section" hidden>
+        <h2>File</h2>
+        <!-- Only shown once a file is playing; controls let the user scrub and
+             pause without leaving the page. -->
+        <audio id="file-audio" controls></audio>
+      </section>
+
+      <section id="yt-section">
+        <h2>YouTube</h2>
         <form id="yt-form">
           <input
             id="yt-url"
@@ -66,30 +105,14 @@
             placeholder="YouTube URL or video ID"
             aria-label="YouTube URL or video ID"
           />
-          <button type="submit">Load</button>
+          <button type="submit">Load &amp; start</button>
         </form>
         <div id="yt-wrap"><div id="yt-player"></div></div>
         <p class="hint">
           Or play audio in any other tab — Spotify, Bandcamp, another YouTube —
-          and capture that instead.
+          and capture that instead. No screen sharing available?
+          <a href="./?source=file">Play a local file</a>.
         </p>
-      </section>
-
-      <section>
-        <h2>2 · Capture the audio</h2>
-        <div class="buttons">
-          <button id="capture-this" type="button" class="primary">
-            Capture this tab
-          </button>
-          <button id="capture-other" type="button">Capture another tab</button>
-          <button id="capture-stop" type="button" hidden>Stop</button>
-        </div>
-        <p class="hint">
-          Chrome asks which surface to share — pick a <strong>tab</strong> and
-          make sure <strong>“Also share tab audio”</strong> is on. Sharing a
-          window or a whole screen does not carry audio on Linux or macOS.
-        </p>
-        <p id="capture-status" class="status" role="status">Not capturing.</p>
       </section>
 
       <section>
@@ -108,7 +131,7 @@
       </section>
 
       <footer>
-        <a href="https://github.com/dekuraan/bava">source · dekuraan/bava</a>
+        <a href="https://github.com/dekuraan/bava">source — dekuraan/bava</a>
       </footer>
     </aside>
 
