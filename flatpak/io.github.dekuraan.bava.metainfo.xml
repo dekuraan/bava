@@ -12,8 +12,8 @@
   <description>
     <p>
       bava is a Linux music visualizer built on the Bevy engine. It captures the
-      default audio output's monitor through PulseAudio (and PipeWire via
-      pipewire-pulse), runs it through cavacore — the analysis engine from CAVA —
+      default audio output's monitor natively through PipeWire (falling back to
+      PulseAudio), runs it through cavacore — the analysis engine from CAVA —
       and renders smoothed, log-spaced frequency bars with HDR bloom.
     </p>
     <p>
@@ -25,8 +25,11 @@
     <ul>
       <li>Real-time spectrum analysis with configurable bars, smoothing, and frequency range</li>
       <li>Eleven Cavalier-style drawing modes (bars, wave, particles, circles, and more)</li>
+      <li>Physics mode: rigid bodies that collide with the live spectrum</li>
       <li>Now-playing track info and album art over MPRIS</li>
+      <li>Colors extracted from the current track's album art</li>
       <li>In-app settings editor with live-reflected changes and named profiles</li>
+      <li>Offline music-video rendering of an audio file to MP4</li>
     </ul>
   </description>
 
@@ -56,6 +59,11 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="0.4.0" date="2026-08-03">
+      <description>
+        <p>Puffin profiling, batched per-frame meshes and scoped ball CCD for higher ball counts, and a browser build of the same visualizer.</p>
+      </description>
+    </release>
     <release version="0.3.0" date="2026-07-02">
       <description>
         <p>Eleven Cavalier-style drawing modes, avian2d physics mode, dynamic album-art colors, and offline video rendering.</p>

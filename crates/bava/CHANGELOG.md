@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/dekuraan/bava/releases/tag/v0.4.0) - 2026-08-03
+
+### Added
+
+- **Web build.** bava runs in the browser on `wasm32-unknown-unknown`, deployed
+  to GitHub Pages on every push to `main`. Browsers have no loopback device, so
+  the audio path is inverted: the page takes a `MediaStream` from
+  `getDisplayMedia` (a tab share with audio), runs it through an `AudioWorklet`,
+  and pushes blocks into the wasm module, which feeds the same ring buffer the
+  native capture thread would. Now-playing comes from the YouTube IFrame API.
+  Every visualizer mode, the physics balls, dynamic album colors, and the
+  settings editor work as they do on the desktop; settings persist in
+  `localStorage` and the query string takes the same flags as the CLI.
+- **Distribution packaging** for AUR (`bava` and `bava-git`), Flathub, Nix,
+  Snap, and `.deb` / `.rpm` / AppImage artifacts built and attached to every
+  `v*` tag. A cross-platform icon set is generated from one source by
+  `packaging/icon/gen-icons.py`.
+- **Puffin profiling** behind `--features profile`, bridging Bevy's per-system
+  `tracing` spans into puffin so the whole schedule is profiled without
+  hand-instrumenting systems. `BAVA_PROFILE_REPORT=<frames>` prints an
+  aggregated self-time table to stderr for headless and over-ssh runs.
+
+### Changed
+
+- Per-frame mesh pools (box bars, radial circle bars, ball trails) are batched
+  into a single mesh each, cutting N frees + N allocations + N uploads + N draw
+  calls per frame down to one. Balls are deliberately *not* batched — their
+  geometry is rigid, so batching measured slower (39 ms → 52 ms/frame at 2000
+  balls).
+- Ball CCD is scoped to static/kinematic geometry (`SweepMode::Linear`,
+  `include_dynamic: false`) and is now toggleable via `[physics] ccd`. At 800
+  balls this took CCD from 3.22 ms to 0.85 ms per frame.
+- The entire codebase is rustfmt-formatted, and CI now gates `cargo fmt --check`
+  and clippy so it stays that way.
+
+### Fixed
+
+- Hardened the capture backends, now-playing, and config against edge cases.
+
 ## [0.3.0](https://github.com/dekuraan/bava/releases/tag/v0.3.0) - 2026-07-02
 
 ### Added
