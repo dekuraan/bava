@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A cross-platform music visualizer: loopback audio capture → cavacore analysis → a Bevy `Cava` resource → visualizers, with now-playing + album art. Cargo workspace, Bevy **0.19.0**, edition 2024. `cfg(target_os)`-gated backends per OS-specific concern: **Linux** uses native PipeWire monitor capture (default `pipewire` feature) with a PulseAudio fallback, plus MPRIS (over D-Bus); **Windows** uses WASAPI loopback capture + GSMTC (`GlobalSystemMediaTransportControlsSessionManager`); **macOS** uses Core Audio process taps (macOS 14.2+) + the MediaRemote adapter. Everything else (cavacore, vis, gui, config) is platform-agnostic.
+A cross-platform music visualizer: loopback audio capture → cavacore analysis → a Bevy `Cava` resource → visualizers, with now-playing + album art. Cargo workspace, Bevy **0.19.0**, edition 2024. `cfg(target_os)`-gated backends per OS-specific concern: **Linux** uses native PipeWire monitor capture (default `pipewire` feature) with a PulseAudio fallback, plus MPRIS (over D-Bus); **Windows** uses WASAPI loopback capture + GSMTC (`GlobalSystemMediaTransportControlsSessionManager`); **macOS** uses Core Audio process taps (macOS 14.2+) + the MediaRemote adapter; **the web** (`wasm32-unknown-unknown`, gated on `cfg(target_arch = "wasm32")` rather than `target_os`) takes audio from a `getDisplayMedia` tab share the page pushes in, and now-playing from the YouTube IFrame API. Everything else (cavacore, vis, gui, config) is platform-agnostic.
 
 ## Commands
 
@@ -18,13 +18,19 @@ cargo test -p cavacore-rs    # the rigorous cava safety/DSP suite
 cargo test -p cavacore-rs --test dsp noise_reduction_slows_decay  # single test
 cargo test -p bava --bin bava            # the app's unit/system/physics tests (headless, no display)
 cargo test -p bava --bin bava physics    # just the physics suite
+
+trunk serve                              # web build on http://localhost:8080
+trunk build --release --public-url /bava/  # → dist/, what CI publishes to Pages
+cargo check --target wasm32-unknown-unknown -p bava --bin bava  # fast web type-check
 ```
 
 Running needs the display env this shell may lack: `WAYLAND_DISPLAY=wayland-1 cargo run -p bava` (check `ls /run/user/1000/wayland-*` for the socket — it is **not** `wayland-0`).
 
 Windows code can't be built natively from this Linux box, but it *can* be type-checked by cross-compiling (no link step): `cargo check --target x86_64-pc-windows-gnu -p bava`. **macOS code can't even be type-checked here** (no Apple SDK / objc runtime, and no mingw-equivalent) — verify it by reading the pinned `objc2-*` crate sources under `~/.cargo/registry/.../objc2-core-audio-0.3.2/` and resolving the dep graph with `cargo tree -p bava --target aarch64-apple-darwin`; real compilation happens only on a Mac. bava is **pure Rust now** (cavacore is reimplemented in `cavacore-rs` on top of `realfft`), so there's no C toolchain, no `fftw3.h` staging, and no FFTW link step on any target — the Windows cross-check needs nothing beyond `gcc-mingw-w64`.
 
-`rust-analyzer.toml` at the workspace root configures rust-analyzer to check both `x86_64-unknown-linux-gnu` and `x86_64-pc-windows-gnu` simultaneously, so `wasapi.rs` and `now_playing/windows.rs` get type-checked in the editor on Linux. macOS backends can't be checked here and are verified manually.
+`rust-analyzer.toml` at the workspace root configures rust-analyzer to check `x86_64-unknown-linux-gnu`, `x86_64-pc-windows-gnu` and `wasm32-unknown-unknown` simultaneously, so `wasapi.rs`, `now_playing/windows.rs` and the two `web.rs` backends get type-checked in the editor on Linux. macOS backends can't be checked here and are verified manually.
+
+The **web build** *is* fully buildable and runnable here (`trunk build`, then serve `dist/` and drive Chrome) — see `docs/WEB.md`. The browser has no loopback device, so the whole audio path is inverted relative to desktop: instead of a thread *pulling* from an `AudioCapture`, `web/bava.js` gets a `MediaStream` from `getDisplayMedia` (tab share, audio on), runs it through an `AudioWorklet`, and *pushes* interleaved blocks into the `bava_push_audio` wasm export (`cava/capture/web.rs`); `pump_web_audio` then feeds the same `AudioRing` the native reader would, so chunking / `reconcile_capture_rate` / `feed_cava` are shared. To test the audio path without clicking through Chrome's share picker, either call `window.wasmBindings.bava_push_audio(float32Array, channels, rate)` directly, or stub `navigator.mediaDevices.getDisplayMedia` with an oscillator → `MediaStreamAudioDestinationNode` and click the real button.
 
 ## Testing
 
@@ -36,7 +42,7 @@ Windows code can't be built natively from this Linux box, but it *can* be type-c
 ## Crates
 
 - `crates/cavacore-rs` — a **pure-Rust port** of upstream cavacore's `cava_init`/`cava_execute` (no C, no FFI). Uses [`realfft`](https://crates.io/crates/realfft) (rustfft under the hood) in place of FFTW; realfft's real→complex transform is unnormalized with the *same scale* as FFTW's `dft_r2c_1d`, so cavacore's hard-coded eq constants port over unchanged. Exposes `CavaConfig → CavaPlan`; `CavaPlan` is `Send` **and** `Sync` (realfft plans are). Tests live in `tests/` (`validation.rs`, `dsp.rs`, shared signal gen in `tests/common/`) and double as the parity oracle against the C original.
-- `crates/bava` — the Bevy app. Three plugins, each in its own module: `cava` (capture + analysis), `now_playing` (now-playing metadata + art over MPRIS, GSMTC, and the macOS MediaRemote adapter), `vis` (visualizers + HUD). Platform-specific deps are split into `[target.'cfg(target_os = "…")'.dependencies]` (Linux: `libpulse-*`, `pipewire` (optional, default feature), `mpris`, `ureq`, `base64`; Windows: the `windows` crate; macOS: the `objc2-*` crates for Core Audio + `serde_json`/`base64` for the now-playing adapter).
+- `crates/bava` — the Bevy app. Three plugins, each in its own module: `cava` (capture + analysis), `now_playing` (now-playing metadata + art over MPRIS, GSMTC, and the macOS MediaRemote adapter), `vis` (visualizers + HUD). Platform-specific deps are split into `[target.'cfg(…)'.dependencies]` (Linux: `libpulse-*`, `pipewire` (optional, default feature), `mpris`, `ureq`, `base64`; Windows: the `windows` crate; macOS: the `objc2-*` crates for Core Audio + `serde_json`/`base64` for the now-playing adapter; wasm: `wasm-bindgen`/`js-sys`/`web-sys`/`console_error_panic_hook`). Two *arch*-gated sections carry what is not per-OS: `cfg(not(target_arch = "wasm32"))` holds `bevy_capture`, `symphonia`, `dirs` and the `bevy/multi_threaded` + `avian2d/parallel` features (wasm is single-threaded and has no filesystem or ffmpeg), and `cfg(target_arch = "wasm32")` adds `bevy/web` + `bevy/webgl2` + `bevy/zstd_rust`. `crates/bava/web/` holds the page itself (`index.html`, `bava.js`, `audio-worklet.js`, `style.css`); `Trunk.toml` at the workspace root points at it.
 
 ## Architecture notes (non-obvious)
 
@@ -57,7 +63,7 @@ Windows code can't be built natively from this Linux box, but it *can* be type-c
 
 ## CI / releases
 
-`.github/workflows/ci.yml` runs on every push/PR to `main`: Linux build + `cavacore-rs` tests + `bava` tests (`cargo test -p bava --bin bava`), Windows native build (`windows-latest`), macOS aarch64 build (`macos-latest`), and a fast Linux→Windows cross-check. `.github/workflows/release.yml` triggers on `v*` tags and produces five release artifacts: `bava-linux-x86_64`, `bava-linux-x86_64-pulseaudio` (the `--no-default-features` PulseAudio-only build), `bava-windows-x86_64.exe`, `bava-macos-aarch64`, `bava-macos-x86_64`. Tag a release with `git tag v0.x.y && git push --tags`.
+`.github/workflows/ci.yml` runs on every push/PR to `main`: Linux build + `cavacore-rs` tests + `bava` tests (`cargo test -p bava --bin bava`), Windows native build (`windows-latest`), macOS aarch64 build (`macos-latest`), a fast Linux→Windows cross-check, and a `wasm32-unknown-unknown` type-check. `.github/workflows/pages.yml` builds the web app with trunk and publishes `dist/` to GitHub Pages on pushes to `main` (PRs build unreleased, to stay fast, and never deploy); it needs Pages set to the "GitHub Actions" source once in repo settings. `.github/workflows/release.yml` triggers on `v*` tags and produces five release artifacts: `bava-linux-x86_64`, `bava-linux-x86_64-pulseaudio` (the `--no-default-features` PulseAudio-only build), `bava-windows-x86_64.exe`, `bava-macos-aarch64`, `bava-macos-x86_64`. Tag a release with `git tag v0.x.y && git push --tags`.
 
 ## Now-playing & album art
 

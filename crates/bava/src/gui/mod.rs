@@ -195,10 +195,7 @@ fn persistence_section(
             };
         }
         if ui.button("⟳ Reload").clicked() {
-            match std::fs::read_to_string(&handle.path)
-                .ok()
-                .and_then(|t| toml::from_str::<Config>(&t).ok())
-            {
+            match Config::load(&handle.path) {
                 Some(cfg) => {
                     apply_config(&cfg, vis, mode, cava, rebuild, physics);
                     editor.toggle_key = cfg.gui_toggle_key();

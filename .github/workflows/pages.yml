@@ -1,0 +1,72 @@
+name: Web (GitHub Pages)
+
+# Pull requests build the site to prove the trunk pipeline still works — a
+# broken asset link in `index.html` compiles fine and only fails here — but
+# only `main` publishes. Plain compile breakage is caught earlier and cheaper
+# by ci.yml's `wasm` job.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  # Let a running deploy finish rather than publishing a half-uploaded artifact.
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: wasm
+          cache-on-failure: true
+
+      - uses: jetli/trunk-action@v0.5.0
+        with:
+          version: latest
+
+      # A project page is served from `https://<user>.github.io/<repo>/`, so
+      # every generated URL needs that prefix — without it the page asks for
+      # the wasm at the domain root and gets the 404 page back.
+      #
+      # PRs skip `--release`: the LTO'd build plus `wasm-opt -Oz` is most of the
+      # job's wall clock, and a dev build proves the pipeline just as well.
+      - name: Build
+        run: |
+          trunk build ${{ github.event_name == 'pull_request' && ' ' || '--release' }} \
+            --public-url "/${GITHUB_REPOSITORY#*/}/"
+
+      - name: Upload artifact
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: dist
+
+  deploy:
+    name: Deploy
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

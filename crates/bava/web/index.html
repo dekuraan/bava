@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>bava — music visualizer</title>
+    <meta
+      name="description"
+      content="bava, a cavacore-driven music visualizer, running in the browser on audio captured from a browser tab."
+    />
+    <!-- Inline so there is no second request (and no 404 for the one every
+         browser asks for unprompted): three bars in the accent colour. -->
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%2305050a'/%3E%3Cg fill='%236ce5c8'%3E%3Crect x='3' y='8' width='2.4' height='5' rx='1'/%3E%3Crect x='6.8' y='3.5' width='2.4' height='9.5' rx='1'/%3E%3Crect x='10.6' y='6' width='2.4' height='7' rx='1'/%3E%3C/g%3E%3C/svg%3E"
+    />
+    <!-- The HUD fonts are `include_bytes!`d into the binary, so there is no
+         asset directory to ship — the wasm blob and these two scripts are the
+         whole app. -->
+    <!-- `-all` tells wasm-opt to accept every wasm feature rustc emits. Without
+         it, binaryen 118+ rejects the module outright ("memory.copy operations
+         require bulk memory operations") and the release build fails; naming
+         individual `--enable-*` flags instead ties the build to one binaryen
+         version, since that list keeps being split up between releases. -->
+    <link
+      data-trunk
+      rel="rust"
+      href="../Cargo.toml"
+      data-bin="bava"
+      data-wasm-opt="z"
+      data-wasm-opt-params="-all"
+    />
+    <link data-trunk rel="copy-file" href="audio-worklet.js" />
+    <link data-trunk rel="copy-file" href="bava.js" />
+    <link data-trunk rel="css" href="style.css" />
+    <script type="module" src="./bava.js"></script>
+  </head>
+  <body>
+    <!-- Bevy renders here. winit is pointed at this canvas by id (see
+         `WindowPlugin.canvas` in main.rs); `fit_canvas_to_parent` keeps it
+         sized to `#stage`, which CSS pins to the viewport. -->
+    <div id="stage">
+      <canvas id="bava-canvas"></canvas>
+    </div>
+
+    <div id="boot" class="overlay">
+      <div class="boot-card">
+        <h1>bava</h1>
+        <p class="loading">loading the visualizer…</p>
+      </div>
+    </div>
+
+    <aside id="panel" class="open">
+      <header>
+        <h1>bava</h1>
+        <button id="panel-toggle" type="button" title="Hide panel (H)">‹</button>
+      </header>
+
+      <section>
+        <h2>1 · Play something</h2>
+        <form id="yt-form">
+          <input
+            id="yt-url"
+            type="text"
+            inputmode="url"
+            placeholder="YouTube URL or video ID"
+            aria-label="YouTube URL or video ID"
+          />
+          <button type="submit">Load</button>
+        </form>
+        <div id="yt-wrap"><div id="yt-player"></div></div>
+        <p class="hint">
+          Or play audio in any other tab — Spotify, Bandcamp, another YouTube —
+          and capture that instead.
+        </p>
+      </section>
+
+      <section>
+        <h2>2 · Capture the audio</h2>
+        <div class="buttons">
+          <button id="capture-this" type="button" class="primary">
+            Capture this tab
+          </button>
+          <button id="capture-other" type="button">Capture another tab</button>
+          <button id="capture-stop" type="button" hidden>Stop</button>
+        </div>
+        <p class="hint">
+          Chrome asks which surface to share — pick a <strong>tab</strong> and
+          make sure <strong>“Also share tab audio”</strong> is on. Sharing a
+          window or a whole screen does not carry audio on Linux or macOS.
+        </p>
+        <p id="capture-status" class="status" role="status">Not capturing.</p>
+      </section>
+
+      <section>
+        <h2>Controls</h2>
+        <dl class="keys">
+          <dt>Space</dt><dd>next visualizer mode</dd>
+          <dt>P</dt><dd>settings editor</dd>
+          <dt>F3</dt><dd>debug overlay + collider wireframes</dd>
+          <dt>Click</dt><dd>drop a physics ball (right-click sprays)</dd>
+          <dt>H</dt><dd>hide or show this panel</dd>
+        </dl>
+        <p class="hint">
+          Settings are saved in this browser. Query-string flags work too, e.g.
+          <code>?bars=48&amp;mode=wave-circle&amp;monstercat=2</code>.
+        </p>
+      </section>
+
+      <footer>
+        <a href="https://github.com/dekuraan/bava">source · dekuraan/bava</a>
+      </footer>
+    </aside>
+
+    <button id="panel-show" type="button" title="Show panel (H)" hidden>☰</button>
+  </body>
+</html>

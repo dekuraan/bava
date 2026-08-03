@@ -12,9 +12,14 @@ pub mod capture;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
+#[cfg(not(target_arch = "wasm32"))]
 use std::thread;
 
 use bevy::prelude::*;
+// `std::time::Instant` panics on wasm32-unknown-unknown (no clock). Bevy's
+// re-export is `web_time::Instant` there — `performance.now()` under the hood —
+// and plain `std::time::Instant` everywhere else.
+use bevy::platform::time::Instant;
 use cavacore_rs::{CavaConfig, CavaPlan};
 
 /// Tunables for the cavacore pipeline. Insert your own before adding
@@ -202,11 +207,17 @@ pub struct OfflineCavaSet;
 /// (`--input`). Inserted only by [`CavaPlugin`] in offline mode, where there is
 /// no capture thread; the record driver pushes each video frame's worth of
 /// samples before [`feed_cava`] drains them.
+///
+/// Offline rendering is native-only, so nothing constructs this on the web —
+/// but [`feed_cava`] still looks the resource up on every target, so the type
+/// itself stays compiled there and only its unused innards are excused.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 #[derive(Resource, Clone)]
 pub struct AudioInjector {
     ring: AudioRing,
 }
 
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 impl AudioInjector {
     /// Append interleaved samples for [`feed_cava`] to consume this frame.
     /// Unlike the capture thread, this never evicts a backlog — the consumer
@@ -288,13 +299,22 @@ impl Plugin for CavaPlugin {
         }
 
         // Spawn the audio reader thread feeding the ring.
-        let reader_ring = ring.clone();
-        let reader_settings = settings.clone();
-        thread::Builder::new()
-            .name("bava-capture".into())
-            .spawn(move || capture_reader(reader_settings, reader_ring))
-            .expect("failed to spawn capture thread");
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let reader_ring = ring.clone();
+            let reader_settings = settings.clone();
+            thread::Builder::new()
+                .name("bava-capture".into())
+                .spawn(move || capture_reader(reader_settings, reader_ring))
+                .expect("failed to spawn capture thread");
+        }
         app.insert_resource(ring);
+
+        // On the web the producer is the page, not a thread: `pump_web_audio`
+        // stands in for the capture thread, moving what JS pushed into the same
+        // ring before the rest of the chain reads it.
+        #[cfg(target_arch = "wasm32")]
+        app.add_systems(Update, pump_web_audio.before(reconcile_capture_rate));
 
         app.add_systems(
             Update,
@@ -304,13 +324,42 @@ impl Plugin for CavaPlugin {
     }
 }
 
+/// The web build's stand-in for the capture thread: move whatever the page's
+/// `AudioWorklet` pushed since last frame into the ring, and publish the
+/// `AudioContext`'s format so [`reconcile_capture_rate`] can rebuild the plan
+/// for it (the browser picks the rate — usually 48 kHz — and never honours a
+/// request for another one).
+#[cfg(target_arch = "wasm32")]
+fn pump_web_audio(ring: Res<AudioRing>) {
+    let mut incoming = VecDeque::new();
+    let (rate, channels) = capture::web::take(&mut incoming);
+    if rate > 0 {
+        ring.negotiated_rate.store(rate, Ordering::Relaxed);
+        ring.negotiated_channels.store(channels, Ordering::Relaxed);
+    }
+    if incoming.is_empty() {
+        return;
+    }
+    if let Ok(mut q) = ring.buf.lock() {
+        q.extend(incoming.drain(..));
+        // Same bound as the native reader: a backgrounded tab stops rendering
+        // while audio keeps arriving, and we want to resume live rather than
+        // work through the backlog.
+        while q.len() > ring.cap {
+            q.pop_front();
+        }
+    }
+}
+
 /// How often [`capture_reader`] re-checks which sink is actively playing when
 /// `follow_active_sink` is on. Long enough to be negligible overhead, short
 /// enough that starting playback on another output retargets capture promptly.
+#[cfg(not(target_arch = "wasm32"))]
 const FOLLOW_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Monitor source of the currently-active sink, or `None` when nothing is
 /// playing / on non-Linux (where capture always loops back the default output).
+#[cfg(not(target_arch = "wasm32"))]
 fn active_sink_monitor() -> Option<String> {
     #[cfg(target_os = "linux")]
     {
@@ -330,6 +379,7 @@ fn active_sink_monitor() -> Option<String> {
 /// reader periodically re-resolves the sink that is actually playing and
 /// reopens the capture there — so audio routed to a non-default output (an HDMI
 /// display, say) is visualized without the user pinning a source by hand.
+#[cfg(not(target_arch = "wasm32"))]
 fn capture_reader(settings: CavaSettings, ring: AudioRing) {
     // Follow the active sink only when the user hasn't pinned an explicit source.
     let follow = settings.source.is_none() && settings.follow_active_sink;
@@ -376,7 +426,7 @@ fn capture_reader(settings: CavaSettings, ring: AudioRing) {
 
     let chunk = settings.frame_samples.max(1) * settings.channels.max(1);
     let mut buf = vec![0.0f64; chunk];
-    let mut last_follow_check = std::time::Instant::now();
+    let mut last_follow_check = Instant::now();
     // A backend whose read() fails on every call (audio server restarted,
     // source removed) never heals on its own — the handle is dead. After ~1 s
     // of consecutive failures, reopen the backend instead of retrying the
@@ -419,7 +469,7 @@ fn capture_reader(settings: CavaSettings, ring: AudioRing) {
         // sink is actively playing; when nothing plays we keep the current source
         // so pausing doesn't yank capture away from what you were just hearing.
         if follow && last_follow_check.elapsed() >= FOLLOW_INTERVAL {
-            last_follow_check = std::time::Instant::now();
+            last_follow_check = Instant::now();
             if let Some(active) = active_sink_monitor()
                 && current_device.as_deref() != Some(active.as_str())
             {
@@ -496,7 +546,7 @@ fn feed_cava(
     // autosens decays the bars to zero (matching cava's `reset_output_buffers`)
     // instead of holding a stale frame.
     if executed > 0 {
-        stall.last_audio = Some(std::time::Instant::now());
+        stall.last_audio = Some(Instant::now());
     } else if offline.is_none() {
         let stalled = stall
             .last_audio
@@ -514,7 +564,7 @@ fn feed_cava(
     cava.bars.extend(bars.iter().map(|&v| v as f32));
 
     if settings.debug {
-        let now = std::time::Instant::now();
+        let now = Instant::now();
         dbg.since.get_or_insert(now);
         dbg.frames += 1;
         dbg.executes += executed as u64;
@@ -689,7 +739,7 @@ const STALL_DECAY_AFTER: std::time::Duration = std::time::Duration::from_millis(
 /// dead capture stream decays the bars instead of freezing them.
 #[derive(Default)]
 struct StallState {
-    last_audio: Option<std::time::Instant>,
+    last_audio: Option<Instant>,
 }
 
 /// Rolling debug accumulator for [`feed_cava`].
@@ -702,7 +752,7 @@ struct FeedStats {
     /// Wall-clock start of the current window, so execute *rate* is per-second
     /// rather than per-window (the window is frame-counted, so its span varies
     /// with framerate — 240 frames is ~1 s at 240 fps but ~4 s at 60 fps).
-    since: Option<std::time::Instant>,
+    since: Option<Instant>,
 }
 
 /// Signal the capture thread to stop when the app is exiting.
