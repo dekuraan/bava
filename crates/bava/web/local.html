@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<!-- SPDX-License-Identifier: MIT OR Apache-2.0
+
+     The no-screen-share entry point.
+
+     Tab-audio capture is Chromium-desktop-only in practice: Firefox's
+     getDisplayMedia won't carry audio, and no mobile browser implements it at
+     all. Sending those users to the main page means a permission prompt that
+     cannot succeed, so this is a URL to hand them instead — it goes straight to
+     local file playback, which needs no permission and works everywhere.
+
+     It is a redirect rather than a second app because trunk builds exactly one
+     HTML entry point; `?source=file` is the same bundle with the tab-capture UI
+     omitted. Keeping it as a real page means there is a link to share. -->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>bava — play a local file</title>
+    <meta name="robots" content="noindex" />
+    <!-- Belt and braces: the script runs immediately, this catches the case
+         where scripting is off entirely. -->
+    <meta http-equiv="refresh" content="0; url=./?source=file" />
+    <link rel="canonical" href="./?source=file" />
+    <style>
+      html {
+        background: #05050a;
+        color: #9a9ab4;
+        font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+        color-scheme: dark;
+      }
+      body {
+        margin: 0;
+        display: grid;
+        place-items: center;
+        min-height: 100vh;
+        text-align: center;
+      }
+      a {
+        color: #6ce5c8;
+      }
+    </style>
+  </head>
+  <body>
+    <p>
+      Opening bava in file-playback mode…<br />
+      <a href="./?source=file">Continue</a>
+    </p>
+    <script>
+      // replace(), not href: this page should not sit in the back stack between
+      // the visualizer and wherever the user came from.
+      location.replace("./?source=file");
+    </script>
+  </body>
+</html>
