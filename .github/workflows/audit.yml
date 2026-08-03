@@ -1,17 +1,17 @@
 name: Security audit
 
 # cargo-audit only reads Cargo.lock against the RustSec advisory DB, so it needs
-# no system deps and no build. Run it when the dependency set changes *and* on a
-# weekly schedule, so an advisory disclosed after a dep was pinned still surfaces.
+# no system deps and no build (~3 min). It's a *required* status check, and a
+# required check that never runs leaves a PR stuck on "Expected — waiting for
+# status to be reported" forever — so it deliberately has no `paths:` filter and
+# runs on every PR and every merge-queue entry, not only dependency changes. The
+# weekly schedule still catches advisories disclosed after a dep was pinned.
 on:
   push:
-    paths:
-      - "**/Cargo.toml"
-      - "**/Cargo.lock"
+    branches: [main]
   pull_request:
-    paths:
-      - "**/Cargo.toml"
-      - "**/Cargo.lock"
+    branches: [main]
+  merge_group:
   schedule:
     - cron: "0 6 * * 1" # Mondays 06:00 UTC
 
@@ -29,3 +29,11 @@ jobs:
       - uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          # Both are DoS-on-untrusted-XML in quick-xml <0.41. Our only path to
+          # it is `wayland-scanner`, a *proc-macro* that parses the Wayland
+          # protocol XML shipped alongside the wayland crates at build time —
+          # it never sees attacker-controlled input and isn't in the shipped
+          # binary. We can't upgrade regardless: wayland-scanner pins
+          # quick-xml `^0.39`, so nothing short of a winit/smithay bump moves
+          # it. Drop these two once that lands upstream.
+          ignore: RUSTSEC-2026-0194,RUSTSEC-2026-0195
