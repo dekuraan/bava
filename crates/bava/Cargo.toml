@@ -40,10 +40,7 @@ bevy = { version = "0.19", default-features = false, features = [
     "ui_bevy_render",  # bevy_ui for the HUD; transitively pulls default_app (asset/window/state/input_focus)
     "tonemapping_luts", # LUTs for the AgX / TonyMcMapface / BlenderFilmic tone mappers (see [vis] tonemapping)
     "std",
-    "multi_threaded",
     "bevy_winit",
-    "wayland",
-    "x11",
     "default_font",    # embedded font so HUD text renders without shipping one
     "keyboard",        # Space / F3 / configurable GUI toggle
     "mouse",           # egui editor interaction
@@ -56,7 +53,6 @@ avian2d = { version = "0.7", default-features = false, features = [
     "2d",
     "f32",
     "parry-f32",
-    "parallel",
     "debug-plugin",
 ] }
 
@@ -82,17 +78,10 @@ color-thief = "0.2"
 # Lock-free-ish hand-off from the audio/now-playing threads to Bevy systems.
 crossbeam-channel = "0.5"
 
-# Offline video rendering (`--input song.mp3 --out video.mp4`): GPU→CPU frame
-# readback from a headless render target. We implement its `Encoder` trait over
-# an ffmpeg subprocess (see `record::encoder`) instead of enabling its built-in
-# encoder features, so video encode + audio mux happen in one streaming pass.
-bevy_capture = "0.6"
-
-# Audio-file decoding for offline rendering (pure Rust). The defaults cover
-# flac/ogg/vorbis/wav/pcm; mp3 + m4a/aac are added on top.
-symphonia = { version = "0.6", features = ["mp3", "aac", "isomp4"] }
-
 # --- Profiling (`--features profile`, see `src/profiling.rs`). ---
+# All four are optional and reached only through the `profile` feature, so a
+# default (or wasm) build never compiles them — which is why they can live in
+# the platform-agnostic table despite puffin_http being a TCP server.
 # The scope collector itself; its macros compile to an atomic load when scopes
 # are off, so instrumented hot paths stay cheap.
 puffin = { version = "0.20", optional = true }
@@ -107,11 +96,69 @@ tracing-subscriber = { version = "0.3", optional = true, default-features = fals
     "fmt",
 ] }
 
-# Configuration: CLI args (clap) layered over a TOML config file.
+# Configuration: CLI args (clap) layered over a TOML config file. On the web
+# build there is no command line, but the same `Cli` struct is still parsed —
+# from the page's query string — so both targets share one override path.
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 toml = "1"
+
+# --- Native-only: everything that assumes an OS (threads, a filesystem, a
+# subprocess to pipe video into). The web build drops all of it: see
+# `cava::capture::web`, `now_playing::web`, and `config`'s localStorage store. ---
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Rendering and physics across cores. wasm32-unknown-unknown is single-threaded
+# (no shared-memory atomics in the shipped build), and enabling these there makes
+# Bevy's task pools spawn threads the browser can't provide.
+bevy = { version = "0.19", default-features = false, features = [
+    "multi_threaded",
+    "wayland",
+    "x11",
+] }
+avian2d = { version = "0.7", default-features = false, features = ["parallel"] }
+
+# Offline video rendering (`--input song.mp3 --out video.mp4`): GPU→CPU frame
+# readback from a headless render target. We implement its `Encoder` trait over
+# an ffmpeg subprocess (see `record::encoder`) instead of enabling its built-in
+# encoder features, so video encode + audio mux happen in one streaming pass.
+bevy_capture = "0.6"
+
+# Audio-file decoding for offline rendering (pure Rust). The defaults cover
+# flac/ogg/vorbis/wav/pcm; mp3 + m4a/aac are added on top.
+symphonia = { version = "0.6", features = ["mp3", "aac", "isomp4"] }
+
+# `~/.config/bava` resolution. No filesystem in the browser, where the config
+# store is `window.localStorage` instead.
 dirs = "6"
+
+# --- Web build (`wasm32-unknown-unknown`, see `web/` and `docs/WEB.md`).
+# Audio comes from a tab-share `MediaStream` the page pushes in through
+# `bava_push_audio`; there is no capture thread and no filesystem. ---
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# `webgl2` targets WebGL2, which every current browser has; `webgpu` would be
+# faster but is still Chrome/Edge-desktop-only. `web` routes `Instant`,
+# `bevy_app`'s runner, and reflect's type registry through the browser
+# equivalents (`performance.now`, `requestAnimationFrame`). `zstd_rust` swaps
+# the C zstd used to decompress the tonemapping LUTs for the pure-Rust decoder.
+bevy = { version = "0.19", default-features = false, features = [
+    "web",
+    "webgl2",
+    "zstd_rust",
+] }
+
+# The JS bridge: `bava_push_audio` / `bava_set_now_playing` are called from
+# `web/bava.js`, and the config store reaches `window.localStorage`.
+wasm-bindgen = "0.2"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["Window", "Storage", "Location", "console"] }
+# Route Rust panics to the devtools console with a stack trace instead of the
+# bare "unreachable executed" the runtime would otherwise show.
+console_error_panic_hook = "0.1"
+#
+# No `getrandom` entry is needed: the only thing that reaches it on wasm is
+# bevy_egui, which already enables `getrandom/wasm_js` for this target — and
+# getrandom 0.4 picks that backend from the feature alone, without the
+# `--cfg getrandom_backend=…` rustflag its 0.3 line required.
 
 # --- Linux backends: PulseAudio capture + MPRIS now-playing over D-Bus. ---
 [target.'cfg(target_os = "linux")'.dependencies]

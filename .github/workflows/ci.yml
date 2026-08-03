@@ -135,3 +135,24 @@ jobs:
 
       - name: Check Windows target
         run: cargo check --target x86_64-pc-windows-gnu -p bava
+
+  # ── Web: wasm type-check (no browser, no trunk — just the target) ─────────
+  wasm:
+    name: Web type-check (wasm32)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      # No system deps: the wasm target pulls in none of the Linux audio or
+      # D-Bus backends (they are `cfg(target_os = "linux")`, and wasm32-unknown-
+      # unknown is `target_os = "unknown"`).
+      - name: Check web target
+        run: cargo check --target wasm32-unknown-unknown -p bava --bin bava

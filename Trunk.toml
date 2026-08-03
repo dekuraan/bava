@@ -1,0 +1,14 @@
+# Web build: `trunk serve` to develop, `trunk build --release` for the `dist/`
+# that ships to GitHub Pages. See docs/WEB.md.
+#
+# The page lives in `crates/bava/web/` next to the JS it needs; its
+# `rel="rust"` link points back at the crate manifest, so trunk does not require
+# index.html and Cargo.toml to be siblings.
+
+[build]
+target = "crates/bava/web/index.html"
+dist = "dist"
+
+[serve]
+port = 8080
+open = false

@@ -11,6 +11,7 @@ real-time. Now-playing metadata and album art are pulled from the OS media sessi
 | Linux | Native PipeWire monitor (default; PulseAudio fallback) | MPRIS over D-Bus |
 | Windows | WASAPI shared-mode loopback | GlobalSystemMediaTransportControls (GSMTC) |
 | macOS 14.2+ | Core Audio process tap (no extra install) | MediaRemote adapter |
+| Web (Chrome) | Tab share via `getDisplayMedia` | YouTube IFrame API + thumbnail |
 
 ![bava rendering a spectrum](docs/screenshot.png)
 
@@ -58,6 +59,25 @@ is below.
   renders the visualization of an audio file to video (no live capture),
   faster than realtime, with YouTube-ready encoding (H.264 high / yuv420p /
   AAC 384k / faststart). See below.
+
+## In the browser
+
+bava also builds to WebAssembly, with an embedded YouTube player on the page.
+Browsers have no loopback device, so audio comes from **sharing a tab**: click
+*Capture this tab* and the embedded player's output drives the visualizer, or
+*Capture another tab* and point it at Spotify Web, Bandcamp, anything.
+
+```sh
+trunk serve            # http://localhost:8080
+trunk build --release  # → dist/, static files for any host
+```
+
+Chrome only, and the share picker's **"Also share tab audio"** must be ticked —
+sharing a window or a whole screen carries no audio outside Windows. Every
+visualizer mode, the physics balls, dynamic album colors and the settings editor
+work the same as on the desktop; settings persist in `localStorage`, and the
+page's query string takes the same flags as the CLI
+(`?bars=48&mode=wave-circle`). See [docs/WEB.md](docs/WEB.md).
 
 ## Rendering a music video
 
