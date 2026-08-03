@@ -53,21 +53,31 @@ makepkg --printsrcinfo > .SRCINFO               # publish.sh does this for you
 The manifest, desktop entry, metainfo, and icon live in [`../flatpak/`](../flatpak);
 that README covers building and running locally. Submitting:
 
-1. **Swap `sources:` for something Flathub can fetch.** The in-tree manifest
-   uses `type: dir, path: ..`, which only resolves when building from a
-   checkout of *this* repo. Flathub's buildbot checks out only the flathub
-   repo, so a submission needs the released tarball instead:
+1. **Generate the submission manifest.** The in-tree one builds from
+   `type: dir, path: ..`, which only resolves inside a checkout of this repo —
+   Flathub's buildbot has no `..`, so a submission must name a fixed upstream
+   source. `gen-flathub-manifest.py` rewrites just the `sources:` block and
+   copies everything above it verbatim, so the submitted manifest cannot drift
+   from the one built and tested locally:
 
-   ```yaml
-   sources:
-     - type: archive
-       url: https://github.com/dekuraan/bava/archive/refs/tags/v0.4.0.tar.gz
-       sha256: <sha256sum of that exact tarball>
-     - cargo-sources.json
+   ```sh
+   mkdir -p /tmp/flathub-submission
+   python3 flatpak/gen-flathub-manifest.py v0.4.0 \
+       -o /tmp/flathub-submission/io.github.dekuraan.bava.yml
+   cp flatpak/cargo-sources.json /tmp/flathub-submission/
    ```
 
-   Both values depend on the tag, so this step can only happen after a release
-   is tagged — keep the `type: dir` version in-tree for local builds.
+   It downloads the tag's tarball to hash the exact bytes the buildbot will
+   fetch, rather than trusting a locally-made archive. Re-run it for every
+   release; the tag must exist first.
+
+   Build it the way the buildbot will — from the tarball, outside this repo —
+   before opening the PR:
+
+   ```sh
+   cd /tmp/flathub-submission
+   flatpak-builder --user --force-clean fb-out io.github.dekuraan.bava.yml
+   ```
 2. Fork [flathub/flathub](https://github.com/flathub/flathub), branch
    `new-pr`, add `io.github.dekuraan.bava.yml` (plus `cargo-sources.json`), open
    a PR against the `new-pr` branch. A bot builds it; a reviewer follows up.
@@ -173,6 +183,35 @@ Two confinement caveats worth knowing before you publish:
 
 **Unbuilt.** snapcraft needs LXD and a Ubuntu-ish host; this was written on
 Arch. Expect one round of fixes on the first `snapcraft` run.
+
+## crates.io
+
+**Deliberately not published**, for now. Both `bava` and `cavacore-rs` were free
+as of v0.4.0 (`cavacore` itself is taken by an unrelated crate). Publishing is
+irreversible — a name is claimed forever and a version can only be yanked, never
+removed — so this is a decision to make once rather than drift into.
+
+`cavacore-rs` is **ready whenever you want it**: `cargo package -p cavacore-rs`
+produces a clean 14 KB crate that compiles from its own tarball, needing no
+changes. It is also the half worth publishing — a pure-Rust cavacore port with a
+real test suite is useful to people who will never run this app.
+
+`bava` needs work first, and the reasons are worth knowing before someone tries:
+
+- **The fonts live outside the crate.** `vis/hud.rs` does
+  `include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/fonts/…"))`,
+  and Cargo cannot package files above the package root — `cargo package --list`
+  includes none of `assets/`. A published `bava` would fail to compile for
+  everyone. Fixing it means moving `assets/` under `crates/bava/` and updating
+  the flatpak, AUR and deb/rpm asset paths in step.
+- **`cavacore-rs` must go first.** The workspace dependency is a bare
+  `{ path = … }`; publishing needs `version` alongside it, and `cargo package -p
+  bava` then fails until cavacore-rs actually exists on the index.
+- No `keywords`/`categories` on either crate, so neither would be discoverable.
+
+None of this blocks users: the release binaries, AUR, Flathub, deb/rpm/AppImage
+and the web build already reach more people than `cargo install` would, and none
+of them require a Rust toolchain.
 
 ## TV app stores
 
