@@ -471,7 +471,7 @@ checksum = "b25655df2c3cdd83c5e5b293b88acd880332b2ddadd7c30ac43144fdc0033da9"
 
 [[package]]
 name = "bava"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "avian2d",
  "base64 0.23.0",
@@ -2141,7 +2141,7 @@ checksum = "37b2a672a2cb129a2e41c10b1224bb368f9f37a2b16b612598138befd7b37eb5"
 
 [[package]]
 name = "cavacore-rs"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "realfft",
 ]
