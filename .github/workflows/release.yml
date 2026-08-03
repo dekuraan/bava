@@ -70,6 +70,80 @@ jobs:
           name: bava-linux-x86_64-pulseaudio
           path: target/release/bava
 
+  # ── Linux packages: .deb / .rpm / AppImage ───────────────────────────────
+  # Distro-agnostic install paths that need no review queue, unlike the AUR and
+  # Flathub. Deliberately a separate job from `build-linux`: glibc is forward-
+  # but not backward-compatible, so a package built on 24.04 will not start on
+  # 22.04. Pinned to the oldest LTS runner GitHub still offers — bump it to the
+  # next-oldest when this image retires, and the compatibility floor rises with
+  # it.
+  package-linux:
+    name: Package (deb, rpm, AppImage)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libpulse-dev \
+            libpipewire-0.3-dev \
+            clang \
+            libclang-dev \
+            libasound2-dev \
+            libdbus-1-dev \
+            libwayland-dev \
+            libxkbcommon-dev \
+            libx11-dev \
+            libxcursor-dev \
+            libxrandr-dev \
+            libxi-dev \
+            libvulkan-dev \
+            file
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deb,cargo-generate-rpm
+
+      # .deb and .rpm ship the *default* (native PipeWire) build: both distros
+      # package libpipewire, and cargo-deb's `$auto` / cargo-generate-rpm's
+      # auto-req read the ELF and declare that dependency for us.
+      - name: Build release (native PipeWire)
+        run: cargo build --release -p bava
+
+      - name: Build .deb
+        run: cargo deb -p bava --no-build
+
+      - name: Build .rpm
+        run: cargo generate-rpm -p crates/bava
+
+      # The AppImage ships the PulseAudio-only build instead — see the header
+      # comment in build-appimage.sh for why bundling libpipewire is a trap.
+      - name: Build release (PulseAudio-only)
+        run: cargo build --release -p bava --no-default-features
+
+      - name: Build AppImage
+        run: packaging/appimage/build-appimage.sh target/release/bava "${{ github.ref_name }}"
+
+      - name: Stage packages
+        run: |
+          mkdir -p pkg
+          cp target/debian/*.deb          pkg/
+          cp target/generate-rpm/*.rpm    pkg/
+          cp target/appimage/*.AppImage   pkg/
+          ls -lh pkg/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: bava-linux-packages
+          path: pkg/*
+
   # ── Windows x86_64 ────────────────────────────────────────────────────────
   build-windows:
     name: Build (Windows x86_64)
@@ -149,6 +223,7 @@ jobs:
     name: Publish release
     needs:
       - build-linux
+      - package-linux
       - build-windows
       - build-macos-arm
       - build-macos-x86
@@ -172,8 +247,10 @@ jobs:
           mv dist/bava-windows-x86_64/bava.exe       out/bava-windows-x86_64.exe
           mv dist/bava-macos-aarch64/bava            out/bava-macos-aarch64
           mv dist/bava-macos-x86_64/bava             out/bava-macos-x86_64
+          # The deb/rpm/AppImage already carry version-stamped names.
+          mv dist/bava-linux-packages/*              out/
           chmod +x out/bava-linux-x86_64 out/bava-linux-x86_64-pulseaudio \
-                   out/bava-macos-aarch64 out/bava-macos-x86_64
+                   out/bava-macos-aarch64 out/bava-macos-x86_64 out/*.AppImage
 
       - name: Create release
         uses: softprops/action-gh-release@v3
@@ -185,3 +262,55 @@ jobs:
             out/bava-windows-x86_64.exe
             out/bava-macos-aarch64
             out/bava-macos-x86_64
+            out/*.deb
+            out/*.rpm
+            out/*.AppImage
+
+  # ── AUR ───────────────────────────────────────────────────────────────────
+  # Pushes the versioned `bava` package. `bava-git` needs no per-release push:
+  # its pkgver() derives from the git HEAD at build time, so it's published once
+  # by hand (packaging/aur/publish.sh bava-git) and then left alone.
+  #
+  # Needs three repo secrets; the job no-ops until they exist:
+  #   AUR_USERNAME, AUR_EMAIL  — must match the AUR account
+  #   AUR_SSH_PRIVATE_KEY      — private half of a key registered at
+  #                              https://aur.archlinux.org/account
+  publish-aur:
+    name: Publish to AUR
+    needs: release
+    runs-on: ubuntu-latest
+    env:
+      AUR_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+    steps:
+      - uses: actions/checkout@v7
+        if: env.AUR_KEY != ''
+
+      # The tag's source tarball is what the PKGBUILD downloads, so hash the
+      # exact bytes GitHub will serve rather than trusting a local archive.
+      - name: Point PKGBUILD at this tag
+        if: env.AUR_KEY != ''
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          url="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${GITHUB_REF_NAME}.tar.gz"
+          # GitHub generates release tarballs lazily; retry until it materialises.
+          for i in 1 2 3 4 5; do
+            curl -fsSL -o src.tar.gz "$url" && break
+            echo "tarball not ready yet (attempt $i)"; sleep 15
+          done
+          sum=$(sha256sum src.tar.gz | cut -d' ' -f1)
+          sed -i "s/^pkgver=.*/pkgver=${version}/;s/^pkgrel=.*/pkgrel=1/" packaging/aur/bava/PKGBUILD
+          sed -i "s/^sha256sums=.*/sha256sums=('${sum}')/" packaging/aur/bava/PKGBUILD
+          grep -E '^(pkgver|pkgrel|sha256sums)=' packaging/aur/bava/PKGBUILD
+
+      - name: Publish
+        if: env.AUR_KEY != ''
+        uses: KSXGitHub/github-actions-deploy-aur@v4
+        with:
+          pkgname: bava
+          pkgbuild: packaging/aur/bava/PKGBUILD
+          commit_username: ${{ secrets.AUR_USERNAME }}
+          commit_email: ${{ secrets.AUR_EMAIL }}
+          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          commit_message: Update to ${{ github.ref_name }}
+          updpkgsums: false
