@@ -6,6 +6,12 @@ on:
   pull_request:
     branches: [main]
 
+# Every job here only checks out and compiles — nothing writes to the repo or
+# reads a secret — so drop the token to read-only rather than inheriting the
+# repo default (CodeQL actions/missing-workflow-permissions).
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
