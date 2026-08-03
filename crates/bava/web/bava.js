@@ -325,7 +325,12 @@ async function startFile(file) {
   audioEl = fresh;
 
   const url = URL.createObjectURL(file);
-  audioEl.src = url;
+  // CodeQL's js/xss-through-dom treats `file` (from an <input type=file>) as
+  // tainted DOM text and `createObjectURL` as taint-preserving, so it reads
+  // this as user text reaching a URL sink. `createObjectURL` only ever returns
+  // a same-origin `blob:` URL — none of the file's own bytes or name survive
+  // into it — and `<audio>.src` doesn't interpret HTML regardless.
+  audioEl.src = url; // codeql[js/xss-through-dom]
   audioEl.loop = true;
   if (FILE_SECTION) FILE_SECTION.hidden = false;
   // Re-picking the same File isn't possible programmatically, but re-opening
