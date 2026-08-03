@@ -150,3 +150,48 @@ objc2-core-foundation = { version = "0.3", features = [
     "CFString",
     "CFDictionary",
 ] }
+
+# --- Debian/Ubuntu package (`cargo deb -p bava`) ---------------------------
+# Ships the same four files the AUR and Flatpak packages do. `$auto` lets
+# cargo-deb read the built ELF and derive the shared-library dependencies
+# (libpulse, libpipewire, libdbus, wayland, X11, vulkan-loader …) from the
+# build host's package database, so the list can't drift from what we link.
+[package.metadata.deb]
+name = "bava"
+maintainer = "dekuraan <declan.li.carney@gmail.com>"
+copyright = "2026 dekuraan"
+license-file = "../../LICENSE-MIT"
+extended-description = """
+A music visualizer built on the Bevy engine. Captures the default audio \
+output's monitor through PipeWire (or PulseAudio), runs it through cavacore \
+— the analysis engine from CAVA — and renders smoothed, log-spaced frequency \
+bars with HDR bloom. Reads now-playing metadata and album art over MPRIS."""
+section = "sound"
+priority = "optional"
+depends = "$auto"
+recommends = "ffmpeg"
+assets = [
+    ["target/release/bava", "usr/bin/", "755"],
+    ["../../flatpak/io.github.dekuraan.bava.desktop", "usr/share/applications/", "644"],
+    ["../../flatpak/io.github.dekuraan.bava.svg", "usr/share/icons/hicolor/scalable/apps/", "644"],
+    ["../../flatpak/io.github.dekuraan.bava.metainfo.xml", "usr/share/metainfo/", "644"],
+    ["../../README.md", "usr/share/doc/bava/README.md", "644"],
+    ["../../LICENSE-APACHE", "usr/share/doc/bava/LICENSE-APACHE", "644"],
+]
+
+# --- Fedora/openSUSE package (`cargo generate-rpm -p crates/bava`) ---------
+# auto-req is on by default: cargo-generate-rpm runs the same ELF scan rpmbuild
+# would, so Requires: comes out of the binary rather than a hand-kept list.
+[package.metadata.generate-rpm]
+name = "bava"
+summary = "Music visualizer driven by cavacore, MPRIS, and PipeWire/PulseAudio"
+license = "MIT OR Apache-2.0"
+assets = [
+    { source = "target/release/bava", dest = "/usr/bin/bava", mode = "755" },
+    { source = "flatpak/io.github.dekuraan.bava.desktop", dest = "/usr/share/applications/io.github.dekuraan.bava.desktop", mode = "644" },
+    { source = "flatpak/io.github.dekuraan.bava.svg", dest = "/usr/share/icons/hicolor/scalable/apps/io.github.dekuraan.bava.svg", mode = "644" },
+    { source = "flatpak/io.github.dekuraan.bava.metainfo.xml", dest = "/usr/share/metainfo/io.github.dekuraan.bava.metainfo.xml", mode = "644" },
+    { source = "LICENSE-MIT", dest = "/usr/share/licenses/bava/LICENSE-MIT", mode = "644", doc = true },
+    { source = "LICENSE-APACHE", dest = "/usr/share/licenses/bava/LICENSE-APACHE", mode = "644", doc = true },
+    { source = "README.md", dest = "/usr/share/doc/bava/README.md", mode = "644", doc = true },
+]
