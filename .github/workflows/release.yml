@@ -106,9 +106,17 @@ jobs:
             libvulkan-dev \
             file
 
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-deb,cargo-generate-rpm
+      # Built from source rather than fetched as prebuilts. taiki-e/install-action
+      # downloads binaries linked against a *current* glibc — cargo-deb now needs
+      # GLIBC_2.39, and this job is deliberately pinned to the oldest LTS runner
+      # (22.04, glibc 2.35) so the packages it produces run on older distros.
+      # That made the tooling, not the output, the thing that wouldn't start:
+      #   cargo-deb: /lib/x86_64-linux-gnu/libc.so.6: version `GLIBC_2.39' not found
+      # Compiling them here links against the runner's own glibc, so the pin can
+      # keep doing its job. Costs a few minutes; `cargo install` is a no-op when
+      # rust-cache restores ~/.cargo/bin.
+      - name: Install packaging tools
+        run: cargo install --locked cargo-deb cargo-generate-rpm
 
       # .deb and .rpm ship the *default* (native PipeWire) build: both distros
       # package libpipewire, and cargo-deb's `$auto` / cargo-generate-rpm's

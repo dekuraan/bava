@@ -1,3 +1,6 @@
 /target
 /.claude/worktrees
 /dist
+# flatpak-builder's output and cache, per the command in flatpak/README.md.
+/build-dir
+/.flatpak-builder
