@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Required by the merge queue: entries are tested on a `gh-readonly-queue/main/*`
+  # branch that fires `merge_group`, not `pull_request`. Without this the queue
+  # waits forever for checks that never start.
+  merge_group:
 
 # Every job here only checks out and compiles — nothing writes to the repo or
 # reads a secret — so drop the token to read-only rather than inheriting the
