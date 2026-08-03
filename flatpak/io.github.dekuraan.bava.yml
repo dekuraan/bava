@@ -4,16 +4,23 @@
 #
 #   python3 flatpak/gen-cargo-sources.py          # refresh vendored crates
 #   flatpak install -y flathub \
-#       org.freedesktop.Platform//24.08 \
-#       org.freedesktop.Sdk//24.08 \
-#       org.freedesktop.Sdk.Extension.rust-stable//24.08
+#       org.freedesktop.Platform//25.08 \
+#       org.freedesktop.Sdk//25.08 \
+#       org.freedesktop.Sdk.Extension.rust-stable//25.08
 #   flatpak-builder --user --install --force-clean \
 #       build-dir flatpak/io.github.dekuraan.bava.yml
 #   flatpak run io.github.dekuraan.bava
 #
+# The runtime is pinned to 25.08 because of its *Rust* version, not its
+# libraries: `rust-stable//24.08` ships rustc 1.89, and Bevy 0.19 requires
+# 1.95, so a 24.08 build fails at `cargo build` before it links anything.
+# 25.08's extension ships 1.97.1. Check with
+#   flatpak run --devel --command=sh org.freedesktop.Sdk//<branch> \
+#       -c '/usr/lib/sdk/rust-stable/bin/rustc --version'
+# before bumping Bevy, and bump this in step if the floor rises again.
 app-id: io.github.dekuraan.bava
 runtime: org.freedesktop.Platform
-runtime-version: '24.08'
+runtime-version: '25.08'
 sdk: org.freedesktop.Sdk
 sdk-extensions:
   - org.freedesktop.Sdk.Extension.rust-stable
@@ -44,7 +51,15 @@ modules:
       env:
         CARGO_HOME: /run/build/bava/cargo
     build-commands:
-      - cargo build --offline --release -p bava
+      # `--no-default-features` drops the native PipeWire backend, for the same
+      # reason the AppImage does (see packaging/README.md): a sandboxed client
+      # library talking to whatever daemon the host happens to run is a bad
+      # pairing, and the PulseAudio path works on pure-PulseAudio hosts *and* on
+      # PipeWire hosts via pipewire-pulse. It also avoids building libspa-sys,
+      # whose bindgen step needs libclang and the PipeWire headers — neither is
+      # in the Sdk, so the default build fails here with
+      #   Unable to find libclang: ... set the `LIBCLANG_PATH` environment variable
+      - cargo build --offline --release -p bava --no-default-features
       - install -Dm755 target/release/bava /app/bin/bava
       - install -Dm644 flatpak/io.github.dekuraan.bava.desktop
         /app/share/applications/io.github.dekuraan.bava.desktop

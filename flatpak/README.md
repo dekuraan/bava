@@ -23,9 +23,9 @@ python3 flatpak/gen-cargo-sources.py
 
 # 2. Install the runtime, SDK, and the Rust SDK extension (once).
 flatpak install -y flathub \
-    org.freedesktop.Platform//24.08 \
-    org.freedesktop.Sdk//24.08 \
-    org.freedesktop.Sdk.Extension.rust-stable//24.08
+    org.freedesktop.Platform//25.08 \
+    org.freedesktop.Sdk//25.08 \
+    org.freedesktop.Sdk.Extension.rust-stable//25.08
 
 # 3. Build and install into the user installation.
 flatpak-builder --user --install --force-clean \
