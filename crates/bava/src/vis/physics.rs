@@ -2600,9 +2600,7 @@ mod tests {
         app.insert_resource(Planet {
             radii: radii.clone(),
             prev: radii, // steady → no expansion fling; escape must come from unstick
-            indices: (0..n as u32)
-                .map(|k| [k, (k as u32 + 1) % n as u32])
-                .collect(),
+            indices: (0..n as u32).map(|k| [k, (k + 1) % n as u32]).collect(),
         });
 
         // Clear Bevy's zero-dt first frame (planet_forces no-ops on dt==0) before
