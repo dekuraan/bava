@@ -127,8 +127,11 @@ jobs:
       - name: Build release (PulseAudio-only)
         run: cargo build --release -p bava --no-default-features
 
+      # Strip the tag's leading `v`: cargo-deb and cargo-generate-rpm both name
+      # their output from the crate version (`bava_0.4.0_amd64.deb`), so passing
+      # the raw ref would ship one asset out of step with the other two.
       - name: Build AppImage
-        run: packaging/appimage/build-appimage.sh target/release/bava "${{ github.ref_name }}"
+        run: packaging/appimage/build-appimage.sh target/release/bava "${GITHUB_REF_NAME#v}"
 
       - name: Stage packages
         run: |

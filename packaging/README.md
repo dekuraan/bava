@@ -15,7 +15,7 @@ takes to publish. Artwork for all of them comes from one generator —
 | **Nix** | [`../flake.nix`](../flake.nix), [`nix/package.nix`](nix/package.nix) | none (nixpkgs PR is optional) | written, **not yet evaluated** — no nix on the dev box |
 | **Snap Store** | [`../snap/snapcraft.yaml`](../snap/snapcraft.yaml) | Snapcraft account; manual review only if you go classic | written, **not yet built** — needs LXD + snapcraft |
 | **macOS** | [`macos/bava.icns`](macos) | — | icon only; no `.app` bundling yet |
-| **Web/wasm** | [`web/`](web) | — | favicons only; [there is no wasm target yet](web/README.md#status-of-the-wasm-build-itself) |
+| **Web/wasm** | [`web/`](web), [`../crates/bava/web/`](../crates/bava/web) | — | **live** — built by trunk and deployed to GitHub Pages on every push to `main` |
 | **TV app stores** | — | — | not viable, see [below](#tv-app-stores) |
 
 ## AUR
@@ -156,5 +156,22 @@ line-in dongle** instead of loopback — a real port (Bevy's Android target, a n
 `AudioCapture` backend, no MPRIS), not a packaging step. Scope it separately if
 it ever matters.
 
-The same reasoning is why the web build is a non-trivial port rather than a
-packaging job — see [`web/README.md`](web/README.md).
+The same reasoning is why the web build was a real port rather than a packaging
+job — it could not reuse a capture backend, so the page pushes tab-shared audio
+into the wasm module instead. That port is done and deployed; see
+[`web/README.md`](web/README.md) and [`../docs/WEB.md`](../docs/WEB.md).
+
+## Web
+
+Nothing to submit and no gatekeeper — the site is static, and `pages.yml`
+publishes `dist/` on every push to `main`.
+
+```sh
+trunk serve                                # http://localhost:8080
+trunk build --release --public-url /bava/  # exactly what CI deploys
+```
+
+The `--public-url` matters: a project page is served from
+`https://<user>.github.io/<repo>/`, and without the prefix the page requests the
+wasm at the domain root and gets the 404 page back. Pages must be set to the
+"GitHub Actions" source once in repo settings.
