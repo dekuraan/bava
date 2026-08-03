@@ -508,7 +508,7 @@ if (!FILE_ONLY) {
       // when those go offline YouTube refuses to embed the archive and the
       // player shows "this live stream recording is not available" instead.
       // Override per-visit with `?video=<id>`.
-      videoId: PARAMS.get("video") || "TZCE6PfaUWA",
+      videoId: PARAMS.get("video") || "EAxr8tqvw1A",
       playerVars: { playsinline: 1, modestbranding: 1 },
       events: {
         onStateChange: pushNowPlaying,
