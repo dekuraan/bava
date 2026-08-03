@@ -385,12 +385,16 @@ impl VisSettings {
 
     /// Low-amplitude foreground gradient end (the first active stop).
     pub fn fg_lo(&self) -> Color {
-        self.active_fg().and_then(|s| s.first().copied()).unwrap_or(Color::WHITE)
+        self.active_fg()
+            .and_then(|s| s.first().copied())
+            .unwrap_or(Color::WHITE)
     }
 
     /// Full-amplitude foreground gradient end (the last active stop).
     pub fn fg_hi(&self) -> Color {
-        self.active_fg().and_then(|s| s.last().copied()).unwrap_or(Color::WHITE)
+        self.active_fg()
+            .and_then(|s| s.last().copied())
+            .unwrap_or(Color::WHITE)
     }
 }
 
@@ -629,7 +633,10 @@ mod tests {
         assert_eq!(DrawingMode::BarsCircle.family(), VisFamily::Circle);
         // Box and circle share the shape but differ in family.
         for m in DrawingMode::ALL {
-            assert_eq!(m.family() == VisFamily::Box, format!("{m:?}").ends_with("Box"));
+            assert_eq!(
+                m.family() == VisFamily::Box,
+                format!("{m:?}").ends_with("Box")
+            );
         }
     }
 
@@ -707,8 +714,14 @@ mod tests {
         let lo = Color::srgb(0.1, 0.2, 0.3);
         let hi = Color::srgb(0.9, 0.8, 0.7);
         // Out-of-range t clamps to the endpoints.
-        assert!((lum(gradient_color(lo, hi, -1.0, 1.8)) - lum(gradient_color(lo, hi, 0.0, 1.8))).abs() < 1e-5);
-        assert!((lum(gradient_color(lo, hi, 2.0, 1.8)) - lum(gradient_color(lo, hi, 1.0, 1.8))).abs() < 1e-5);
+        assert!(
+            (lum(gradient_color(lo, hi, -1.0, 1.8)) - lum(gradient_color(lo, hi, 0.0, 1.8))).abs()
+                < 1e-5
+        );
+        assert!(
+            (lum(gradient_color(lo, hi, 2.0, 1.8)) - lum(gradient_color(lo, hi, 1.0, 1.8))).abs()
+                < 1e-5
+        );
         // Louder → brighter when glow is on.
         assert!(lum(gradient_color(lo, hi, 1.0, 1.8)) > lum(gradient_color(lo, hi, 0.0, 1.8)));
         // glow_gain 0 disables the HDR boost (still a valid color).
@@ -721,8 +734,16 @@ mod tests {
         let mut s = VisSettings::default();
         let red = Color::srgb(1.0, 0.0, 0.0);
         s.profiles = vec![
-            ColorProfile { name: "a".into(), fg: vec![Color::BLACK], ..ColorProfile::default() },
-            ColorProfile { name: "b".into(), fg: vec![red], ..ColorProfile::default() },
+            ColorProfile {
+                name: "a".into(),
+                fg: vec![Color::BLACK],
+                ..ColorProfile::default()
+            },
+            ColorProfile {
+                name: "b".into(),
+                fg: vec![red],
+                ..ColorProfile::default()
+            },
         ];
         s.active_profile = 99; // out of range → clamps to last ("b")
         assert_eq!(s.fg_lo(), red);
@@ -736,7 +757,10 @@ mod tests {
     fn fg_stops_fall_back_to_white_and_use_profile() {
         // Empty profile fg → a single white stop, and fg_lo/fg_hi both white.
         let mut s = VisSettings::default();
-        s.profiles = vec![ColorProfile { fg: vec![], ..ColorProfile::default() }];
+        s.profiles = vec![ColorProfile {
+            fg: vec![],
+            ..ColorProfile::default()
+        }];
         assert_eq!(s.fg_stops(), vec![Color::WHITE]);
         assert_eq!(s.fg_lo(), Color::WHITE);
         assert_eq!(s.fg_hi(), Color::WHITE);

@@ -320,7 +320,7 @@ impl Plugin for CavaPlugin {
             Update,
             (reconcile_capture_rate, rebuild_cava, feed_cava).chain(),
         )
-            .add_systems(Last, stop_on_exit);
+        .add_systems(Last, stop_on_exit);
     }
 }
 
@@ -421,8 +421,10 @@ fn capture_reader(settings: CavaSettings, ring: AudioRing) {
     // Publish the negotiated rate/channels so the main thread can rebuild the
     // cavacore plan to match the *actual* delivery format (see
     // `reconcile_capture_rate`).
-    ring.negotiated_rate.store(capture.rate(), Ordering::Relaxed);
-    ring.negotiated_channels.store(capture.channels(), Ordering::Relaxed);
+    ring.negotiated_rate
+        .store(capture.rate(), Ordering::Relaxed);
+    ring.negotiated_channels
+        .store(capture.channels(), Ordering::Relaxed);
 
     let chunk = settings.frame_samples.max(1) * settings.channels.max(1);
     let mut buf = vec![0.0f64; chunk];
@@ -447,7 +449,8 @@ fn capture_reader(settings: CavaSettings, ring: AudioRing) {
                 match open(&current_device) {
                     Ok(c) => {
                         capture = c;
-                        ring.negotiated_rate.store(capture.rate(), Ordering::Relaxed);
+                        ring.negotiated_rate
+                            .store(capture.rate(), Ordering::Relaxed);
                         ring.negotiated_channels
                             .store(capture.channels(), Ordering::Relaxed);
                         info!("bava: audio capture reopened after repeated read failures");
@@ -477,8 +480,10 @@ fn capture_reader(settings: CavaSettings, ring: AudioRing) {
                 match open(&next) {
                     Ok(c) => {
                         capture = c;
-                        ring.negotiated_rate.store(capture.rate(), Ordering::Relaxed);
-                        ring.negotiated_channels.store(capture.channels(), Ordering::Relaxed);
+                        ring.negotiated_rate
+                            .store(capture.rate(), Ordering::Relaxed);
+                        ring.negotiated_channels
+                            .store(capture.channels(), Ordering::Relaxed);
                         current_device = next;
                         info!("bava: following active sink → {active}");
                     }
@@ -573,7 +578,10 @@ fn feed_cava(
         dbg.executes += executed as u64;
         dbg.max_out = dbg.max_out.max(bars.iter().fold(0.0f64, |m, &b| m.max(b)));
         if dbg.frames >= 240 {
-            let secs = now.duration_since(dbg.since.unwrap()).as_secs_f64().max(1e-6);
+            let secs = now
+                .duration_since(dbg.since.unwrap())
+                .as_secs_f64()
+                .max(1e-6);
             info!(
                 "bava: {} frames in {:.2}s | {:.0} cava executes/s | chunk={} | \
                  max input={:.3} | max bar={:.3}",
@@ -761,9 +769,10 @@ struct FeedStats {
 /// Signal the capture thread to stop when the app is exiting.
 fn stop_on_exit(mut exit: MessageReader<AppExit>, ring: Option<Res<AudioRing>>) {
     if exit.read().next().is_some()
-        && let Some(ring) = ring {
-            ring.running.store(false, Ordering::Relaxed);
-        }
+        && let Some(ring) = ring
+    {
+        ring.running.store(false, Ordering::Relaxed);
+    }
 }
 
 #[cfg(test)]

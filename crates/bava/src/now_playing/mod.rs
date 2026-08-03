@@ -155,8 +155,10 @@ impl Plugin for NowPlayingPlugin {
         // disconnected channel on the very first frame.
         #[cfg(target_arch = "wasm32")]
         {
-            app.insert_resource(NowPlayingTxKeepAlive(tx))
-                .add_systems(PreUpdate, pump_web_now_playing.before(apply_now_playing_updates));
+            app.insert_resource(NowPlayingTxKeepAlive(tx)).add_systems(
+                PreUpdate,
+                pump_web_now_playing.before(apply_now_playing_updates),
+            );
             return;
         }
 
@@ -190,7 +192,9 @@ fn apply_now_playing_updates(
             // freeze isn't silent, then stop polling a dead channel.
             Err(crossbeam_channel::TryRecvError::Disconnected) => {
                 if !*warned {
-                    warn!("bava: now-playing backend stopped; metadata and album art will no longer update");
+                    warn!(
+                        "bava: now-playing backend stopped; metadata and album art will no longer update"
+                    );
                     *warned = true;
                 }
                 break;

@@ -25,11 +25,13 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use pipewire as pw;
-use pw::{context::ContextRc, main_loop::MainLoopRc, properties::properties, spa, stream::StreamBox};
+use pw::{
+    context::ContextRc, main_loop::MainLoopRc, properties::properties, spa, stream::StreamBox,
+};
 use spa::param::audio::{AudioFormat, AudioInfoRaw};
 use spa::param::format::{MediaSubtype, MediaType};
-use spa::param::{format_utils, ParamType};
-use spa::pod::{serialize::PodSerializer, Object, Pod, Value};
+use spa::param::{ParamType, format_utils};
+use spa::pod::{Object, Pod, Value, serialize::PodSerializer};
 use spa::utils::{Direction, SpaTypes};
 
 use super::{AudioCapture, CaptureError};
@@ -400,11 +402,11 @@ fn run_loop(
         id: ParamType::EnumFormat.as_raw(),
         properties: audio_info.into(),
     };
-    let values = match PodSerializer::serialize(std::io::Cursor::new(Vec::new()), &Value::Object(obj))
-    {
-        Ok((cursor, _)) => cursor.into_inner(),
-        Err(e) => return fail(&handshake, format!("serialize format: {e}")),
-    };
+    let values =
+        match PodSerializer::serialize(std::io::Cursor::new(Vec::new()), &Value::Object(obj)) {
+            Ok((cursor, _)) => cursor.into_inner(),
+            Err(e) => return fail(&handshake, format!("serialize format: {e}")),
+        };
     let Some(pod) = Pod::from_bytes(&values) else {
         return fail(&handshake, "build format pod".into());
     };

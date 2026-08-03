@@ -53,9 +53,9 @@ mod imp {
     use puffin::{GlobalProfiler, ScopeCollection, ScopeDetails, ScopeId, ThreadProfiler};
     use tracing::span::{Attributes, Id};
     use tracing::{Metadata, Subscriber};
+    use tracing_subscriber::Layer;
     use tracing_subscriber::layer::Context;
     use tracing_subscriber::registry::LookupSpan;
-    use tracing_subscriber::Layer;
 
     /// Port `puffin_viewer --url 127.0.0.1:8585` connects to by default.
     const PUFFIN_PORT: u16 = 8585;
@@ -132,7 +132,12 @@ mod imp {
                 OUT_OF_ORDER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
             // Innermost first: puffin's stream is a nesting stack.
-            stack.split_off(pos).into_iter().rev().map(|(_, off)| off).collect()
+            stack
+                .split_off(pos)
+                .into_iter()
+                .rev()
+                .map(|(_, off)| off)
+                .collect()
         });
         if !offsets.is_empty() {
             // `call` takes an `Fn`, so the offsets are borrowed, not consumed.
@@ -303,7 +308,9 @@ mod imp {
             for details in &frame.scope_delta {
                 self.scopes.insert(details.clone());
             }
-            let Ok(unpacked) = frame.unpacked() else { return };
+            let Ok(unpacked) = frame.unpacked() else {
+                return;
+            };
             for stream_info in unpacked.thread_streams.values() {
                 self.walk(&stream_info.stream, 0);
             }
@@ -341,10 +348,7 @@ mod imp {
             let Ok(reader) = puffin::Reader::with_offset(stream, offset) else {
                 return 0;
             };
-            reader
-                .flatten()
-                .map(|scope| scope.record.duration_ns)
-                .sum()
+            reader.flatten().map(|scope| scope.record.duration_ns).sum()
         }
 
         fn print_and_reset(&mut self) {
@@ -465,7 +469,8 @@ mod imp {
 
             // `First` runs before anything else each frame, so the boundary lands
             // between frames rather than mid-schedule.
-            app.add_systems(First, new_frame).add_systems(Startup, unthrottle);
+            app.add_systems(First, new_frame)
+                .add_systems(Startup, unthrottle);
         }
     }
 
@@ -488,4 +493,4 @@ mod imp {
 }
 
 #[cfg(feature = "profile")]
-pub use imp::{layer, puffin, PuffinPlugin};
+pub use imp::{PuffinPlugin, layer, puffin};

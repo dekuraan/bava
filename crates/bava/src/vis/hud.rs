@@ -32,8 +32,10 @@ pub struct HudPlugin;
 
 impl Plugin for HudPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, setup_hud)
-            .add_systems(Update, (update_background, update_user_images, update_label));
+        app.add_systems(Startup, setup_hud).add_systems(
+            Update,
+            (update_background, update_user_images, update_label),
+        );
     }
 }
 
@@ -54,7 +56,10 @@ fn setup_hud(mut commands: Commands, mut fonts: ResMut<Assets<Font>>) {
     ));
     // User background image — behind album art and bars.
     commands.spawn((
-        Sprite { color: Color::NONE, ..default() },
+        Sprite {
+            color: Color::NONE,
+            ..default()
+        },
         Transform::from_xyz(0.0, 0.0, -12.0),
         UserBackground,
     ));
@@ -71,7 +76,10 @@ fn setup_hud(mut commands: Commands, mut fonts: ResMut<Assets<Font>>) {
 
     // User foreground image — above bars, below HUD text.
     commands.spawn((
-        Sprite { color: Color::NONE, ..default() },
+        Sprite {
+            color: Color::NONE,
+            ..default()
+        },
         Transform::from_xyz(0.0, 0.0, 2.0),
         UserForeground,
     ));
@@ -257,10 +265,26 @@ fn update_user_images(
 
     let mut all_loaded = true;
     for (mut sprite, mut visibility) in &mut bg {
-        all_loaded &= apply_image_layer(&vis.background, ww, wh, &asset_server, &images, &mut sprite, &mut visibility);
+        all_loaded &= apply_image_layer(
+            &vis.background,
+            ww,
+            wh,
+            &asset_server,
+            &images,
+            &mut sprite,
+            &mut visibility,
+        );
     }
     for (mut sprite, mut visibility) in &mut fg {
-        all_loaded &= apply_image_layer(&vis.foreground, ww, wh, &asset_server, &images, &mut sprite, &mut visibility);
+        all_loaded &= apply_image_layer(
+            &vis.foreground,
+            ww,
+            wh,
+            &asset_server,
+            &images,
+            &mut sprite,
+            &mut visibility,
+        );
     }
     *settled = all_loaded;
 }

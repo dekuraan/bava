@@ -172,7 +172,10 @@ impl MeshBatch {
 /// first `apply_stroke` and whenever they have <2 points, so we keep a zero-area,
 /// zero-alpha triangle (which rasterizes nothing) instead of an empty buffer.
 pub(crate) fn empty_stroke_mesh() -> Mesh {
-    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    );
     write_degenerate_tri(&mut mesh);
     mesh
 }
@@ -198,7 +201,6 @@ pub(crate) fn stroke_material() -> ColorMaterial {
 
 /// Arc segments per rounded-rect corner.
 const CORNER_SEGS: usize = 4;
-
 
 /// Fill `out` with the boundary of a rounded rect (CCW, centered on the origin)
 /// paired with outward normals, walking the four corner arcs. The straight edges
@@ -299,12 +301,20 @@ fn stroke_vertices(
         // Core half-width for this point, lerped start→end along the stroke.
         let t = i as f32 / (n - 1) as f32;
         let hw = hw_start + (hw_end - hw_start) * t;
-        let lanes = [(hw + feather, 0.0), (hw, 1.0), (-hw, 1.0), (-(hw + feather), 0.0)];
+        let lanes = [
+            (hw + feather, 0.0),
+            (hw, 1.0),
+            (-hw, 1.0),
+            (-(hw + feather), 0.0),
+        ];
 
         let lin = pts[i].1.to_linear();
         for (off, edge) in lanes {
             let q = p + nrm * off;
-            emit([q.x, q.y, 0.0], [lin.red, lin.green, lin.blue, lin.alpha * edge]);
+            emit(
+                [q.x, q.y, 0.0],
+                [lin.red, lin.green, lin.blue, lin.alpha * edge],
+            );
         }
     }
 }
@@ -330,7 +340,10 @@ mod tests {
     use super::*;
 
     fn counts(mesh: &Mesh) -> (usize, usize) {
-        (mesh.count_vertices(), mesh.indices().map(|i| i.len()).unwrap_or(0))
+        (
+            mesh.count_vertices(),
+            mesh.indices().map(|i| i.len()).unwrap_or(0),
+        )
     }
 
     #[test]
@@ -338,16 +351,29 @@ mod tests {
         // <2 points yields an invisible degenerate triangle, NOT a zero-vertex
         // mesh: Bevy's slab allocator errors every frame on a 0-vertex extract.
         let mut mesh = empty_stroke_mesh();
-        assert_eq!(counts(&mesh), (3, 3), "empty stroke mesh is a degenerate tri");
+        assert_eq!(
+            counts(&mesh),
+            (3, 3),
+            "empty stroke mesh is a degenerate tri"
+        );
         apply_stroke(&mut mesh, &[], 2.0, STROKE_FEATHER, false);
         assert_eq!(counts(&mesh), (3, 3));
-        apply_stroke(&mut mesh, &[(Vec2::ZERO, Color::WHITE)], 2.0, STROKE_FEATHER, false);
+        apply_stroke(
+            &mut mesh,
+            &[(Vec2::ZERO, Color::WHITE)],
+            2.0,
+            STROKE_FEATHER,
+            false,
+        );
         assert_eq!(counts(&mesh), (3, 3), "a single point can't form a stroke");
     }
 
     #[test]
     fn open_stroke_vertex_and_index_counts() {
-        let pts = vec![(Vec2::new(0.0, 0.0), Color::WHITE), (Vec2::new(10.0, 0.0), Color::WHITE)];
+        let pts = vec![
+            (Vec2::new(0.0, 0.0), Color::WHITE),
+            (Vec2::new(10.0, 0.0), Color::WHITE),
+        ];
         let mut mesh = empty_stroke_mesh();
         apply_stroke(&mut mesh, &pts, 2.0, STROKE_FEATHER, false);
         // 4 lanes per point; 3 quads (2 tris each) per segment; 1 segment open.
@@ -421,7 +447,14 @@ mod tests {
         // Batched shapes carry no per-item Transform, so rotation has to land in
         // the vertices themselves.
         let mut flat = MeshBatch::default();
-        flat.push_rounded_rect(Vec2::ZERO, Vec2::new(30.0, 5.0), 0.0, 0.0, 0.0, Color::WHITE);
+        flat.push_rounded_rect(
+            Vec2::ZERO,
+            Vec2::new(30.0, 5.0),
+            0.0,
+            0.0,
+            0.0,
+            Color::WHITE,
+        );
         let mut turned = MeshBatch::default();
         turned.push_rounded_rect(
             Vec2::ZERO,

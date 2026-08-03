@@ -25,21 +25,24 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use objc2::AnyThread;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2::AnyThread;
 use objc2_core_audio::{
-    kAudioAggregateDeviceIsPrivateKey, kAudioAggregateDeviceTapAutoStartKey,
-    kAudioAggregateDeviceTapListKey, kAudioAggregateDeviceUIDKey, kAudioDevicePropertyNominalSampleRate,
-    kAudioObjectPropertyElementMain, kAudioObjectPropertyScopeGlobal, kAudioSubTapUIDKey,
-    kAudioTapPropertyFormat, kAudioTapPropertyUID, AudioDeviceCreateIOProcID,
-    AudioDeviceDestroyIOProcID, AudioDeviceIOProcID, AudioDeviceStart, AudioDeviceStop,
-    AudioHardwareCreateAggregateDevice, AudioHardwareCreateProcessTap,
+    AudioDeviceCreateIOProcID, AudioDeviceDestroyIOProcID, AudioDeviceIOProcID, AudioDeviceStart,
+    AudioDeviceStop, AudioHardwareCreateAggregateDevice, AudioHardwareCreateProcessTap,
     AudioHardwareDestroyAggregateDevice, AudioHardwareDestroyProcessTap,
     AudioObjectAddPropertyListener, AudioObjectGetPropertyData, AudioObjectID,
     AudioObjectPropertyAddress, AudioObjectRemovePropertyListener, CATapDescription,
+    kAudioAggregateDeviceIsPrivateKey, kAudioAggregateDeviceTapAutoStartKey,
+    kAudioAggregateDeviceTapListKey, kAudioAggregateDeviceUIDKey,
+    kAudioDevicePropertyNominalSampleRate, kAudioObjectPropertyElementMain,
+    kAudioObjectPropertyScopeGlobal, kAudioSubTapUIDKey, kAudioTapPropertyFormat,
+    kAudioTapPropertyUID,
 };
-use objc2_core_audio_types::{kAudioFormatFlagIsFloat, AudioBufferList, AudioStreamBasicDescription};
+use objc2_core_audio_types::{
+    AudioBufferList, AudioStreamBasicDescription, kAudioFormatFlagIsFloat,
+};
 use objc2_core_foundation::{CFDictionary, CFString};
 use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSString};
 
@@ -423,8 +426,7 @@ unsafe extern "C-unwind" fn io_proc(
         return 0;
     }
     // `mBuffers` is a C flexible array; view it as a slice of the real length.
-    let buffers =
-        unsafe { std::slice::from_raw_parts(list.mBuffers.as_ptr(), n_buffers) };
+    let buffers = unsafe { std::slice::from_raw_parts(list.mBuffers.as_ptr(), n_buffers) };
 
     // try_lock so we never block on a realtime thread; drop this callback's
     // samples if the consumer is mid-drain.
@@ -519,8 +521,10 @@ fn audio_capture_denied() -> bool {
         let denied = match std::mem::transmute::<*mut c_void, Option<Preflight>>(sym) {
             Some(preflight) => {
                 let service = CFString::from_str("kTCCServiceAudioCapture");
-                let status =
-                    preflight((&*service) as *const CFString as *const c_void, std::ptr::null());
+                let status = preflight(
+                    (&*service) as *const CFString as *const c_void,
+                    std::ptr::null(),
+                );
                 status != 0
             }
             None => false,
@@ -581,9 +585,7 @@ unsafe fn read_tap_uid(tap: AudioObjectID) -> Result<Retained<NSString>, Capture
 }
 
 /// Read `kAudioTapPropertyFormat` off the tap object as an ASBD.
-unsafe fn read_tap_format(
-    tap: AudioObjectID,
-) -> Result<AudioStreamBasicDescription, CaptureError> {
+unsafe fn read_tap_format(tap: AudioObjectID) -> Result<AudioStreamBasicDescription, CaptureError> {
     let addr = property_address(kAudioTapPropertyFormat);
     // ASBD is a plain `repr(C)` POD with no `Default`; zero-init is the idiom.
     let mut asbd: AudioStreamBasicDescription = unsafe { std::mem::zeroed() };
@@ -646,7 +648,8 @@ unsafe fn create_aggregate(tap_uid: &NSString) -> Result<AudioObjectID, CaptureE
 
     // NSDictionary* is toll-free bridged to CFDictionaryRef.
     let desc_ref: &NSDictionary<NSString, AnyObject> = &desc;
-    let cf = unsafe { &*(desc_ref as *const NSDictionary<NSString, AnyObject> as *const CFDictionary) };
+    let cf =
+        unsafe { &*(desc_ref as *const NSDictionary<NSString, AnyObject> as *const CFDictionary) };
 
     let mut agg: AudioObjectID = 0;
     let status = unsafe { AudioHardwareCreateAggregateDevice(cf, NonNull::from(&mut agg)) };

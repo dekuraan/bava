@@ -21,8 +21,8 @@ use std::io::IsTerminal;
 use std::time::{Duration, Instant};
 
 use bevy::app::{RunMode, ScheduleRunnerPlugin};
-use bevy::camera::visibility::RenderLayers;
 use bevy::camera::RenderTarget;
+use bevy::camera::visibility::RenderLayers;
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::prelude::*;
 use bevy::render::RenderPlugin;
@@ -35,8 +35,8 @@ use crate::cava::{AudioInjector, CavaPlugin, OfflineCavaSet};
 use crate::config::{Cli, Config};
 use crate::gui::EditorState;
 use crate::now_playing::NowPlayingPlugin;
-use crate::vis::bars::VisCamera;
 use crate::vis::VisPlugin;
+use crate::vis::bars::VisCamera;
 
 use audio::DecodedTrack;
 use encoder::{EncoderStatus, FfmpegEncoder};
@@ -184,7 +184,9 @@ fn attach_capture(
         unreachable!("target_headless always yields an image target");
     };
     let preview_image = image_target.handle.clone();
-    commands.entity(cam).insert((target, CaptureBundle::default()));
+    commands
+        .entity(cam)
+        .insert((target, CaptureBundle::default()));
 
     if !rec.headless {
         // The capture target doubles as a texture (it's created with
@@ -233,7 +235,10 @@ fn drive_recording(
         && !*size_warned
         && let Some(window) = windows.iter().next()
     {
-        let (w, h) = (window.width().round() as u32, window.height().round() as u32);
+        let (w, h) = (
+            window.width().round() as u32,
+            window.height().round() as u32,
+        );
         if (w, h) != (rec.width, rec.height) {
             warn!(
                 "bava: preview window is {w}x{h} but recording {}x{} — the \
@@ -283,7 +288,10 @@ fn drive_recording(
                 exit.write(AppExit::Success);
             }
             Some(false) => {
-                error!("bava: ffmpeg failed; {} may be incomplete", rec.out.display());
+                error!(
+                    "bava: ffmpeg failed; {} may be incomplete",
+                    rec.out.display()
+                );
                 exit.write(AppExit::error());
             }
             None => {} // ffmpeg still finalizing (e.g. the +faststart pass)
@@ -335,7 +343,10 @@ fn drive_recording(
 
     // Progress about every 2 s of wall clock.
     let now = Instant::now();
-    if state.last_log.is_none_or(|t| now - t >= Duration::from_secs(2)) {
+    if state
+        .last_log
+        .is_none_or(|t| now - t >= Duration::from_secs(2))
+    {
         if let Some(t0) = state.started_at {
             let elapsed = (now - t0).as_secs_f64().max(1e-9);
             let done = state.frame;
@@ -546,7 +557,13 @@ mod tests {
     fn pcm_cursor_covers_everything_without_drift() {
         // Awkward ratios included: 44100/60 = 735 exact, 44100/30 = 1470,
         // 48000/24 = 2000, 44100/24 = 1837.5, 22050/60 = 367.5.
-        for (rate, fps) in [(44_100, 60), (44_100, 30), (48_000, 24), (44_100, 24), (22_050, 60)] {
+        for (rate, fps) in [
+            (44_100, 60),
+            (44_100, 30),
+            (48_000, 24),
+            (44_100, 24),
+            (22_050, 60),
+        ] {
             let total = rate as usize * 3 + 217; // ~3 s, deliberately not round
             let ideal = rate as f64 / fps as f64;
             let mut cursor = 0usize;
@@ -566,7 +583,10 @@ mod tests {
                 }
                 cursor = next;
             }
-            assert_eq!(cursor, total, "did not land exactly on total at {rate}/{fps}");
+            assert_eq!(
+                cursor, total,
+                "did not land exactly on total at {rate}/{fps}"
+            );
             // Frame count matches the ceil the encoder was told to expect.
             let expected = (total as u64 * fps as u64).div_ceil(rate as u64);
             assert_eq!(frame, expected, "frame count mismatch at {rate}/{fps}");

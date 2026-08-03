@@ -13,14 +13,12 @@
 //! its X. The key is configurable in `config.toml` and round-trips through Save.
 
 use bevy::prelude::*;
-use bevy_egui::{egui, EguiContexts, EguiPrimaryContextPass};
+use bevy_egui::{EguiContexts, EguiPrimaryContextPass, egui};
 
 use crate::cava::{CavaRebuild, CavaRebuildStatus, CavaSettings};
 use crate::config::{Config, ConfigHandle};
 use crate::vis::physics::PhysicsSettings;
-use crate::vis::{
-    ColorProfile, Direction, DrawingMode, MirrorMode, Theme, ToneMap, VisSettings,
-};
+use crate::vis::{ColorProfile, Direction, DrawingMode, MirrorMode, Theme, ToneMap, VisSettings};
 
 /// Editor window state: visibility, the toggle key, the cached profile list,
 /// and transient UI scratch (a status line and the "save as" name field).
@@ -211,27 +209,29 @@ fn persistence_section(
         let names = editor.profiles.clone();
         ui.horizontal(|ui| {
             egui::ComboBox::from_id_salt("profile_select")
-                .selected_text(editor.selected_profile.clone().unwrap_or_else(|| "—".into()))
+                .selected_text(
+                    editor
+                        .selected_profile
+                        .clone()
+                        .unwrap_or_else(|| "—".into()),
+                )
                 .show_ui(ui, |ui| {
                     for name in &names {
-                        ui.selectable_value(
-                            &mut editor.selected_profile,
-                            Some(name.clone()),
-                            name,
-                        );
+                        ui.selectable_value(&mut editor.selected_profile, Some(name.clone()), name);
                     }
                 });
             if ui.button("Load").clicked()
-                && let Some(name) = editor.selected_profile.clone() {
-                    match Config::load_profile(&name) {
-                        Some(cfg) => {
-                            apply_config(&cfg, vis, mode, cava, rebuild, physics);
-                            editor.toggle_key = cfg.gui_toggle_key();
-                            editor.status = format!("Loaded profile '{name}'");
-                        }
-                        None => editor.status = format!("Profile '{name}' not found"),
+                && let Some(name) = editor.selected_profile.clone()
+            {
+                match Config::load_profile(&name) {
+                    Some(cfg) => {
+                        apply_config(&cfg, vis, mode, cava, rebuild, physics);
+                        editor.toggle_key = cfg.gui_toggle_key();
+                        editor.status = format!("Loaded profile '{name}'");
                     }
+                    None => editor.status = format!("Profile '{name}' not found"),
                 }
+            }
         });
 
         // Save the current settings as a new (or overwritten) profile.
@@ -258,24 +258,29 @@ fn persistence_section(
     });
 
     ui.collapsing("GUI settings", |ui| {
-        enum_combo(ui, "Toggle key", &mut editor.toggle_key, &[
-            (KeyCode::KeyP, "P"),
-            (KeyCode::KeyO, "O"),
-            (KeyCode::KeyI, "I"),
-            (KeyCode::KeyG, "G"),
-            (KeyCode::KeyH, "H"),
-            (KeyCode::KeyJ, "J"),
-            (KeyCode::KeyK, "K"),
-            (KeyCode::KeyM, "M"),
-            (KeyCode::KeyU, "U"),
-            (KeyCode::F1, "F1"),
-            (KeyCode::F2, "F2"),
-            (KeyCode::F5, "F5"),
-            (KeyCode::F6, "F6"),
-            (KeyCode::Tab, "Tab"),
-            (KeyCode::Backquote, "`"),
-            (KeyCode::Insert, "Insert"),
-        ]);
+        enum_combo(
+            ui,
+            "Toggle key",
+            &mut editor.toggle_key,
+            &[
+                (KeyCode::KeyP, "P"),
+                (KeyCode::KeyO, "O"),
+                (KeyCode::KeyI, "I"),
+                (KeyCode::KeyG, "G"),
+                (KeyCode::KeyH, "H"),
+                (KeyCode::KeyJ, "J"),
+                (KeyCode::KeyK, "K"),
+                (KeyCode::KeyM, "M"),
+                (KeyCode::KeyU, "U"),
+                (KeyCode::F1, "F1"),
+                (KeyCode::F2, "F2"),
+                (KeyCode::F5, "F5"),
+                (KeyCode::F6, "F6"),
+                (KeyCode::Tab, "Tab"),
+                (KeyCode::Backquote, "`"),
+                (KeyCode::Insert, "Insert"),
+            ],
+        );
         ui.label(
             egui::RichText::new("Change takes effect immediately. Save to persist.")
                 .weak()
@@ -301,17 +306,27 @@ fn geometry_section(ui: &mut egui::Ui, vis: &mut VisSettings) {
 
     ui.add(egui::Slider::new(&mut vis.monstercat, 1.0..=4.0).text("monstercat smoothing"));
 
-    enum_combo(ui, "Mirror", &mut vis.mirror, &[
-        (MirrorMode::Off, "Off"),
-        (MirrorMode::Full, "Full"),
-        (MirrorMode::SplitChannels, "Split channels"),
-    ]);
-    enum_combo(ui, "Direction", &mut vis.direction, &[
-        (Direction::TopBottom, "Top → bottom"),
-        (Direction::BottomTop, "Bottom → top"),
-        (Direction::LeftRight, "Left → right"),
-        (Direction::RightLeft, "Right → left"),
-    ]);
+    enum_combo(
+        ui,
+        "Mirror",
+        &mut vis.mirror,
+        &[
+            (MirrorMode::Off, "Off"),
+            (MirrorMode::Full, "Full"),
+            (MirrorMode::SplitChannels, "Split channels"),
+        ],
+    );
+    enum_combo(
+        ui,
+        "Direction",
+        &mut vis.direction,
+        &[
+            (Direction::TopBottom, "Top → bottom"),
+            (Direction::BottomTop, "Bottom → top"),
+            (Direction::LeftRight, "Left → right"),
+            (Direction::RightLeft, "Right → left"),
+        ],
+    );
 
     ui.checkbox(&mut vis.reverse_mirror, "Reverse mirror side");
     ui.checkbox(&mut vis.reverse_order, "Reverse bar order");
@@ -337,16 +352,21 @@ fn geometry_section(ui: &mut egui::Ui, vis: &mut VisSettings) {
 fn colors_section(ui: &mut egui::Ui, vis: &mut VisSettings) {
     ui.label(egui::RichText::new("Colors").strong());
 
-    enum_combo(ui, "Tone mapping", &mut vis.tonemapping, &[
-        (ToneMap::None, "None (hard clip)"),
-        (ToneMap::TonyMcMapface, "Tony McMapface"),
-        (ToneMap::AgX, "AgX"),
-        (ToneMap::BlenderFilmic, "Blender Filmic"),
-        (ToneMap::AcesFitted, "ACES (fitted)"),
-        (ToneMap::Reinhard, "Reinhard"),
-        (ToneMap::ReinhardLuminance, "Reinhard (luminance)"),
-        (ToneMap::SomewhatBoringDisplayTransform, "Neutral"),
-    ]);
+    enum_combo(
+        ui,
+        "Tone mapping",
+        &mut vis.tonemapping,
+        &[
+            (ToneMap::None, "None (hard clip)"),
+            (ToneMap::TonyMcMapface, "Tony McMapface"),
+            (ToneMap::AgX, "AgX"),
+            (ToneMap::BlenderFilmic, "Blender Filmic"),
+            (ToneMap::AcesFitted, "ACES (fitted)"),
+            (ToneMap::Reinhard, "Reinhard"),
+            (ToneMap::ReinhardLuminance, "Reinhard (luminance)"),
+            (ToneMap::SomewhatBoringDisplayTransform, "Neutral"),
+        ],
+    );
     ui.add(
         egui::Slider::new(&mut vis.bloom_intensity, 0.0..=2.0)
             .text("bloom intensity")
@@ -417,10 +437,12 @@ fn colors_section(ui: &mut egui::Ui, vis: &mut VisSettings) {
         ui.label("name");
         ui.text_edit_singleline(&mut prof.name);
     });
-    enum_combo(ui, "Theme", &mut prof.theme, &[
-        (Theme::Dark, "Dark"),
-        (Theme::Light, "Light"),
-    ]);
+    enum_combo(
+        ui,
+        "Theme",
+        &mut prof.theme,
+        &[(Theme::Dark, "Dark"), (Theme::Light, "Light")],
+    );
 
     color_stops(ui, "Foreground", &mut prof.fg);
     color_stops(ui, "Background", &mut prof.bg);
@@ -481,7 +503,11 @@ fn audio_section(
         }
         ui.horizontal(|ui| {
             ui.label("rate (Hz)");
-            ui.add(egui::DragValue::new(&mut cava.rate).range(8_000..=192_000).speed(100.0));
+            ui.add(
+                egui::DragValue::new(&mut cava.rate)
+                    .range(8_000..=192_000)
+                    .speed(100.0),
+            );
         });
         let mut chans = cava.channels as u32;
         if ui
@@ -494,7 +520,11 @@ fn audio_section(
             ui.label("source");
             let mut src = cava.source.clone().unwrap_or_default();
             if ui.text_edit_singleline(&mut src).changed() {
-                cava.source = if src.trim().is_empty() { None } else { Some(src) };
+                cava.source = if src.trim().is_empty() {
+                    None
+                } else {
+                    Some(src)
+                };
             }
         });
         ui.label(
@@ -578,7 +608,11 @@ fn physics_section(ui: &mut egui::Ui, physics: &mut PhysicsSettings) {
             .text("air resistance")
             .step_by(0.01),
     );
-    ui.add(egui::Slider::new(&mut physics.mass, 0.1..=10.0).text("ball mass").step_by(0.1));
+    ui.add(
+        egui::Slider::new(&mut physics.mass, 0.1..=10.0)
+            .text("ball mass")
+            .step_by(0.1),
+    );
     ui.add(egui::Slider::new(&mut physics.radius, 2.0..=80.0).text("ball radius (px)"));
 
     let mut max = physics.max_balls as u32;

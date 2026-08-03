@@ -54,7 +54,12 @@ pub fn decode(path: &Path) -> Result<DecodedTrack, String> {
     }
 
     let mut format = symphonia::default::get_probe()
-        .probe(&hint, mss, FormatOptions::default(), MetadataOptions::default())
+        .probe(
+            &hint,
+            mss,
+            FormatOptions::default(),
+            MetadataOptions::default(),
+        )
         .map_err(|e| format!("unrecognized audio format in {}: {e}", path.display()))?;
 
     let mut tags = TagScratch::default();
@@ -108,9 +113,7 @@ pub fn decode(path: &Path) -> Result<DecodedTrack, String> {
             // End of stream.
             Ok(None) => break,
             // A truncated file — decode what we got.
-            Err(SymphoniaError::IoError(e))
-                if e.kind() == std::io::ErrorKind::UnexpectedEof =>
-            {
+            Err(SymphoniaError::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
                 break;
             }
             Err(SymphoniaError::ResetRequired) => break,
@@ -123,9 +126,7 @@ pub fn decode(path: &Path) -> Result<DecodedTrack, String> {
             Ok(d) => d,
             // A corrupt frame is skippable; mp3s in the wild have them.
             Err(SymphoniaError::DecodeError(_)) => continue,
-            Err(SymphoniaError::IoError(e))
-                if e.kind() == std::io::ErrorKind::UnexpectedEof =>
-            {
+            Err(SymphoniaError::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
                 break;
             }
             Err(e) => return Err(format!("{}: decode error: {e}", path.display())),
@@ -215,7 +216,8 @@ fn merge_metadata(out: &mut TagScratch, rev: &MetadataRevision) {
         }
     }
     if out.art.is_none()
-        && let Some(visual) = rev.media.visuals.first() {
-            out.art = Some(visual.data.to_vec());
-        }
+        && let Some(visual) = rev.media.visuals.first()
+    {
+        out.art = Some(visual.data.to_vec());
+    }
 }
