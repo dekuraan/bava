@@ -14,6 +14,25 @@
       rel="icon"
       href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%2305050a'/%3E%3Cg fill='%236ce5c8'%3E%3Crect x='3' y='8' width='2.4' height='5' rx='1'/%3E%3Crect x='6.8' y='3.5' width='2.4' height='9.5' rx='1'/%3E%3Crect x='10.6' y='6' width='2.4' height='7' rx='1'/%3E%3C/g%3E%3C/svg%3E"
     />
+    <!-- Home-screen / install icons, generated with everything else by
+         `packaging/icon/gen-icons.py`. The `rel="icon"` above stays the inline
+         data URI — it is the one a tab asks for on every load, and inlining it
+         is worth more than sharing bytes with these, which are fetched once at
+         install time and never again. -->
+    <link rel="apple-touch-icon" href="apple-touch-icon.png" />
+    <link rel="manifest" href="site.webmanifest" />
+    <meta name="theme-color" content="#0a0612" />
+
+    <link data-trunk rel="copy-file" href="../../../packaging/web/site.webmanifest" />
+    <link data-trunk rel="copy-file" href="../../../packaging/web/apple-touch-icon.png" />
+    <link data-trunk rel="copy-file" href="../../../packaging/web/icon-192.png" />
+    <link data-trunk rel="copy-file" href="../../../packaging/web/icon-512.png" />
+    <link data-trunk rel="copy-file" href="../../../packaging/web/icon-maskable-512.png" />
+    <!-- Referenced by the manifest, and the one URL browsers still request
+         unprompted even with an inline `rel="icon"`. -->
+    <link data-trunk rel="copy-file" href="../../../packaging/web/favicon.svg" />
+    <link data-trunk rel="copy-file" href="../../../packaging/web/favicon.ico" />
+
     <!-- The HUD fonts are `include_bytes!`d into the binary, so there is no
          asset directory to ship — the wasm blob and these two scripts are the
          whole app. -->

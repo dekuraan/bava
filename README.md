@@ -13,6 +13,9 @@ real-time. Now-playing metadata and album art are pulled from the OS media sessi
 | macOS 14.2+ | Core Audio process tap (no extra install) | MediaRemote adapter |
 | Web (Chrome) | Tab share via `getDisplayMedia` | YouTube IFrame API + thumbnail |
 
+**[Try it in your browser →](https://dekuraan.github.io/bava/)** (Chrome/Chromium;
+no install, share a tab and it visualizes what that tab is playing.)
+
 ![bava rendering a spectrum](docs/screenshot.png)
 
 ## Install
@@ -62,10 +65,11 @@ is below.
 
 ## In the browser
 
-bava also builds to WebAssembly, with an embedded YouTube player on the page.
-Browsers have no loopback device, so audio comes from **sharing a tab**: click
-*Capture this tab* and the embedded player's output drives the visualizer, or
-*Capture another tab* and point it at Spotify Web, Bandcamp, anything.
+**<https://dekuraan.github.io/bava/>** — no install. bava builds to WebAssembly,
+with an embedded YouTube player on the page. Browsers have no loopback device,
+so audio comes from **sharing a tab**: click *Capture this tab* and the embedded
+player's output drives the visualizer, or *Capture another tab* and point it at
+Spotify Web, Bandcamp, anything.
 
 ```sh
 trunk serve            # http://localhost:8080
@@ -139,7 +143,30 @@ Core Audio process tap). Without it the app runs without audio capture.
 ```sh
 cargo test -p cavacore-rs        # DSP safety and correctness suite
 cargo test -p bava --bin bava    # app unit/system/physics tests (headless)
+cargo fmt --all --check          # gated in CI
+cargo clippy --workspace --all-targets -- -D warnings
 ```
+
+### Profiling
+
+`--features profile` bridges Bevy's per-system `tracing` spans into
+[puffin](https://github.com/EmbarkStudios/puffin), so the whole schedule is
+profiled without hand-instrumenting anything. Use the `profiling` cargo profile —
+`dev` leaves our own crates at `opt-level = 0`, which makes every measurement
+meaningless.
+
+```sh
+cargo run -p bava --profile profiling --features profile
+puffin_viewer --url 127.0.0.1:8585                        # attach to it
+
+# No display / over ssh: print an aggregated self-time table every N frames.
+BAVA_PROFILE_REPORT=600 cargo run -p bava --profile profiling --features profile
+```
+
+Under a compositor every frame that fits the budget costs one refresh interval,
+and Wayland has no immediate present mode — so for real A/B numbers use the
+offline path (`--input … --out … --duration 5`), which is display-free and
+fixed-frame-count.
 
 ## Workspace layout
 
@@ -148,11 +175,17 @@ crates/
   cavacore-rs/         # pure-Rust cavacore port (realfft); CavaConfig → CavaPlan; rigorous test suite
   bava/
     src/cava/          # CavaPlugin, Cava resource, capture thread, feed_cava system
-    src/cava/capture/  # AudioCapture trait; backends: pipewire.rs / pulse.rs / wasapi.rs / coreaudio.rs
-    src/now_playing/   # NowPlaying + AlbumArt resources; backends: linux / windows / macos
+    src/cava/capture/  # AudioCapture trait; backends: pipewire.rs / pulse.rs / wasapi.rs / coreaudio.rs / web.rs
+    src/now_playing/   # NowPlaying + AlbumArt resources; backends: linux / windows / macos / web
     src/vis/           # VisPlugin: all visualizer modes, HUD, physics, stroke mesh helpers
     src/gui/           # in-app settings editor (bevy_egui)
+    src/record/        # offline --input/--out rendering: decode, drive, ffmpeg encoder
     src/config.rs      # config.toml ↔ runtime *Settings resources; CLI via clap
+    src/profiling.rs   # puffin bridge, behind --features profile
+    web/               # the browser page: index.html, bava.js, audio-worklet.js, style.css
+docs/                  # WEB.md and the generated screenshot
+packaging/             # icons, AUR, AppImage, Nix, web assets — see packaging/README.md
+flatpak/  snap/        # Flathub manifest and snapcraft.yaml
 ```
 
 ## Key bindings
@@ -161,7 +194,12 @@ crates/
 |---|---|
 | Space | Cycle visualizer mode |
 | p | Toggle settings editor (configurable via `[gui] toggle_key`) |
-| F3 | Toggle avian2d collider debug overlay |
+| F3 | Collider debug overlay + FPS and live ball count |
+| Left-click | Spawn one physics ball |
+| Right-click (hold) | Spray a burst of balls |
+
+Physics is active on the Bars/Levels and Wave box modes and every circle mode;
+other shapes ignore clicks. `--spawn-balls N` drops N balls on the first frame.
 
 ## Extending
 

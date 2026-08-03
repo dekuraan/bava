@@ -14,36 +14,45 @@ artwork as the Linux and macOS icons — see [`../icon/README.md`](../icon/READM
 
 ## Wiring it up
 
-Copy the directory's contents to the web root and put this in `<head>`:
+Already wired. `crates/bava/web/index.html` pulls every file here into `dist/`
+with `data-trunk rel="copy-file"` and references them from `<head>`, so a
+`trunk build` produces the icons, the manifest, and the `theme-color` with no
+manual copying.
 
-```html
-<link rel="icon" href="/favicon.ico" sizes="32x32">
-<link rel="icon" href="/favicon.svg" type="image/svg+xml">
-<link rel="apple-touch-icon" href="/apple-touch-icon.png">
-<link rel="manifest" href="/site.webmanifest">
-<meta name="theme-color" content="#0a0612">
-```
+**The tab favicon is deliberately not one of these files.** `index.html` keeps
+an inline `data:` URI for `rel="icon"`: it is the one icon a browser requests on
+every single load, and inlining it removes that request entirely. The files here
+are fetched once at install time, so they cost nothing to keep as separate URLs.
 
-The `.ico` first and the `.svg` second is deliberate: browsers that understand
-SVG icons take the last matching `<link>`, and the ones that don't fall back to
-the `.ico` above it.
+`favicon.ico` still ships because it is the one path browsers will request
+unprompted even when an inline icon is declared, and because the manifest
+references `favicon.svg` for the scalable entry.
+
+All the hrefs are **relative**, not root-absolute — the site is served from
+`https://dekuraan.github.io/bava/`, and `/favicon.ico` would resolve to the
+domain root, outside the project page.
 
 ## Status of the wasm build itself
 
-**bava has no `wasm32-unknown-unknown` target today** — these are icons for a
-deploy that doesn't exist yet. Bevy 0.19 itself runs on wasm, but every audio
-path in bava is native-only: `cava/capture/` is PipeWire/PulseAudio/WASAPI/Core
-Audio, and `now_playing/` is MPRIS/GSMTC/MediaRemote. A browser build needs
+**Shipped.** `wasm32-unknown-unknown` is a supported target; the page is built
+by `trunk` and deployed to GitHub Pages on every push to `main`
+(`.github/workflows/pages.yml`). See [`../../docs/WEB.md`](../../docs/WEB.md)
+for how the browser port works and what it cannot do.
 
-- a Web Audio capture backend implementing `AudioCapture`, fed by
-  `getDisplayMedia({audio: true})` (tab/system audio, Chromium-only and
-  user-gated) or `getUserMedia` (mic) — there is no loopback in a browser;
-- the Media Session API in place of MPRIS, which only reports *our own* page's
-  metadata, so the now-playing HUD would be empty unless the page is also the
-  player;
-- `--input song.mp3 --out video.mp4` offline rendering stubbed out (it shells
-  out to `ffmpeg`).
+The three things that made a browser build non-trivial were all resolved by
+inverting the audio path rather than porting a capture backend:
 
-The realistic web deploy is the **offline/file-driven** mode: the user drops an
-audio file on the page and bava visualizes it. That needs the Web Audio decode
-path but none of the loopback plumbing.
+- **No loopback in a browser.** Instead of implementing `AudioCapture`, the page
+  takes a `MediaStream` from `getDisplayMedia` (a tab share, audio included),
+  runs it through an `AudioWorklet`, and *pushes* blocks into the
+  `bava_push_audio` wasm export. Everything downstream of the ring buffer —
+  chunking, `reconcile_capture_rate`, `feed_cava` — is the shared native code.
+- **No MPRIS.** Now-playing comes from the YouTube IFrame API for the embedded
+  player. The Media Session API was not usable: it reports only *our own* page's
+  metadata, so it would have been empty for the tab-share case that matters.
+- **No offline render.** `--input song.mp3 --out video.mp4` shells out to
+  `ffmpeg`, so it is `cfg`'d out on wasm along with `bevy_capture`, `symphonia`,
+  and `dirs`.
+
+Chromium-only, and the share picker's "Also share tab audio" must be ticked —
+that is a browser constraint, not something the page can preselect.
