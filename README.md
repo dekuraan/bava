@@ -20,28 +20,41 @@ no install, share a tab and it visualizes what that tab is playing.)
 
 ## Install
 
-```sh
-# Arch (AUR)
-paru -S bava              # or bava-git to track HEAD
+Nothing to install for the web version — **<https://dekuraan.github.io/bava/>**.
 
-# Flatpak
-flatpak install flathub io.github.dekuraan.bava
+For the desktop app, every tagged release ships a `.deb`, an `.rpm`, a
+self-contained `.AppImage`, and plain binaries for Linux, Windows, and macOS on
+the [releases page](https://github.com/dekuraan/bava/releases):
+
+```sh
+# Debian/Ubuntu               # Fedora/RHEL
+sudo apt install ./bava_*.deb   sudo dnf install ./bava-*.rpm
+
+# Anything else (no install, no root)
+chmod +x bava-*.AppImage && ./bava-*.AppImage
 
 # Nix
 nix run github:dekuraan/bava
-
-# Snap
-sudo snap install bava && sudo snap connect bava:audio-record
 ```
 
-Every tagged release also ships a `.deb`, an `.rpm`, a self-contained
-`.AppImage`, and plain binaries for Linux, Windows, and macOS on the
-[releases page](https://github.com/dekuraan/bava/releases). Building from source
-is below.
+The AppImage is the PulseAudio-only build, which works on pure-PulseAudio hosts
+*and* on PipeWire hosts via pipewire-pulse. The `.deb`/`.rpm` use the native
+PipeWire backend.
 
-> The store listings above go live as each channel is published —
-> [`packaging/README.md`](packaging/README.md) tracks which are up and what each
-> one still needs.
+Building from source is [below](#build--run).
+
+### Not yet published
+
+The manifests for these are written and in-tree, but the packages are **not on
+the stores yet** — the commands are here so they're accurate when they land, not
+because they work today. [`packaging/README.md`](packaging/README.md) tracks
+what each one still needs.
+
+```sh
+paru -S bava                                          # AUR (or bava-git for HEAD)
+flatpak install flathub io.github.dekuraan.bava       # Flathub
+sudo snap install bava && sudo snap connect bava:audio-record
+```
 
 ## Features
 
@@ -67,14 +80,22 @@ is below.
 
 **<https://dekuraan.github.io/bava/>** — no install. bava builds to WebAssembly,
 with an embedded YouTube player on the page. Browsers have no loopback device,
-so audio comes from **sharing a tab**: click *Capture this tab* and the embedded
-player's output drives the visualizer, or *Capture another tab* and point it at
-Spotify Web, Bandcamp, anything.
+so audio comes from **sharing a tab**: **Start visualizing** cues the video,
+captures this tab, and plays it in one action. *Capture another tab* points it
+at Spotify Web, Bandcamp, anything; *Play a file* takes a local audio file
+through the same path with no screen-share prompt at all (also reachable
+directly at [`?source=file`](https://dekuraan.github.io/bava/?source=file)).
 
 ```sh
-trunk serve            # http://localhost:8080
-trunk build --release  # → dist/, static files for any host
+trunk serve --cargo-profile web-dev   # http://localhost:8080
+trunk build --release                 # → dist/, static files for any host
 ```
+
+Use `web-dev` for iteration, not the default `dev` profile: `dev` optimizes
+dependencies but leaves bava's own per-frame code at `opt-level = 0`, and the
+debug info alone takes the module past 100 MB for the browser to fetch and
+instantiate on every reload. `web-dev` is 61 MB, `--release` 34 MB (12 MB
+gzipped).
 
 Chrome only, and the share picker's **"Also share tab audio"** must be ticked —
 sharing a window or a whole screen carries no audio outside Windows. Every
