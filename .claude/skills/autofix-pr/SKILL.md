@@ -59,6 +59,57 @@ marker — don't comment on closed PRs), don't schedule another wake-up, and tel
 ended because the PR was merged/closed externally. Merging mid-loop is a legitimate terminal state,
 but it must end the loop explicitly rather than by silently never waking up.
 
+## Step 0: how you will wait
+
+This skill waits four times (for the review check, between cycles, for CI, and after a fix push).
+**Every one of those is a WAIT**, and how you perform a WAIT depends on one fact you must establish
+*now*, before doing anything else:
+
+> **Are you a subagent** — invoked via the Agent tool by a parent session — **or the top-level
+> session the user is typing into?**
+
+**If you cannot tell, you are a subagent.** Inline waiting is correct in both contexts; parking is
+correct in only one. The asymmetry decides it.
+
+### WAIT, defined
+
+**Subagent — the only correct form.** Wait *inside a single tool call* and keep going in the same
+turn:
+
+```sh
+# WAIT: bounded inline poll. The sleep and the check live in ONE Bash call.
+for i in $(seq 1 15); do gh pr checks <n> | grep -q pending || break; sleep 60; done
+gh pr checks <n>
+```
+
+**Top-level session only.** You may instead end the turn and `ScheduleWakeup` with
+`delaySeconds: 270`, re-firing `/autofix-pr <PR>`.
+
+### The failure this prevents
+
+`ScheduleWakeup`, `Monitor`, `Bash(run_in_background: true)`, and task-completion notifications **all
+deliver to the top-level session**. A subagent that ends its turn to wait has **ended its run**: the
+notification goes to the parent, the parent doesn't know it was supposed to resume you, and the PR is
+abandoned mid-triage with no terminal marker.
+
+This has happened on real runs of this skill — twice, the second time to an agent that had been
+explicitly warned. It does not feel like a mistake while you are making it. It feels like correctly
+handing off to a scheduler. **There is no scheduler.**
+
+So, as a subagent:
+
+- **Never end a turn in order to wait.** Ending a turn is terminal, not a pause. If your next
+  sentence is some version of *"I'll check back when…"*, *"waiting for X to report"*, or *"resuming
+  once Y finishes"* — stop, delete it, and do a WAIT instead.
+- **Never call `ScheduleWakeup`.**
+- **Never start a background poller.** If you catch yourself passing `run_in_background: true` or
+  reaching for `Monitor`, that is the bug, not the plan.
+- Respect the same hard timeouts (20 min review, 35 min CI). On timeout, post the terminal marker and
+  return — do not park.
+
+Every wait point below restates this. That is deliberate, not redundant: the failure happens at the
+moment of waiting, not at the moment of reading the rules.
+
 ## Cadence (single cycle vs. self-loop)
 
 Detect whether we're already inside `/loop`:
@@ -77,47 +128,19 @@ Detect whether we're already inside `/loop`:
   you get two writers on one PR, racing on the durable cycle count and double-posting triage
   comments. Defaulting an ambiguous caller to single-cycle fails safe — the loop stalls and someone
   re-invokes.
-- Otherwise, run one cycle and use `ScheduleWakeup` with `delaySeconds: 270` (~5 min, cache-warm) to
-  re-fire `/autofix-pr <PR>` until the done condition is met. When done, **omit** `ScheduleWakeup`
-  to terminate.
+- Otherwise — **top-level session only** — run one cycle and use `ScheduleWakeup` with
+  `delaySeconds: 270` (~5 min, cache-warm) to re-fire `/autofix-pr <PR>` until the done condition is
+  met. When done, **omit** `ScheduleWakeup` to terminate.
+
+  > **WAIT rule.** If you are a subagent, this bullet does not apply to you. Do not call
+  > `ScheduleWakeup`; stay in one turn and keep cycling inline until a terminal marker is posted.
+  > See "Step 0: how you will wait".
+
 - If `ScheduleWakeup` isn't available, run one cycle, report status, and tell the user to re-invoke
   (or wrap in `/loop 5m`).
 
 Pass the PR number explicitly in the wake-up prompt so re-fires don't re-resolve from a
 possibly-changed branch state: `prompt: "/autofix-pr 42"`.
-
-### If you are a subagent, nothing will ever wake you
-
-**Read this before you wait for anything.** Everything above describes a long-lived session that
-gets re-entered. When this skill runs inside a **subagent** (spawned via the Agent tool by a parent
-session), that model does not hold, and the failure is silent:
-
-- `ScheduleWakeup` re-fires the **top-level** session's prompt, not yours.
-- `Monitor`, `Bash(run_in_background: true)`, and task-completion notifications are delivered to the
-  **top-level** session. A subagent that ends its turn saying "I'll wait for the background poll" has
-  **ended its run** — the notification goes to the parent, the parent has no idea it was supposed to
-  resume you, and the PR is left mid-triage with no terminal marker.
-
-So, as a subagent:
-
-- **Never end a turn in order to wait.** Ending a turn is terminal, not a pause.
-- Poll **inline**, inside a single turn, with blocking sleeps:
-
-  ```sh
-  # one poll step — repeat inline until the check resolves or you hit the timeout
-  sleep 120; gh pr checks <n>
-  ```
-
-  A foreground `sleep` may be blocked by the harness; if it is, use a bounded until-loop in one
-  `Bash` call (`for i in $(seq 1 15); do gh pr checks <n> | grep -q pending || break; sleep 60; done`)
-  so the wait and the check live in the *same* tool call.
-- Respect the same hard timeouts (20 min for review, 35 min for CI). When you hit one, post the
-  terminal marker and return — do not park.
-- Do not call `ScheduleWakeup`. You are in single-cycle mode's spirit even across multiple polls:
-  one invocation, one continuous run, one terminal marker.
-
-If you cannot tell whether you're a subagent: assume you are. Inline polling works correctly in a
-top-level session too; parking works correctly only in a top-level session. The asymmetry decides it.
 
 ### Cycle cap (circuit breaker)
 
@@ -198,8 +221,18 @@ Proceed to triage when **any** hold, in priority order:
 3. **Hard timeout:** the review check has been `IN_PROGRESS` for ≥ 20 minutes. Note in the cycle
    comment that triage proceeded without it.
 
-The common steady state — review check `IN_PROGRESS`, well under 20 min — is **wait**: don't
-triage, schedule the next wake-up (or exit if in `/loop`).
+The common steady state — review check `IN_PROGRESS`, well under 20 min — is **wait**: don't triage.
+
+> **WAIT rule — this is wait point 1 of 4, and the one that has burned two runs.** As a subagent,
+> do *not* end your turn here and do *not* start a background poller. Stay in this turn:
+>
+> ```sh
+> for i in $(seq 1 20); do gh pr checks <n> | grep -q '^Review PR.*pending' || break; sleep 60; done
+> gh pr checks <n>
+> ```
+>
+> Then continue straight into triage in the same turn. Only a top-level session may `ScheduleWakeup`
+> or exit to `/loop` here.
 
 A `CANCELLED` review check on HEAD means a newer push superseded it *or* the run was cancelled
 mid-flight. If HEAD hasn't moved, treat it as case 2 above (no usable review) rather than as
@@ -443,6 +476,12 @@ Group all "fix" items, then:
 If there are zero "fix" items but new "won't fix" items appeared this cycle, post the triage comment
 without pushing — the comment alone records the decision.
 
+> **WAIT rule — wait point 4 of 4.** A push restarts both the review and CI on a new HEAD, so this is
+> where a cycle naturally ends and the temptation to hand off is strongest ("I've pushed; I'll pick it
+> up when the checks report"). As a subagent, **you do not get picked up.** Go back to the review WAIT
+> against the *new* HEAD in this same turn, and keep going until a terminal marker is posted. Only a
+> top-level session may `ScheduleWakeup` here.
+
 ## Reopen policy (a prior `done` exists)
 
 Before running a cycle, check for a prior `autofix-pr:done` marker. If one exists and HEAD has moved
@@ -506,6 +545,11 @@ When gate 1 passes:
   review converged but CI is still running and the loop may still push. Then **keep looping** into
   gate 2. Do not post `autofix-pr:done` yet.
 
+  > **WAIT rule — wait point 2 of 4.** "Keep looping into gate 2" means, for a subagent, *continue in
+  > this same turn*. `ci-pending` is explicitly **not** a terminal marker, so ending your run here
+  > leaves the PR in the one state this skill forbids: un-drafted, still under machine control, and
+  > abandoned. Go straight to gate 2's WAIT.
+
 That marker exists because un-drafting breaks the "draft means still under machine control"
 invariant: between the gates the PR looks ready while the loop can still push. **The real invariant
 is the absence of a terminal marker** — a PR is finished only when `autofix-pr:done`, `:escalated`,
@@ -551,9 +595,20 @@ merges a PR itself. Report `CLEAN` and stop; merging is the owner's call.
 push sits there forever; treat it as not-yet-run and apply the ~5-minute absence rule against the
 *current* HEAD.
 
-Poll with wake-ups at ~300s — cold-cache Windows and macOS `cargo check` jobs take several minutes.
-Hard timeout: a CI check `IN_PROGRESS` for ≥ 35 minutes is hung; note it and treat gate 2 as
-unresolved (`autofix-pr:escalated`).
+Poll at ~300s — cold-cache Windows and macOS `cargo check` jobs take several minutes. Hard timeout: a
+CI check `IN_PROGRESS` for ≥ 35 minutes is hung; note it and treat gate 2 as unresolved
+(`autofix-pr:escalated`).
+
+> **WAIT rule — wait point 3 of 4.** CI is the longest wait in the skill and therefore the most
+> tempting to hand off. As a subagent, do not. Stay in this turn:
+>
+> ```sh
+> for i in $(seq 1 12); do gh pr checks <n> | grep -q pending || break; sleep 300; done
+> gh pr checks <n>
+> ```
+>
+> Repeat the call if you need more than 12 rounds, up to the 35-minute cap, then post the terminal
+> marker. `ScheduleWakeup` here is top-level-session only.
 
 #### When CI is red
 
