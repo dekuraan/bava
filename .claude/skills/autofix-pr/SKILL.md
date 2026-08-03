@@ -86,6 +86,39 @@ Detect whether we're already inside `/loop`:
 Pass the PR number explicitly in the wake-up prompt so re-fires don't re-resolve from a
 possibly-changed branch state: `prompt: "/autofix-pr 42"`.
 
+### If you are a subagent, nothing will ever wake you
+
+**Read this before you wait for anything.** Everything above describes a long-lived session that
+gets re-entered. When this skill runs inside a **subagent** (spawned via the Agent tool by a parent
+session), that model does not hold, and the failure is silent:
+
+- `ScheduleWakeup` re-fires the **top-level** session's prompt, not yours.
+- `Monitor`, `Bash(run_in_background: true)`, and task-completion notifications are delivered to the
+  **top-level** session. A subagent that ends its turn saying "I'll wait for the background poll" has
+  **ended its run** — the notification goes to the parent, the parent has no idea it was supposed to
+  resume you, and the PR is left mid-triage with no terminal marker.
+
+So, as a subagent:
+
+- **Never end a turn in order to wait.** Ending a turn is terminal, not a pause.
+- Poll **inline**, inside a single turn, with blocking sleeps:
+
+  ```sh
+  # one poll step — repeat inline until the check resolves or you hit the timeout
+  sleep 120; gh pr checks <n>
+  ```
+
+  A foreground `sleep` may be blocked by the harness; if it is, use a bounded until-loop in one
+  `Bash` call (`for i in $(seq 1 15); do gh pr checks <n> | grep -q pending || break; sleep 60; done`)
+  so the wait and the check live in the *same* tool call.
+- Respect the same hard timeouts (20 min for review, 35 min for CI). When you hit one, post the
+  terminal marker and return — do not park.
+- Do not call `ScheduleWakeup`. You are in single-cycle mode's spirit even across multiple polls:
+  one invocation, one continuous run, one terminal marker.
+
+If you cannot tell whether you're a subagent: assume you are. Inline polling works correctly in a
+top-level session too; parking works correctly only in a top-level session. The asymmetry decides it.
+
 ### Cycle cap (circuit breaker)
 
 Two independent triggers, checked at the start of every cycle against the PR's **total** history
@@ -172,6 +205,16 @@ A `CANCELLED` review check on HEAD means a newer push superseded it *or* the run
 mid-flight. If HEAD hasn't moved, treat it as case 2 above (no usable review) rather than as
 completion.
 
+**The `track_progress` tracking comment lies.** It is posted as a "Review in progress" checklist with
+unchecked boxes and is *supposed* to be rewritten in place when the run finishes — but it routinely
+stays frozen on the placeholder even after the check is `COMPLETED`/`SUCCESS`. A stale "Review in
+progress" comment with unchecked boxes is **not** evidence the review is still running, and a review
+that legitimately found nothing often leaves exactly that: a completed check, a frozen tracking
+comment, and zero findings. Trust the check state. If you need to be certain the run really did a
+full pass rather than dying early, read the run log — `gh run view <run-id> --log` — and look for the
+`<review_comments>` block (`No review comments` means it finished and found nothing). Never conclude
+"still running" from comment text.
+
 **A `CONFLICTING` PR gets no review at all.** When a PR conflicts with `main`, GitHub can't compute
 the merge commit and `pull_request`-triggered workflows never run — the rollup comes back nearly
 empty. "No checks present" means suspect a conflict, not reviewer lag. Resolve it first (see Edge
@@ -206,12 +249,74 @@ Body sections:
 - <one-line issue summary> — claude · [src](<comment-url>)
   fp: `<fingerprint>`
   <rationale: why this is intentional / out of scope / wrong>
+
+### Notes
+- <anything that is not a review point but belongs in the record>
 ```
 
-**Fingerprint** for a "won't fix" entry: lowercase, strip whitespace, hash of `<file>:<line>|<first
-120 chars of issue body>` (`sha1sum | cut -c1-10`). For a top-level comment with no file/line, use
-the first 160 chars of the body alone. Strip per-cycle noise before hashing — drop any `Reviewed
-commit:` line and any short-SHA tokens.
+The **Notes** section is for things that have no reviewer, no file, and no line, and therefore no
+fingerprint — most often a CI verdict: a repo-wide-red `cargo audit` that another PR is fixing, a
+platform job that had to be re-run for a genuine infra flake, a merge of `main` you performed. Do not
+force these into "Won't fix" just to have somewhere to put them; a fingerprint on a non-finding is
+noise that future cycles will try to substance-match against. Omit the section when it's empty.
+
+**Fingerprint** for a "won't fix" entry. The whole point is that a *later* cycle recomputes the same
+digits from the same finding, so the recipe has to be mechanical — do not eyeball it, and do not
+decide by feel where the "body" starts. Compute it with this exact pipeline:
+
+```sh
+# $KEY is "<file>:<line>" for an inline comment, or "" for a top-level comment.
+# $BODY is the comment body, verbatim, as returned by the API.
+fp() {  # usage: fp "<key>" "<body>" ; prints 10 hex chars
+  local key="$1" body="$2" n=120
+  [ -z "$key" ] && n=160
+  printf '%s|%s' "$key" \
+    "$(printf '%s' "$body" \
+       | sed -E '/^[[:space:]]*Reviewed commit:/d' \
+       | sed -E 's/\b[0-9a-f]{7,40}\b//g' \
+       | tr -d '`*>#[]()' \
+       | tr '[:upper:]' '[:lower:]' \
+       | tr -s '[:space:]' ' ' \
+       | sed -E 's/^ //; s/ $//' \
+       | cut -c1-$n)" \
+  | sha1sum | cut -c1-10
+}
+```
+
+Order is load-bearing and is: drop `Reviewed commit:` lines → strip SHA-like tokens → strip markdown
+punctuation (`` ` `` `*` `>` `#` `[` `]` `(` `)`) → lowercase → collapse all whitespace runs to one
+space → trim → **then** truncate. Truncating before normalizing is the classic way two cycles
+disagree: markdown removed after the cut changes which characters survive it.
+
+Underscore is deliberately **not** stripped even though it's markdown emphasis: this is a Rust repo
+and half the identifiers in a finding contain one. Stripping it collapses `update_columns` to
+`updatecolumns` and makes `foo_bar` and `foobar` fingerprint identically.
+
+Worked example. Inline comment on `src/vis/physics.rs:212` whose body is:
+
+```
+**Collider drift.** `update_columns` reads `cava.mono()` directly instead of
+`bars::mirror_values()`, so `reverse_order` is ignored.
+
+Reviewed commit: a1b2c3d
+```
+
+Normalizes to the 120-char prefix
+
+```
+collider drift. update_columns reads cava.mono directly instead of bars::mirror_values, so reverse_order is ignored.
+```
+
+and `fp "src/vis/physics.rs:212" "$body"` yields **`f94d4359b5`**. Reflowing that same body onto one
+line, adding stray spaces, and changing the `Reviewed commit:` SHA yields `f94d4359b5` again — that
+stability is the entire property being bought. Changing the line to `:999` yields `1ba54a3fcd`, and
+hashing it as a top-level comment (empty key, 160-char window) yields `86e2442d7c`. If your
+implementation disagrees with those four values on that input, it is wrong — fix it rather than
+proceeding, because a drifting fingerprint silently defeats cross-cycle deduping and you will
+re-triage declined items forever.
+
+For a top-level comment with no file/line the key is empty (so the string starts with `|`) and the
+window is 160 chars, not 120.
 
 On every cycle, **before** triaging, fetch all prior `autofix-pr:triage` comments and build the set
 of `fp:` fingerprints under "Won't fix" (keep the one-line summaries too — you need them for
@@ -375,6 +480,28 @@ When gate 1 passes:
 
 - If CI on HEAD is already green, go straight to gate 2's success path — one terminal comment, no
   intermediate marker.
+
+  **This overrides "each cycle posts exactly one triage comment."** The two conventions collide on
+  the most common path of all — a clean approving review on cycle 1 with CI already green — and the
+  terminal comment wins. Post **one** `autofix-pr:done` comment that carries the triage content
+  (`### Fixed` / `### Won't fix` / `### Notes`, even if all are empty or absent) plus the done
+  summary. Do **not** post a separate `autofix-pr:triage` comment first and then a `done` right after
+  it; that's two comments for one cycle and it double-counts the durable cycle number.
+
+  Concretely, for "review found nothing, CI green, nothing to fix," the entire output of the run is:
+
+  ```
+  <!-- autofix-pr:done head=<sha> -->
+
+  ## autofix-pr — head <short-sha>
+
+  Cycle 1. Review converged with no findings; nothing to fix.
+
+  ### Notes
+  - CI: green on Linux / Windows / macOS / cross.
+
+  Ready for your review.
+  ```
 - Otherwise `gh pr ready <n>` (un-draft) and post `<!-- autofix-pr:ci-pending head=<sha> -->` saying
   review converged but CI is still running and the loop may still push. Then **keep looping** into
   gate 2. Do not post `autofix-pr:done` yet.
@@ -398,10 +525,27 @@ CI checks on HEAD, from `statusCheckRollup`:
 | `Windows (x86_64)` | Native MSVC typecheck of `wasapi.rs` / `now_playing/windows.rs`. The cross-check catches most of it locally; MSVC-only breakage is real. |
 | `macOS (aarch64)` | **The only signal that exists** for `coreaudio.rs` / `now_playing/macos.rs`. |
 | `Windows type-check (cross)` | Same target as the local cross-check — if this is red and local was green, you skipped it. |
-| `cargo audit` | Path-filtered to `**/Cargo.toml` / `**/Cargo.lock`; absent on most PRs. |
+| `cargo audit` | Runs on **every** PR — the `paths:` filter was removed when it became a required check. Red here blocks the merge. |
 
-**Absent is not red.** `cargo audit` only runs when the dep files changed. If a CI check hasn't
-appeared within ~5 minutes of the push, it isn't going to.
+**Absent is not red — but for a required check, absent is worse than red.** All five checks in the
+table are **required status checks** on the `main` ruleset, and a required check that never reports
+leaves the PR pinned on *"Expected — waiting for status to be reported"* forever. So if one of these
+five is missing ~5 minutes after the push, that is a defect to investigate (a `paths:` filter, a
+conflict suppressing `pull_request` workflows, a workflow that doesn't exist on this branch), not a
+check you may treat as not-applicable and pass.
+
+### What "ready to merge" means now
+
+`main` is protected. `gh pr view <n> --json mergeStateStatus` is the authoritative answer, not your
+own reading of the checks:
+
+- `CLEAN` — all required checks green, mergeable. This is the only state that means ready.
+- `BLOCKED` — a required check is failing, pending, or absent. Say which one in the terminal comment.
+- `BEHIND` / `DIRTY` — merge `main` in (see Edge cases).
+
+Only **squash** and **rebase** merges are permitted; the ruleset rejects merge commits. Required
+approvals are **0** (solo repo), so a green PR needs no human approval — but this skill still never
+merges a PR itself. Report `CLEAN` and stop; merging is the owner's call.
 
 **`SKIPPED`/`NEUTRAL`/`CANCELLED` is neither absent nor green.** A cancelled run from a superseded
 push sits there forever; treat it as not-yet-run and apply the ~5-minute absence rule against the
@@ -492,6 +636,21 @@ and stop.
   the lockfile.
 - **Working in a git worktree:** the stash stack is shared across worktrees and other sessions may
   use it. Never use bare `git stash`/`git stash pop` — use a temporary WIP commit to set work aside.
+- **Comparing against `main`: diff, never check out.** Use `git diff main...HEAD`, `git show
+  main:<path>`, or `git log main..HEAD` — all read-only. Never `git checkout main -- .` or
+  `git checkout main -- <path>` to "look at" `main`'s version: it *stages* the difference into your
+  working tree, and on a PR branch that is behind `main` it will silently stage files that exist on
+  `main` and not on the branch, which then ride along in your next `git commit -a` or `git add -A`.
+  Recovering needs a `git reset --hard`, which is exactly the command you least want to be running
+  next to unpushed fixes.
+- **A workflow that doesn't exist on the PR branch can still run on the PR.** GitHub resolves
+  `issue_comment`-triggered workflows (`claude.yml`'s `@claude` path) from the **default branch**,
+  not the PR head — so an older branch cut before `claude-review.yml` landed on `main` can still
+  receive review comments from `claude`, even though nothing in its own tree would produce them.
+  Don't conclude "this branch has no reviewer" from the branch's tree; check `statusCheckRollup` and
+  the comments. Conversely, `pull_request`-triggered workflows *are* taken from the merge of head
+  into base, so a branch missing `claude-review.yml` won't get the automatic on-push review until it
+  merges `main` — if the review check never appears on an old branch, merging `main` is the fix.
 - **Review check never runs and the rollup is near-empty:** suspect a merge conflict (see above)
   before concluding the reviewer is slow.
 - **`@claude` on-demand replies** (`claude.yml`, triggered by mentioning `@claude` in a comment) are
