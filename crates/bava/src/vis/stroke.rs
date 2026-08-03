@@ -377,7 +377,7 @@ mod tests {
         let mut mesh = empty_stroke_mesh();
         apply_stroke(&mut mesh, &pts, 2.0, STROKE_FEATHER, false);
         // 4 lanes per point; 3 quads (2 tris each) per segment; 1 segment open.
-        assert_eq!(counts(&mesh), (2 * 4, 1 * 3 * 6));
+        assert_eq!(counts(&mesh), (2 * 4, 3 * 6));
     }
 
     #[test]

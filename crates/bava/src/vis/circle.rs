@@ -451,7 +451,7 @@ mod tests {
         let (base, amp) = circle_radii(extent, 0.38);
 
         // Silence → a circle at the base radius.
-        let silent = blob_ring(&vec![0.0; 16], extent, 0.38, 0.0);
+        let silent = blob_ring(&[0.0; 16], extent, 0.38, 0.0);
         assert_eq!(silent.len(), SEGMENTS);
         for p in &silent {
             assert!(
@@ -461,7 +461,7 @@ mod tests {
         }
 
         // Loud → radii grow with amplitude, bounded by base + amp·v.
-        let loud = blob_ring(&vec![1.0; 16], extent, 0.38, 0.0);
+        let loud = blob_ring(&[1.0; 16], extent, 0.38, 0.0);
         for p in &loud {
             let r = p.length();
             assert!(r > base + 1.0, "loud rim should expand past base");

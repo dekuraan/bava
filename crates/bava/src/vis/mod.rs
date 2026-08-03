@@ -756,11 +756,13 @@ mod tests {
     #[test]
     fn fg_stops_fall_back_to_white_and_use_profile() {
         // Empty profile fg → a single white stop, and fg_lo/fg_hi both white.
-        let mut s = VisSettings::default();
-        s.profiles = vec![ColorProfile {
-            fg: vec![],
-            ..ColorProfile::default()
-        }];
+        let mut s = VisSettings {
+            profiles: vec![ColorProfile {
+                fg: vec![],
+                ..ColorProfile::default()
+            }],
+            ..VisSettings::default()
+        };
         assert_eq!(s.fg_stops(), vec![Color::WHITE]);
         assert_eq!(s.fg_lo(), Color::WHITE);
         assert_eq!(s.fg_hi(), Color::WHITE);
@@ -776,9 +778,11 @@ mod tests {
 
     #[test]
     fn dynamic_color_count_clamps_active_stops() {
-        let mut s = VisSettings::default();
-        s.dynamic_colors = true;
-        s.dynamic_fg = Some(vec![Color::BLACK, Color::WHITE, Color::srgb(1.0, 0.0, 0.0)]);
+        let mut s = VisSettings {
+            dynamic_colors: true,
+            dynamic_fg: Some(vec![Color::BLACK, Color::WHITE, Color::srgb(1.0, 0.0, 0.0)]),
+            ..VisSettings::default()
+        };
         // Count of 2 takes the first two extracted colors.
         s.dynamic_color_count = 2;
         assert_eq!(s.fg_stops().len(), 2);

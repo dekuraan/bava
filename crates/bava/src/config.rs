@@ -4,7 +4,7 @@
 //!
 //! The config file is created with default values on first run if it is missing.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use bevy::prelude::{Color, KeyCode, Resource, Vec2};
 use clap::Parser;
@@ -527,7 +527,7 @@ impl Config {
     /// Read and parse the config at `path`, or `None` if it is missing or does
     /// not parse. Used by the editor's "Reload", which wants to leave the live
     /// settings untouched on failure rather than reset them to defaults.
-    pub fn load(path: &PathBuf) -> Option<Self> {
+    pub fn load(path: &Path) -> Option<Self> {
         toml::from_str(&store::read(path).ok()?).ok()
     }
 
@@ -538,7 +538,7 @@ impl Config {
     /// `<name>.bak` and a fresh default is written in its place, so a stale or
     /// hand-broken config self-heals instead of silently using defaults forever
     /// (the old contents stay recoverable in the backup).
-    pub fn load_or_create(path: &PathBuf) -> Self {
+    pub fn load_or_create(path: &Path) -> Self {
         match store::read(path) {
             Ok(text) => match toml::from_str::<Config>(&text) {
                 Ok(cfg) => cfg,
@@ -582,7 +582,7 @@ impl Config {
     }
 
     /// Serialize and write the config to `path`, creating parent dirs.
-    pub fn write(&self, path: &PathBuf) -> std::io::Result<()> {
+    pub fn write(&self, path: &Path) -> std::io::Result<()> {
         let body = toml::to_string_pretty(self)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         let text = format!("# bava configuration\n# https://github.com/dekuraan/bava\n\n{body}");
