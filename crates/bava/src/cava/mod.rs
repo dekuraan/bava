@@ -470,15 +470,18 @@ fn feed_cava(
 
     // Process every complete chunk; cavacore sees a constant sample count.
     let mut executed = 0u32;
-    while state.accum.len() >= chunk {
-        state.scratch.clear();
-        state.scratch.extend(state.accum.drain(..chunk));
-        state.plan.execute(&state.scratch);
-        executed += 1;
-        if settings.debug {
-            dbg.max_in = dbg
-                .max_in
-                .max(state.scratch.iter().fold(0.0f64, |m, &s| m.max(s.abs())));
+    {
+        crate::profile_scope!("cava_execute");
+        while state.accum.len() >= chunk {
+            state.scratch.clear();
+            state.scratch.extend(state.accum.drain(..chunk));
+            state.plan.execute(&state.scratch);
+            executed += 1;
+            if settings.debug {
+                dbg.max_in = dbg
+                    .max_in
+                    .max(state.scratch.iter().fold(0.0f64, |m, &s| m.max(s.abs())));
+            }
         }
     }
 

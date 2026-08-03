@@ -12,6 +12,7 @@ mod cava;
 mod config;
 mod gui;
 mod now_playing;
+mod profiling;
 mod record;
 mod vis;
 
@@ -68,14 +69,22 @@ fn main() {
     let vis_mode = config.vis_mode();
 
     let mut app = App::new();
-    app.add_plugins(DefaultPlugins.set(WindowPlugin {
+    let default_plugins = DefaultPlugins.set(WindowPlugin {
         primary_window: Some(Window {
             title: "bava".into(),
             ..default()
         }),
         ..default()
-    }))
-    .add_plugins(EguiPlugin::default())
+    });
+    // Bevy owns the global `tracing` subscriber, so the puffin bridge has to be
+    // handed to `LogPlugin` rather than installed alongside it.
+    #[cfg(feature = "profile")]
+    let default_plugins = default_plugins.set(bevy::log::LogPlugin {
+        custom_layer: profiling::layer,
+        ..default()
+    });
+    app.add_plugins(default_plugins)
+        .add_plugins(EguiPlugin::default())
     // Dark backdrop so the visualizer pops.
     .insert_resource(ClearColor(Color::srgb(0.02, 0.02, 0.04)))
     // Pipeline + vis config from CLI/TOML; inserted before the plugins so their
@@ -93,6 +102,9 @@ fn main() {
         VisPlugin,
         GuiPlugin,
     ));
+
+    #[cfg(feature = "profile")]
+    app.add_plugins(profiling::PuffinPlugin);
 
     // `--debug` also logs FPS/frame time ~1×/s. The vis plugin already adds
     // `FrameTimeDiagnosticsPlugin` (for the F3 overlay), so adding it again here

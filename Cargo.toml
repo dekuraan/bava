@@ -24,3 +24,15 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 strip = true
+
+# For `cargo run --profile profiling --features profile`: release-grade codegen
+# (dev's opt-level 0 on our own crates would make every measurement meaningless)
+# but without release's LTO + single codegen unit, which relink the whole binary
+# on each edit and make A/B iteration painful. Symbols are kept so an external
+# sampling profiler (perf, samply) can resolve frames alongside puffin's scopes.
+[profile.profiling]
+inherits = "release"
+lto = false
+codegen-units = 16
+strip = false
+debug = "line-tables-only"

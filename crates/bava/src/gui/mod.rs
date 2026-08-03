@@ -631,6 +631,13 @@ fn physics_section(ui: &mut egui::Ui, physics: &mut PhysicsSettings) {
             .step_by(10.0),
     );
 
+    ui.checkbox(&mut physics.ccd, "continuous collision detection")
+        .on_hover_text(
+            "Stops very fast balls passing through a bar or the floor. \
+             The most expensive part of the ball simulation — turn it off \
+             for a large win with a lot of balls on screen.",
+        );
+
     ui.collapsing("Trails", |ui| {
         ui.checkbox(&mut physics.trails, "Ball trails");
         if physics.trails {
