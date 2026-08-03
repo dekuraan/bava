@@ -8,6 +8,7 @@
 //! [`AlbumArt`] resource. The Bevy systems here only drain a channel, so the
 //! platform APIs never block the render loop.
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::thread;
 
 use bevy::asset::RenderAssetUsages;
@@ -21,6 +22,8 @@ use crossbeam_channel::Receiver;
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_arch = "wasm32")]
+mod web;
 #[cfg(target_os = "windows")]
 mod windows;
 
@@ -33,8 +36,15 @@ use macos::run as now_playing_run;
 #[cfg(target_os = "windows")]
 use windows::run as now_playing_run;
 
-/// Fallback for platforms without a media-session backend.
-#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+/// Fallback for platforms without a media-session backend. The web build is not
+/// one of them — it has no *thread* to poll from, but the page pushes metadata
+/// in through [`web`] instead.
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "windows",
+    target_arch = "wasm32"
+)))]
 fn now_playing_run(_tx: crossbeam_channel::Sender<NowPlayingMsg>) {
     warn!("bava: now-playing unsupported on this platform");
 }
@@ -139,11 +149,29 @@ impl Plugin for NowPlayingPlugin {
             return;
         }
 
+        // The web build has no thread to poll from: the page pushes metadata,
+        // and a PreUpdate system forwards it down the same channel. The sender
+        // has to be kept alive for the app's lifetime, or the drain would see a
+        // disconnected channel on the very first frame.
+        #[cfg(target_arch = "wasm32")]
+        {
+            app.insert_resource(NowPlayingTxKeepAlive(tx))
+                .add_systems(PreUpdate, pump_web_now_playing.before(apply_now_playing_updates));
+            return;
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
         thread::Builder::new()
             .name("bava-now-playing".into())
             .spawn(move || now_playing_run(tx))
             .expect("failed to spawn now-playing thread");
     }
+}
+
+/// Forward metadata the page pushed since last frame into the channel.
+#[cfg(target_arch = "wasm32")]
+fn pump_web_now_playing(keep_alive: Res<NowPlayingTxKeepAlive>) {
+    web::pump(&keep_alive.0);
 }
 
 /// Drain now-playing messages and update resources / create art textures.

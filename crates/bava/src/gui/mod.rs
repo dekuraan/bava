@@ -195,10 +195,7 @@ fn persistence_section(
             };
         }
         if ui.button("⟳ Reload").clicked() {
-            match std::fs::read_to_string(&handle.path)
-                .ok()
-                .and_then(|t| toml::from_str::<Config>(&t).ok())
-            {
+            match Config::load(&handle.path) {
                 Some(cfg) => {
                     apply_config(&cfg, vis, mode, cava, rebuild, physics);
                     editor.toggle_key = cfg.gui_toggle_key();
@@ -630,6 +627,13 @@ fn physics_section(ui: &mut egui::Ui, physics: &mut PhysicsSettings) {
             .text("central gravity (circle)")
             .step_by(10.0),
     );
+
+    ui.checkbox(&mut physics.ccd, "continuous collision detection")
+        .on_hover_text(
+            "Stops very fast balls passing through a bar or the floor. \
+             The most expensive part of the ball simulation — turn it off \
+             for a large win with a lot of balls on screen.",
+        );
 
     ui.collapsing("Trails", |ui| {
         ui.checkbox(&mut physics.trails, "Ball trails");

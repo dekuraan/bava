@@ -1,0 +1,94 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+#
+# Build:   snapcraft            (needs LXD; `snap install snapcraft --classic`)
+# Install: sudo snap install --dangerous ./bava_*.snap
+# Publish: snapcraft upload --release=stable bava_*.snap
+#
+# See packaging/README.md for the two confinement caveats: audio-record must be
+# connected by hand, and MPRIS now-playing only sees snap-packaged players.
+name: bava
+base: core24
+adopt-info: bava
+summary: Music visualizer driven by cavacore, MPRIS, and PipeWire/PulseAudio
+description: |
+  A music visualizer built on the Bevy engine. It captures the default audio
+  output's monitor, runs it through cavacore — the analysis engine from CAVA —
+  and renders smoothed, log-spaced frequency bars with HDR bloom.
+
+  Eleven Cavalier-style drawing modes, an avian2d physics mode, album-art-driven
+  dynamic colors, an in-app settings editor, and offline music-video rendering.
+
+  After installing, connect the capture interface:
+
+      sudo snap connect bava:audio-record
+
+license: MIT OR Apache-2.0
+icon: flatpak/io.github.dekuraan.bava.svg
+website: https://github.com/dekuraan/bava
+issues: https://github.com/dekuraan/bava/issues
+grade: stable
+confinement: strict
+compression: lzo
+
+platforms:
+  amd64:
+
+apps:
+  bava:
+    command: bin/bava
+    # The gnome extension supplies mesa (including the Vulkan ICDs via the
+    # gpu-2404 interface), the GTK/GNOME runtime, fonts, and the wayland/x11
+    # plumbing from a content snap, so none of that has to be staged here.
+    extensions: [gnome]
+    desktop: usr/share/applications/io.github.dekuraan.bava.desktop
+    plugs:
+      - audio-playback
+      - audio-record   # the sink *monitor* source; manual connect (see above)
+      - network        # album-art fetch over HTTP
+      - opengl
+      - mpris          # now-playing; only reaches snap-packaged players
+      - home           # read fg/bg image layers configured in [vis]
+
+parts:
+  bava:
+    plugin: rust
+    source: .
+    rust-path: [crates/bava]
+    override-pull: |
+      craftctl default
+      # Single source of truth for the version: the crate manifest.
+      craftctl set version="$(sed -n '0,/^version = /s/^version = "\(.*\)"/\1/p' crates/bava/Cargo.toml)"
+    build-packages:
+      - clang            # libspa-sys bindgen over the PipeWire headers
+      - libclang-dev
+      - pkg-config
+      - libpulse-dev
+      - libpipewire-0.3-dev
+      - libdbus-1-dev
+      - libwayland-dev
+      - libxkbcommon-dev
+      - libx11-dev
+      - libxcursor-dev
+      - libxrandr-dev
+      - libxi-dev
+      - libvulkan-dev
+    stage-packages:
+      - libpulse0
+      - libpipewire-0.3-0
+      - libdbus-1-3
+      - libvulkan1
+    override-build: |
+      craftctl default
+      install -Dm644 flatpak/io.github.dekuraan.bava.desktop \
+        "$CRAFT_PART_INSTALL/usr/share/applications/io.github.dekuraan.bava.desktop"
+      install -Dm644 flatpak/io.github.dekuraan.bava.svg \
+        "$CRAFT_PART_INSTALL/usr/share/icons/hicolor/scalable/apps/io.github.dekuraan.bava.svg"
+      install -Dm644 flatpak/io.github.dekuraan.bava.metainfo.xml \
+        "$CRAFT_PART_INSTALL/usr/share/metainfo/io.github.dekuraan.bava.metainfo.xml"
+
+  # `--input song.mp3 --out video.mp4` shells out to ffmpeg, which strict
+  # confinement won't find on the host.
+  ffmpeg:
+    plugin: nil
+    stage-packages:
+      - ffmpeg

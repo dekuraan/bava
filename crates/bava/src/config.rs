@@ -116,6 +116,12 @@ pub struct Cli {
     /// Render only the first SECONDS of the track (for quick tests of --input).
     #[arg(long, value_name = "SECONDS")]
     pub duration: Option<f64>,
+
+    /// Spawn N balls spread across the drawing area at launch, instead of
+    /// starting empty and waiting for mouse clicks. Overrides
+    /// `[physics] spawn_on_launch`.
+    #[arg(long, value_name = "N")]
+    pub spawn_balls: Option<usize>,
 }
 
 /// Top-level config file model.
@@ -308,6 +314,11 @@ pub struct PhysicsConfig {
     pub randomize: bool,
     /// Minimum delay between right-click spray bursts while held, in milliseconds.
     pub spawn_debounce_ms: u64,
+    /// Balls to spawn across the drawing area at launch (0 = start empty). Also
+    /// what `--spawn-balls N` sets; the ball/trail simulation is bava's heaviest
+    /// workload, so this is how you reproduce a loaded scene — for a benchmark or
+    /// just to start with the playground already full.
+    pub spawn_on_launch: usize,
     /// Spectrum-surface smoothing time constant, in seconds (larger = smoother).
     pub bar_smoothing: f32,
     /// Restitution of the spectrum surface.
@@ -316,6 +327,11 @@ pub struct PhysicsConfig {
     pub bar_push: f32,
     /// Planet mode: radial acceleration pulling balls toward the center, px/s².
     pub central_gravity: f32,
+    /// Continuous collision detection for balls: stops very fast ones from
+    /// passing through a bar or the floor. On by default. This is the most
+    /// expensive part of the ball simulation, so turning it off is the biggest
+    /// single physics saving if you run a lot of balls.
+    pub ccd: bool,
     /// Draw a fading color trail behind each ball.
     pub trails: bool,
     /// Trail length: how many recent positions each trail keeps.
@@ -422,10 +438,12 @@ impl Config {
                 max_balls: physics.max_balls,
                 randomize: physics.randomize,
                 spawn_debounce_ms: physics.spawn_debounce_ms,
+                spawn_on_launch: physics.spawn_on_launch,
                 bar_smoothing: physics.bar_smoothing,
                 bar_restitution: physics.bar_restitution,
                 bar_push: physics.bar_push,
                 central_gravity: physics.central_gravity,
+                ccd: physics.ccd,
                 trails: physics.trails,
                 trail_length: physics.trail_length,
                 debug_draw: physics.debug_draw,
@@ -457,12 +475,12 @@ impl Config {
 
     /// Default config path: `~/.config/bava/config.toml`.
     pub fn default_path() -> Option<PathBuf> {
-        dirs::config_dir().map(|d| d.join("bava").join("config.toml"))
+        store::config_dir().map(|d| d.join("bava").join("config.toml"))
     }
 
     /// Directory holding named profiles: `~/.config/bava/profiles/`.
     pub fn profiles_dir() -> Option<PathBuf> {
-        dirs::config_dir().map(|d| d.join("bava").join("profiles"))
+        store::config_dir().map(|d| d.join("bava").join("profiles"))
     }
 
     /// File path for a named profile, with the name sanitized to a bare stem so
@@ -481,21 +499,7 @@ impl Config {
         let Some(dir) = Self::profiles_dir() else {
             return Vec::new();
         };
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            return Vec::new();
-        };
-        let mut names: Vec<String> = entries
-            .filter_map(|e| {
-                let path = e.ok()?.path();
-                if path.extension().and_then(|s| s.to_str()) == Some("toml") {
-                    path.file_stem()
-                        .and_then(|s| s.to_str())
-                        .map(str::to_string)
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let mut names = store::list_toml_stems(&dir);
         names.sort();
         names
     }
@@ -503,7 +507,7 @@ impl Config {
     /// Load a named profile, or `None` if it is missing or fails to parse.
     pub fn load_profile(name: &str) -> Option<Self> {
         let path = Self::profile_path(name)?;
-        let text = std::fs::read_to_string(&path).ok()?;
+        let text = store::read(&path).ok()?;
         toml::from_str(&text).ok()
     }
 
@@ -516,6 +520,13 @@ impl Config {
         Ok(path)
     }
 
+    /// Read and parse the config at `path`, or `None` if it is missing or does
+    /// not parse. Used by the editor's "Reload", which wants to leave the live
+    /// settings untouched on failure rather than reset them to defaults.
+    pub fn load(path: &PathBuf) -> Option<Self> {
+        toml::from_str(&store::read(path).ok()?).ok()
+    }
+
     /// Load the config at `path`, creating it with defaults if it doesn't exist.
     ///
     /// On a read error, logs a warning and falls back to defaults so the app
@@ -524,12 +535,12 @@ impl Config {
     /// hand-broken config self-heals instead of silently using defaults forever
     /// (the old contents stay recoverable in the backup).
     pub fn load_or_create(path: &PathBuf) -> Self {
-        match std::fs::read_to_string(path) {
+        match store::read(path) {
             Ok(text) => match toml::from_str::<Config>(&text) {
                 Ok(cfg) => cfg,
                 Err(e) => {
                     let backup = path.with_extension("toml.bak");
-                    let where_to = match std::fs::rename(path, &backup) {
+                    let where_to = match store::rename(path, &backup) {
                         Ok(()) => format!("backed up to {}", backup.display()),
                         Err(be) => format!("could not back it up: {be}"),
                     };
@@ -562,13 +573,10 @@ impl Config {
 
     /// Serialize and write the config to `path`, creating parent dirs.
     pub fn write(&self, path: &PathBuf) -> std::io::Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
         let body = toml::to_string_pretty(self)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         let text = format!("# bava configuration\n# https://github.com/dekuraan/bava\n\n{body}");
-        std::fs::write(path, text)
+        store::write(path, &text)
     }
 
     /// Apply CLI overrides in place. Precedence is CLI > config file > defaults.
@@ -629,6 +637,9 @@ impl Config {
         }
         if let Some(monstercat) = cli.monstercat {
             self.vis.monstercat = monstercat;
+        }
+        if let Some(n) = cli.spawn_balls {
+            self.physics.spawn_on_launch = n;
         }
     }
 
@@ -709,12 +720,14 @@ impl Config {
             max_balls: p.max_balls,
             randomize: p.randomize,
             spawn_debounce_ms: p.spawn_debounce_ms,
+            spawn_on_launch: p.spawn_on_launch,
             bar_smoothing: p.bar_smoothing,
             bar_restitution: p.bar_restitution,
             bar_push: p.bar_push,
             // Inward pull magnitude; negative values would make the orbit
             // launch speed `sqrt(central_gravity * r)` NaN (see `spawn_one_ball`).
             central_gravity: p.central_gravity.max(0.0),
+            ccd: p.ccd,
             trails: p.trails,
             trail_length: p.trail_length,
             debug_draw: p.debug_draw,
@@ -795,6 +808,242 @@ fn sanitize_profile_name(name: &str) -> String {
         .chars()
         .filter(|c| c.is_alphanumeric() || matches!(c, ' ' | '-' | '_'))
         .collect()
+}
+
+// --- Config store -----------------------------------------------------------
+//
+// Where configs and profiles live. Natively that is the filesystem under
+// `~/.config/bava`; the browser has none, so the very same paths become
+// `localStorage` keys. Both impls expose one path-shaped, synchronous API, which
+// is what lets `Config` — and the settings editor's Save / Reload / Profiles —
+// be the same code on every target.
+
+/// Filesystem-backed store (every target except the web).
+#[cfg(not(target_arch = "wasm32"))]
+mod store {
+    use std::path::{Path, PathBuf};
+
+    pub fn config_dir() -> Option<PathBuf> {
+        dirs::config_dir()
+    }
+
+    pub fn read(path: &Path) -> std::io::Result<String> {
+        std::fs::read_to_string(path)
+    }
+
+    pub fn write(path: &Path, text: &str) -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, text)
+    }
+
+    pub fn rename(from: &Path, to: &Path) -> std::io::Result<()> {
+        std::fs::rename(from, to)
+    }
+
+    /// `.toml` file stems directly inside `dir`.
+    pub fn list_toml_stems(dir: &Path) -> Vec<String> {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        entries
+            .filter_map(|e| {
+                let path = e.ok()?.path();
+                if path.extension().and_then(|s| s.to_str()) == Some("toml") {
+                    path.file_stem().and_then(|s| s.to_str()).map(str::to_string)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+}
+
+/// `localStorage`-backed store (the web). Settings persist per browser origin.
+#[cfg(target_arch = "wasm32")]
+mod store {
+    use std::path::{Path, PathBuf};
+
+    /// Prefix on every key we own, so a config can't collide with anything else
+    /// the hosting page keeps in `localStorage`.
+    const PREFIX: &str = "bava:";
+
+    /// A synthetic root standing in for `~/.config`, so the paths built on top
+    /// of it (`bava/config.toml`, `bava/profiles/x.toml`) read the same as the
+    /// native ones — including in the editor's "Saved → …" status line.
+    pub fn config_dir() -> Option<PathBuf> {
+        Some(PathBuf::from("/config"))
+    }
+
+    fn key(path: &Path) -> String {
+        format!("{PREFIX}{}", path.to_string_lossy())
+    }
+
+    /// `localStorage`, or `None` when the browser denies it (private-mode
+    /// Safari, third-party-cookie blocking in an iframe). Callers degrade to
+    /// in-memory defaults rather than failing to start.
+    fn local_storage() -> Option<web_sys::Storage> {
+        web_sys::window()?.local_storage().ok().flatten()
+    }
+
+    fn missing(what: &str) -> std::io::Error {
+        std::io::Error::new(std::io::ErrorKind::NotFound, what.to_string())
+    }
+
+    pub fn read(path: &Path) -> std::io::Result<String> {
+        let storage = local_storage().ok_or_else(|| missing("localStorage unavailable"))?;
+        storage
+            .get_item(&key(path))
+            .ok()
+            .flatten()
+            // A `NotFound` (rather than any other error) is what makes
+            // `load_or_create` write fresh defaults instead of warning.
+            .ok_or_else(|| missing("no such key"))
+    }
+
+    pub fn write(path: &Path, text: &str) -> std::io::Result<()> {
+        let storage = local_storage().ok_or_else(|| missing("localStorage unavailable"))?;
+        storage.set_item(&key(path), text).map_err(|_| {
+            // The only realistic failure is the ~5 MB per-origin quota.
+            std::io::Error::other("localStorage write rejected (quota exceeded?)")
+        })
+    }
+
+    pub fn rename(from: &Path, to: &Path) -> std::io::Result<()> {
+        let text = read(from)?;
+        write(to, &text)?;
+        if let Some(storage) = local_storage() {
+            let _ = storage.remove_item(&key(from));
+        }
+        Ok(())
+    }
+
+    /// Keys under `dir` that look like `<stem>.toml`, which is how the flat
+    /// `localStorage` namespace models "files in a directory".
+    pub fn list_toml_stems(dir: &Path) -> Vec<String> {
+        let Some(storage) = local_storage() else {
+            return Vec::new();
+        };
+        let dir_key = format!("{PREFIX}{}/", dir.to_string_lossy());
+        let len = storage.length().unwrap_or(0);
+        (0..len)
+            .filter_map(|i| storage.key(i).ok().flatten())
+            .filter_map(|k| {
+                let rest = k.strip_prefix(&dir_key)?;
+                // Only direct children: no nesting below the profiles dir.
+                if rest.contains('/') {
+                    return None;
+                }
+                rest.strip_suffix(".toml").map(str::to_string)
+            })
+            .collect()
+    }
+}
+
+// --- CLI entry --------------------------------------------------------------
+
+/// Parse the effective command line.
+///
+/// Natively that is `argv`. In the browser there is no argv, so the page's query
+/// string stands in for it: `?bars=32&mode=wave-circle&gui` becomes
+/// `--bars 32 --mode wave-circle --gui`. Both go through the same [`Cli`], so a
+/// shareable URL overrides settings exactly like a flag does.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn parse_cli() -> Cli {
+    Cli::parse()
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn parse_cli() -> Cli {
+    let query = web_sys::window()
+        .and_then(|w| w.location().search().ok())
+        .unwrap_or_default();
+    match Cli::try_parse_from(query_to_args(&query)) {
+        Ok(cli) => cli,
+        Err(e) => {
+            // A bad query string must not take the whole page down: report it
+            // and start with defaults (which the in-app editor can still
+            // change). This runs before the `App` exists, so Bevy's `warn!`
+            // would have no subscriber to write to and vanish — go straight to
+            // the console.
+            web_sys::console::warn_1(
+                &format!("bava: ignoring query string {query:?}: {e}").into(),
+            );
+            Cli::try_parse_from(["bava"]).expect("bava: empty arg list must parse")
+        }
+    }
+}
+
+/// Query parameters the hosting page consumes itself, which must not reach
+/// clap — an unknown flag fails the whole parse, so `?video=abc&bars=48` would
+/// otherwise lose the `bars` override too. Keep in sync with `web/bava.js`.
+#[cfg(target_arch = "wasm32")]
+const PAGE_ONLY_PARAMS: &[&str] = &["video"];
+
+/// `?bars=32&gui&mode=wave-circle` → `["bava", "--bars", "32", "--gui", …]`.
+///
+/// A bare key becomes a bare flag, which is what clap wants for the `bool`
+/// options; a `key=value` pair becomes two arguments so values containing `=`
+/// or spaces survive without quoting rules.
+#[cfg(target_arch = "wasm32")]
+fn query_to_args(query: &str) -> Vec<String> {
+    let mut args = vec!["bava".to_string()];
+    for pair in query.trim_start_matches('?').split('&') {
+        if pair.is_empty() {
+            continue;
+        }
+        let (key, value) = match pair.split_once('=') {
+            Some((k, v)) => (k, Some(v)),
+            None => (pair, None),
+        };
+        let key = percent_decode(key);
+        if key.is_empty() || PAGE_ONLY_PARAMS.contains(&key.as_str()) {
+            continue;
+        }
+        args.push(format!("--{key}"));
+        if let Some(value) = value {
+            args.push(percent_decode(value));
+        }
+    }
+    args
+}
+
+/// Minimal `application/x-www-form-urlencoded` decoding: `%XX` escapes and `+`
+/// for space. Enough for the flags a shareable bava URL carries, and avoids
+/// pulling a URL-parsing crate into the wasm build for it.
+#[cfg(target_arch = "wasm32")]
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' if i + 2 < bytes.len() => {
+                let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok();
+                match hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
+                    Some(byte) => {
+                        out.push(byte);
+                        i += 3;
+                    }
+                    // Not a real escape ("100%" in a value); keep it literal.
+                    None => {
+                        out.push(b'%');
+                        i += 1;
+                    }
+                }
+            }
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 // --- DTO ⇄ runtime conversions (hex colors, image layers) -------------------

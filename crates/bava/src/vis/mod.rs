@@ -59,13 +59,13 @@ pub enum VisShape {
 )]
 #[serde(rename_all = "snake_case")]
 pub enum DrawingMode {
-    #[default]
     WaveBox,
     LevelsBox,
     ParticlesBox,
     BarsBox,
     SpineBox,
     SplitterBox,
+    #[default]
     WaveCircle,
     LevelsCircle,
     ParticlesCircle,
@@ -342,7 +342,7 @@ impl Default for VisSettings {
             tonemapping: ToneMap::default(),
             bloom_intensity: 0.25,
             glow_gain: 1.8,
-            dynamic_colors: false,
+            dynamic_colors: true,
             dynamic_color_count: 2,
             dynamic_color_fade: 0.4,
             dynamic_fg: None,

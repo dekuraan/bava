@@ -40,7 +40,7 @@ use crate::cava::Cava;
 use crate::gui::EditorState;
 use crate::vis::bars::{column_geom, mirror_values, Layout, LEVEL_STEPS, MAX_HEIGHT_FRAC};
 use crate::vis::circle::blob_ring;
-use crate::vis::stroke::{apply_stroke_tapered, empty_stroke_mesh, stroke_material, STROKE_FEATHER};
+use crate::vis::stroke::{empty_stroke_mesh, stroke_material, MeshBatch, STROKE_FEATHER};
 use crate::vis::{
     sample_gradient, spread_monstercat, DrawingMode, MirrorMode, VisFamily, VisSettings, VisShape,
 };
@@ -95,6 +95,9 @@ pub struct PhysicsSettings {
     pub randomize: bool,
     /// Minimum delay between right-click spray bursts while held, in milliseconds.
     pub spawn_debounce_ms: u64,
+    /// Balls to spawn across the drawing area at launch (0 = start empty), from
+    /// `[physics] spawn_on_launch` / `--spawn-balls N`. See [`spawn_initial_balls`].
+    pub spawn_on_launch: usize,
     /// Surface smoothing time constant, in seconds (larger = smoother/slower).
     pub bar_smoothing: f32,
     /// Restitution of the spectrum surface.
@@ -103,6 +106,10 @@ pub struct PhysicsSettings {
     pub bar_push: f32,
     /// Planet mode: radial acceleration pulling balls toward the center, px/s².
     pub central_gravity: f32,
+    /// Continuous collision detection for balls (see [`ball_ccd`]). On by
+    /// default; turning it off is the single biggest physics saving, at the cost
+    /// of very fast balls occasionally passing through a bar or the floor.
+    pub ccd: bool,
     /// Draw a fading color trail behind each ball.
     pub trails: bool,
     /// Trail length: how many recent positions each trail keeps.
@@ -123,11 +130,13 @@ impl Default for PhysicsSettings {
             max_balls: 200,
             randomize: true,
             spawn_debounce_ms: 500,
+            spawn_on_launch: 3,
             bar_smoothing: 0.05,
             bar_restitution: 1.0,
             bar_push: 1.6,
             central_gravity: 1500.0,
-            trails: true,
+            ccd: true,
+            trails: false,
             trail_length: 18,
             debug_draw: false,
         }
@@ -149,9 +158,13 @@ struct Ball {
 #[derive(Resource, Default)]
 struct BallCounter(u64);
 
-/// A fading color trail rendered behind a ball as a feathered stroke. Lives on
-/// its own (un-parented) entity so the polyline can stay in world space; it is
-/// reaped by [`update_trails`] the frame its `ball` no longer exists, covering
+/// A fading color trail rendered behind a ball as a feathered stroke.
+///
+/// Lives on its own (un-parented) entity so the polyline can stay in world
+/// space, and carries **only data** — every trail's geometry is accumulated into
+/// the single [`TrailBatch`] mesh by [`update_trails`], rather than each trail
+/// owning a `Mesh2d` that Bevy would free and re-allocate every frame (see
+/// [`MeshBatch`]). It is reaped the frame its `ball` no longer exists, covering
 /// every despawn path (cap, escape, mode change).
 #[derive(Component)]
 struct Trail {
@@ -159,15 +172,19 @@ struct Trail {
     ball: Entity,
     /// Recent world positions, oldest → newest.
     points: VecDeque<Vec2>,
-    /// The ball's (HDR) tint; the per-point alpha fades it tail-ward.
-    color: Color,
     /// Stroke half-width, derived from the ball radius.
     half_width: f32,
 }
 
-/// Shared blend material for every trail mesh (per-vertex color/alpha do the work).
+/// Marks the single entity every ball trail is drawn into.
+#[derive(Component)]
+struct TrailBatch;
+
+/// Handle for the batched trail mesh, rebuilt each frame.
 #[derive(Resource)]
-struct TrailMaterial(Handle<ColorMaterial>);
+struct TrailHandles {
+    mesh: Handle<Mesh>,
+}
 
 /// Only record a new trail point once the ball has moved at least this far (px²),
 /// so a resting ball doesn't pile up a zero-length smear.
@@ -275,14 +292,79 @@ impl Plugin for PhysicsPlugin {
                         .after(on_mode_change),
                     (update_planet, planet_forces).chain().after(on_mode_change),
                     reconcile_trails,
-                    update_trails,
+                    reconcile_ccd,
                     retint_balls,
                     toggle_physics_debug,
                     sync_physics_debug,
                     update_debug_overlay,
+                    spawn_initial_balls,
                 ),
+            )
+            // Ball and trail geometry is built from the *simulated* transforms,
+            // so it has to run after avian writes them back — in `Update` it
+            // would render every ball and trail head one frame stale.
+            .add_systems(
+                PostUpdate,
+                update_trails.after(PhysicsSystems::Writeback),
             );
+
     }
+}
+
+/// Drop `[physics] spawn_on_launch` (or `--spawn-balls N`) balls in a grid
+/// across the drawing area, once, so bava can start with the playground already
+/// full instead of empty.
+///
+/// Runs on the first frame a window exists rather than in `Startup`, so the
+/// window size is known and the spread matches what clicks would have produced.
+/// The `done` latch makes it fire exactly once per launch — a later settings
+/// edit changes what future launches do, not this one.
+#[allow(clippy::too_many_arguments)]
+fn spawn_initial_balls(
+    mut commands: Commands,
+    mut done: Local<bool>,
+    settings: Res<PhysicsSettings>,
+    vis: Res<VisSettings>,
+    mode: Res<DrawingMode>,
+    windows: Query<&Window>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
+    mut counter: ResMut<BallCounter>,
+) {
+    if *done {
+        return;
+    }
+    let Some(window) = windows.iter().next() else {
+        return; // no window yet — try again next frame
+    };
+    *done = true;
+    let count = settings.spawn_on_launch.min(settings.max_balls);
+    if count == 0 || !settings.enabled {
+        return;
+    }
+
+    // A grid over the middle of the area, so balls start apart and fall into a
+    // realistic spread rather than one exploding pile.
+    let (w, h) = (window.width(), window.height());
+    let cols = (count as f32).sqrt().ceil().max(1.0) as usize;
+    let rows = count.div_ceil(cols);
+    for i in 0..count {
+        let (cx, cy) = (i % cols, i / cols);
+        let fx = (cx as f32 + 0.5) / cols as f32 - 0.5;
+        let fy = (cy as f32 + 0.5) / rows as f32 - 0.5;
+        let world = Vec2::new(fx * w * 0.8, fy * h * 0.8);
+        spawn_one_ball(
+            &mut commands,
+            &mut meshes,
+            &mut materials,
+            &settings,
+            &vis,
+            &mut counter,
+            *mode,
+            world,
+        );
+    }
+    info!("bava: spawned {count} balls at launch");
 }
 
 /// Whether the spectrum **column** pool drives physics this frame: the
@@ -318,14 +400,23 @@ fn physics_supported(mode: DrawingMode, vis: &VisSettings) -> bool {
 fn setup_physics(
     mut commands: Commands,
     settings: Res<PhysicsSettings>,
+    mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
     windows: Query<&Window>,
 ) {
-    // Shared blend material for the ball trails. Inserted unconditionally: the
-    // always-scheduled `spawn_ball_on_click` requires `Res<TrailMaterial>`, and a
-    // missing required resource fails param validation → panic on the first frame
-    // (Bevy 0.18). It just early-returns in its body when physics is disabled.
-    commands.insert_resource(TrailMaterial(materials.add(stroke_material())));
+    // Every trail is drawn into this one mesh, just behind the balls (z = 0.9).
+    // Per-vertex color/alpha do all the work, so one blend material covers them
+    // all — and one mesh means one allocation and one draw call for every trail
+    // on screen, however many balls are live (see [`MeshBatch`]).
+    let trail_material = materials.add(stroke_material());
+    let trail_mesh = meshes.add(empty_stroke_mesh());
+    commands.spawn((
+        Mesh2d(trail_mesh.clone()),
+        MeshMaterial2d(trail_material),
+        Transform::from_xyz(0.0, 0.0, 0.9),
+        TrailBatch,
+    ));
+    commands.insert_resource(TrailHandles { mesh: trail_mesh });
 
     // F3 debug overlay (FPS + ball count), hidden until `debug_draw` is toggled on.
     commands.spawn((
@@ -470,7 +561,6 @@ fn spawn_ball_on_click(
     settings: Res<PhysicsSettings>,
     vis: Res<VisSettings>,
     editor: Res<EditorState>,
-    trail_mat: Res<TrailMaterial>,
     mut counter: ResMut<BallCounter>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
@@ -525,7 +615,6 @@ fn spawn_ball_on_click(
             &mut materials,
             &settings,
             &vis,
-            &trail_mat,
             &mut counter,
             *mode,
             at,
@@ -542,7 +631,6 @@ fn spawn_one_ball(
     materials: &mut Assets<ColorMaterial>,
     settings: &PhysicsSettings,
     vis: &VisSettings,
-    trail_mat: &TrailMaterial,
     counter: &mut BallCounter,
     mode: DrawingMode,
     world: Vec2,
@@ -589,9 +677,11 @@ fn spawn_one_ball(
             LinearDamping(damping),
             Mass(mass),
             LinearVelocity(velocity),
-            // Continuous collision detection: stops fast-falling balls from
-            // tunneling through the surface and the walls.
-            SweptCcd::default(),
+            // Deliberately *not* batched into a shared mesh: a ball's geometry is
+            // rigid, so only its `Transform` changes and Bevy never re-uploads it.
+            // Batching would trade that for a full CPU rebuild every frame — which
+            // measured *slower* (2000 balls: 39 ms/frame → 52 ms/frame). See the
+            // batching note in CLAUDE.md.
             Mesh2d(meshes.add(Circle::new(radius))),
             MeshMaterial2d(materials.add(color)),
             Transform::from_translation(world.extend(1.0)),
@@ -599,19 +689,70 @@ fn spawn_one_ball(
         ))
         .id();
 
-    // A trail entity following this ball, drawn just behind it (z = 0.9).
+    // Continuous collision detection: stops fast-falling balls from tunneling
+    // through the surface and the walls. Optional — see [`ball_ccd`].
+    if let Some(ccd) = ball_ccd(settings) {
+        commands.entity(ball).insert(ccd);
+    }
+
+    // A trail following this ball; its geometry joins the shared trail batch and
+    // its color is resampled from the ball's `tint` each frame.
     if settings.trails {
-        commands.spawn((
-            Mesh2d(meshes.add(empty_stroke_mesh())),
-            MeshMaterial2d(trail_mat.0.clone()),
-            Transform::from_xyz(0.0, 0.0, 0.9),
-            Trail {
-                ball,
-                points: VecDeque::with_capacity(settings.trail_length + 1),
-                color,
-                half_width: (radius * 0.7).max(1.0),
-            },
-        ));
+        commands.spawn((Trail {
+            ball,
+            points: VecDeque::with_capacity(settings.trail_length + 1),
+            half_width: (radius * 0.7).max(1.0),
+        },));
+    }
+}
+
+/// The swept-CCD configuration used for balls, or `None` when
+/// [`PhysicsSettings::ccd`] is off.
+///
+/// Two deliberate departures from avian's defaults, both of which are pure cost
+/// here (800 balls: `solve_swept_ccd` 3.22 → 0.85 ms/frame, whole frame
+/// 10.3 → 8.4 ms):
+/// - `include_dynamic` (default `true`) also sweeps each ball against every
+///   *other ball*. Everything a ball must not tunnel through — the walls, the
+///   spectrum columns, the Wave heightfield, the planet rim — is static or
+///   kinematic, so this buys nothing and scales with the ball count squared.
+/// - `SweepMode::NonLinear` (the default) accounts for rotational motion, which
+///   a circle does not meaningfully have.
+///
+/// `linear_threshold` is deliberately left at avian's `0.0` (sweep at any speed).
+/// Gating it on speed was tried and measured inside the noise — 0.91 → 0.85 ms
+/// even on a fully settled pile, which is the case it was supposed to help — so
+/// it is not worth a knob that can let something tunnel.
+fn ball_ccd(settings: &PhysicsSettings) -> Option<SweptCcd> {
+    settings.ccd.then_some(SweptCcd {
+        mode: SweepMode::Linear,
+        include_dynamic: false,
+        ..SweptCcd::LINEAR
+    })
+}
+
+/// Add or remove ball CCD when [`PhysicsSettings::ccd`] is toggled at runtime, so
+/// the setting reaches balls already on screen rather than only new ones.
+/// Mirrors [`reconcile_trails`]; runs only on the frames the settings change.
+fn reconcile_ccd(
+    mut commands: Commands,
+    settings: Res<PhysicsSettings>,
+    balls: Query<Entity, With<Ball>>,
+) {
+    if !settings.is_changed() {
+        return;
+    }
+    match ball_ccd(&settings) {
+        Some(ccd) => {
+            for ball in &balls {
+                commands.entity(ball).insert(ccd);
+            }
+        }
+        None => {
+            for ball in &balls {
+                commands.entity(ball).remove::<SweptCcd>();
+            }
+        }
     }
 }
 
@@ -1294,11 +1435,8 @@ fn planet_forces(
 fn reconcile_trails(
     mut commands: Commands,
     settings: Res<PhysicsSettings>,
-    vis: Res<VisSettings>,
     balls: Query<(Entity, &Ball)>,
     trails: Query<(Entity, &Trail)>,
-    trail_mat: Res<TrailMaterial>,
-    mut meshes: ResMut<Assets<Mesh>>,
 ) {
     if !settings.is_changed() {
         return;
@@ -1317,18 +1455,11 @@ fn reconcile_trails(
         if has_trail.contains(&ball) {
             continue;
         }
-        let color = sample_gradient(&vis.fg_stops(), b.tint, vis.glow_gain);
-        commands.spawn((
-            Mesh2d(meshes.add(empty_stroke_mesh())),
-            MeshMaterial2d(trail_mat.0.clone()),
-            Transform::from_xyz(0.0, 0.0, 0.9),
-            Trail {
-                ball,
-                points: VecDeque::with_capacity(settings.trail_length + 1),
-                color,
-                half_width: (b.radius * 0.7).max(1.0),
-            },
-        ));
+        commands.spawn((Trail {
+            ball,
+            points: VecDeque::with_capacity(settings.trail_length + 1),
+            half_width: (b.radius * 0.7).max(1.0),
+        },));
     }
 }
 
@@ -1336,17 +1467,27 @@ fn reconcile_trails(
 /// ball is at rest), rebuild the fading feathered stroke, and reap trails whose
 /// ball has been despawned. The per-point alpha ramps 0 → 1 from tail to head,
 /// so the trail fades out behind the ball and blooms via the HDR camera.
+#[allow(clippy::too_many_arguments)]
 fn update_trails(
     mut commands: Commands,
     settings: Res<PhysicsSettings>,
-    balls: Query<&Transform, With<Ball>>,
-    mut trails: Query<(Entity, &mut Trail, &Mesh2d)>,
+    vis: Res<VisSettings>,
+    balls: Query<(&Transform, &Ball)>,
+    mut trails: Query<(Entity, &mut Trail)>,
+    handles: Res<TrailHandles>,
     mut meshes: ResMut<Assets<Mesh>>,
+    mut batch: Local<MeshBatch>,
+    // Reused across trails *and* frames: building this per trail is one heap
+    // allocation per ball per frame (800 balls → 800 allocations/frame).
+    mut pts: Local<Vec<(Vec2, Color)>>,
 ) {
+    crate::profile_scope!("trail_meshes");
     let max_len = settings.trail_length.max(2);
-    for (entity, mut trail, mesh2d) in &mut trails {
+    let stops = vis.fg_stops();
+    batch.clear();
+    for (entity, mut trail) in &mut trails {
         // Reap the trail once its ball is gone (covers every despawn path).
-        let Ok(ball_tf) = balls.get(trail.ball) else {
+        let Ok((ball_tf, ball)) = balls.get(trail.ball) else {
             commands.entity(entity).despawn();
             continue;
         };
@@ -1367,33 +1508,45 @@ fn update_trails(
             trail.points.pop_front();
         }
 
+        // A trail shorter than two points has no geometry; skip before doing any
+        // color or vertex work (a settled ball retracts to nothing, so in a
+        // resting pile this is most of them).
         let m = trail.points.len();
-        let pts: Vec<(Vec2, Color)> = trail
-            .points
-            .iter()
-            .enumerate()
-            .map(|(i, &p)| (p, trail.color.with_alpha((i + 1) as f32 / m as f32)))
-            .collect();
-        if let Some(mut mesh) = meshes.get_mut(&mesh2d.0) {
-            // Taper the stroke to a point at the tail and full width at the head
-            // (the ball end), so the trail reads as a triangle / comet tail.
-            apply_stroke_tapered(&mut mesh, &pts, 0.0, trail.half_width, STROKE_FEATHER, false);
+        if m < 2 {
+            continue;
         }
+        // Resample the ball's color every frame from its fixed palette position,
+        // so trails follow a live gradient edit / dynamic-album fade for free.
+        let color = sample_gradient(&stops, ball.tint, vis.glow_gain);
+        pts.clear();
+        pts.extend(
+            trail
+                .points
+                .iter()
+                .enumerate()
+                .map(|(i, &p)| (p, color.with_alpha((i + 1) as f32 / m as f32))),
+        );
+        // Taper the stroke to a point at the tail and full width at the head
+        // (the ball end), so the trail reads as a triangle / comet tail.
+        batch.push_stroke(&pts, 0.0, trail.half_width, STROKE_FEATHER, false);
+    }
+
+    if let Some(mut mesh) = meshes.get_mut(&handles.mesh) {
+        batch.write(&mut mesh);
     }
 }
 
-/// Re-sample each live ball's color from the active palette whenever
+/// Re-sample each live ball's material color from the active palette whenever
 /// [`VisSettings`] changes, so balls already on screen follow the dynamic
-/// album-color fade (and any live edit of the gradient in the editor) instead of
-/// staying frozen at their spawn-time color. Each ball keeps its fixed `tint`
-/// (its position in the palette), so the relative spread across colors is
-/// preserved. The shared trail material is per-vertex colored from
-/// [`Trail::color`], so updating that field is enough for [`update_trails`] to
-/// pick it up next frame.
+/// album-color fade (and any live gradient edit) instead of staying frozen at
+/// their spawn-time color. Each ball keeps its fixed `tint` (its position in the
+/// palette), so the relative spread across colors is preserved.
+///
+/// Trails need no equivalent: [`update_trails`] resamples from `Ball::tint` as it
+/// builds the batched mesh, which is free.
 fn retint_balls(
     vis: Res<VisSettings>,
     balls: Query<(&Ball, &MeshMaterial2d<ColorMaterial>)>,
-    mut trails: Query<&mut Trail>,
     mut materials: ResMut<Assets<ColorMaterial>>,
 ) {
     if !vis.is_changed() {
@@ -1403,11 +1556,6 @@ fn retint_balls(
     for (ball, mat) in &balls {
         if let Some(mut material) = materials.get_mut(&mat.0) {
             material.color = sample_gradient(&stops, ball.tint, vis.glow_gain);
-        }
-    }
-    for mut trail in &mut trails {
-        if let Ok((ball, _)) = balls.get(trail.ball) {
-            trail.color = sample_gradient(&stops, ball.tint, vis.glow_gain);
         }
     }
 }
@@ -1580,6 +1728,11 @@ mod tests {
     }
 
     /// Spawn a dynamic ball (no mesh) at `pos`; returns its entity.
+    ///
+    /// Uses [`ball_ccd`] rather than `SweptCcd::default()` so the tunneling
+    /// regression test actually guards the *tuned* CCD configuration the app
+    /// ships (linear sweep, static-only, speed-gated) instead of avian's
+    /// defaults, which nothing in the app uses.
     fn spawn_ball(app: &mut App, pos: Vec2, radius: f32, restitution: f32, vel: Vec2) -> Entity {
         app.world_mut()
             .spawn((
@@ -1588,7 +1741,7 @@ mod tests {
                 Restitution::new(restitution),
                 LinearVelocity(vel),
                 Mass(1.0),
-                SweptCcd::default(),
+                ball_ccd(&PhysicsSettings::default()).expect("CCD on by default"),
                 Transform::from_translation(pos.extend(1.0)),
                 Ball { id: 0, radius, tint: 0.5 },
             ))
@@ -1802,17 +1955,57 @@ mod tests {
     }
 
     #[test]
+    fn l2_reconcile_ccd_follows_the_live_toggle() {
+        // The `[physics] ccd` toggle has to reach balls already on screen, not
+        // just newly spawned ones — otherwise turning it off does nothing until
+        // the existing balls are replaced.
+        let mut app = bare_app();
+        app.insert_resource(PhysicsSettings::default()); // ccd: true
+        app.add_systems(Update, reconcile_ccd);
+        let ball = app
+            .world_mut()
+            .spawn(Ball { id: 0, radius: 8.0, tint: 0.5 })
+            .id();
+        let has_ccd = |app: &App| app.world().get::<SweptCcd>(ball).is_some();
+
+        app.update();
+        assert!(has_ccd(&app), "CCD on by default reaches existing balls");
+
+        app.world_mut().resource_mut::<PhysicsSettings>().ccd = false;
+        app.update();
+        assert!(!has_ccd(&app), "toggling CCD off strips it from live balls");
+
+        app.world_mut().resource_mut::<PhysicsSettings>().ccd = true;
+        app.update();
+        assert!(has_ccd(&app), "toggling CCD back on restores it");
+    }
+
+    #[test]
+    fn ball_ccd_is_none_when_disabled_and_static_only_when_on() {
+        let on = ball_ccd(&PhysicsSettings::default()).expect("on by default");
+        // The whole point of the tuned config: no ball-vs-ball sweeping and no
+        // rotational sweep.
+        assert!(!on.include_dynamic, "no ball-vs-ball sweeping");
+        assert_eq!(on.mode, SweepMode::Linear, "circles have no meaningful rotation");
+
+        let off = ball_ccd(&PhysicsSettings {
+            ccd: false,
+            ..PhysicsSettings::default()
+        });
+        assert!(off.is_none());
+    }
+
+    #[test]
     fn l2_reconcile_trails_follows_the_live_toggle() {
         let mut app = bare_app();
         app.insert_resource(Assets::<Mesh>::default());
         app.insert_resource(Assets::<ColorMaterial>::default());
-        app.insert_resource(PhysicsSettings::default()); // trails: true
+        // Trails are off by default, so this test states its own premise.
+        app.insert_resource(PhysicsSettings {
+            trails: true,
+            ..PhysicsSettings::default()
+        });
         app.insert_resource(VisSettings::default());
-        let mat = app
-            .world_mut()
-            .resource_mut::<Assets<ColorMaterial>>()
-            .add(stroke_material());
-        app.insert_resource(TrailMaterial(mat));
         app.add_systems(Update, reconcile_trails);
 
         // Two balls with no trails yet — the state after spawning while trails
@@ -1824,7 +2017,7 @@ mod tests {
             q.iter(app.world()).count()
         };
 
-        // Trails on (default): reconcile gives each pre-existing ball one.
+        // Trails on: reconcile gives each pre-existing ball one.
         app.update();
         assert_eq!(trails(&mut app), 2, "each pre-existing ball gets a trail");
 

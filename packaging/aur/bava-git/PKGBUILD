@@ -1,0 +1,91 @@
+# Maintainer: dekuraan <declan.li.carney@gmail.com>
+pkgname=bava-git
+pkgver=r31.g697d611
+pkgrel=1
+pkgdesc="Music visualizer driven by cavacore, MPRIS, and PipeWire/PulseAudio (git)"
+arch=('x86_64')
+url="https://github.com/dekuraan/bava"
+license=('MIT' 'Apache-2.0')
+depends=(
+    'gcc-libs'
+    'glibc'
+    'libpulse'
+    'libpipewire'
+    'dbus'
+    'libxkbcommon'
+    'wayland'
+    'libx11'
+    'libxcursor'
+    'libxrandr'
+    'libxi'
+    'vulkan-icd-loader'
+    'systemd-libs'
+    'hicolor-icon-theme'
+)
+makedepends=(
+    'cargo'
+    'clang'      # libspa-sys runs bindgen over the PipeWire headers
+    'pkgconf'
+    'pipewire'   # headers for the same
+    'git'
+)
+optdepends=(
+    'pipewire-pulse: PipeWire as PulseAudio drop-in (replaces libpulse at runtime)'
+    'spotifyd: Spotify MPRIS player for album art and now-playing info'
+    'ffmpeg: offline music-video rendering (--input song.mp3 --out video.mp4)'
+    'vulkan-radeon: Vulkan driver for AMD GPUs'
+    'vulkan-intel: Vulkan driver for Intel GPUs'
+    'nvidia-utils: Vulkan driver for NVIDIA GPUs'
+)
+provides=('bava')
+conflicts=('bava')
+# makepkg's `lto` option adds -Clinker-plugin-lto, which makes rustc emit
+# bitcode-only objects while the C shims our deps build (libspa's format
+# wrappers, ring's and blake3's asm) stay native — the final link then fails on
+# undefined spa_format_parse_libspa_rs / ring_core_*_OPENSSL_cpuid_setup.
+# profile.release already does thin LTO inside cargo, so nothing is lost.
+options=('!lto')
+source=('bava::git+https://github.com/dekuraan/bava.git')
+sha256sums=('SKIP')
+
+pkgver() {
+    cd "$srcdir/bava"
+    printf "r%s.g%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+prepare() {
+    cd "$srcdir/bava"
+    export RUSTUP_TOOLCHAIN=stable
+    cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+    cd "$srcdir/bava"
+    export RUSTUP_TOOLCHAIN=stable
+    export CARGO_TARGET_DIR=target
+    cargo build --frozen --release --package bava
+}
+
+check() {
+    cd "$srcdir/bava"
+    export RUSTUP_TOOLCHAIN=stable
+    # cavacore-rs only: the bava suite is headless but pulls in the asset and
+    # physics stacks, which is more than a build chroot should have to satisfy.
+    cargo test --frozen --release --package cavacore-rs
+}
+
+package() {
+    cd "$srcdir/bava"
+    install -Dm755 target/release/bava "$pkgdir/usr/bin/bava"
+
+    install -Dm644 flatpak/io.github.dekuraan.bava.desktop \
+        "$pkgdir/usr/share/applications/io.github.dekuraan.bava.desktop"
+    install -Dm644 flatpak/io.github.dekuraan.bava.svg \
+        "$pkgdir/usr/share/icons/hicolor/scalable/apps/io.github.dekuraan.bava.svg"
+    install -Dm644 flatpak/io.github.dekuraan.bava.metainfo.xml \
+        "$pkgdir/usr/share/metainfo/io.github.dekuraan.bava.metainfo.xml"
+
+    install -Dm644 LICENSE-MIT "$pkgdir/usr/share/licenses/$pkgname/LICENSE-MIT"
+    install -Dm644 LICENSE-APACHE "$pkgdir/usr/share/licenses/$pkgname/LICENSE-APACHE"
+    install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+}

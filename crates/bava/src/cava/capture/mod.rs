@@ -22,6 +22,9 @@ pub mod wasapi;
 #[cfg(target_os = "macos")]
 pub mod coreaudio;
 
+#[cfg(target_arch = "wasm32")]
+pub mod web;
+
 /// Open the platform's default capture backend as a boxed [`AudioCapture`].
 ///
 /// `device` optionally pins a source (a PulseAudio source name on Linux; ignored
@@ -29,6 +32,9 @@ pub mod coreaudio;
 /// `channels` are the format cavacore was planned for; backends that cannot force
 /// a format (WASAPI shared loopback) resample/convert to match. `frame_samples`
 /// is the per-channel read size the caller will use.
+///
+/// Not built for the web, which has no blocking capture to open — see [`web`].
+#[cfg(not(target_arch = "wasm32"))]
 pub fn open(
     device: Option<&str>,
     rate: u32,
@@ -76,7 +82,8 @@ pub fn open(
 /// A blocking source of interleaved PCM audio for cavacore.
 ///
 /// Implementations are moved onto a dedicated capture thread, so they only need
-/// to be [`Send`].
+/// to be [`Send`]. The web build has no capture thread and so no implementors.
+#[cfg(not(target_arch = "wasm32"))]
 pub trait AudioCapture: Send {
     /// Fill the **entire** `buf` with interleaved `f64` samples, blocking as
     /// needed. Backends capturing a live stream (PulseAudio monitor, WASAPI
@@ -93,6 +100,7 @@ pub trait AudioCapture: Send {
 }
 
 /// Error type shared by capture backends.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug)]
 pub enum CaptureError {
     /// The backend could not be initialized (no server, bad device, ...).
@@ -103,6 +111,7 @@ pub enum CaptureError {
     Read(String),
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl std::fmt::Display for CaptureError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -112,11 +121,15 @@ impl std::fmt::Display for CaptureError {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl std::error::Error for CaptureError {}
 
 // Used by the WASAPI (Windows) and Core Audio (macOS) backends. Compiled
 // unconditionally so rust-analyzer type-checks it on Linux; the dead_code lint
-// is suppressed only where it is actually unreachable.
+// is suppressed only where it is actually unreachable. The web build has no
+// resampling to do (the graph hands us the `AudioContext` rate and the plan is
+// rebuilt to match), so it is left out entirely there.
+#[cfg(not(target_arch = "wasm32"))]
 #[cfg_attr(
     not(any(target_os = "windows", target_os = "macos")),
     allow(dead_code)
@@ -129,6 +142,7 @@ pub(super) struct LinearResampler {
     frac: f64,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[cfg_attr(
     not(any(target_os = "windows", target_os = "macos")),
     allow(dead_code)

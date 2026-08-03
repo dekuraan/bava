@@ -44,8 +44,8 @@
     <name>dekuraan</name>
   </developer>
 
-  <!-- Flathub requires at least one screenshot. Replace this URL with a real
-       raw screenshot once one is committed (e.g. docs/screenshot.png). -->
+  <!-- Regenerate with packaging/screenshot.sh: bava's own offline renderer
+       drawing a synthesised test tone, so the shot is the real UI. -->
   <screenshots>
     <screenshot type="default">
       <image>https://raw.githubusercontent.com/dekuraan/bava/main/docs/screenshot.png</image>
