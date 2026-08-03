@@ -12,6 +12,19 @@ default-run = "bava"
 # `--no-default-features` to drop the libpipewire link on pure-PulseAudio hosts.
 default = ["pipewire"]
 pipewire = ["dep:pipewire"]
+# Puffin instrumentation (`cargo run -p bava --features profile`). Turns on
+# Bevy's `trace` feature (a `tracing` span around every system + render-graph
+# node) and bridges those spans into puffin, so the whole schedule shows up in
+# `puffin_viewer` without hand-instrumenting each system. Off by default: the
+# span machinery costs a little even when idle, and `bevy/trace` pulls `tracing`
+# into every system's hot path. See `src/profiling.rs`.
+profile = [
+    "bevy/trace",
+    "dep:puffin",
+    "dep:puffin_http",
+    "dep:tracing",
+    "dep:tracing-subscriber",
+]
 
 [dependencies]
 cavacore-rs.workspace = true
@@ -78,6 +91,21 @@ bevy_capture = "0.6"
 # Audio-file decoding for offline rendering (pure Rust). The defaults cover
 # flac/ogg/vorbis/wav/pcm; mp3 + m4a/aac are added on top.
 symphonia = { version = "0.6", features = ["mp3", "aac", "isomp4"] }
+
+# --- Profiling (`--features profile`, see `src/profiling.rs`). ---
+# The scope collector itself; its macros compile to an atomic load when scopes
+# are off, so instrumented hot paths stay cheap.
+puffin = { version = "0.20", optional = true }
+# Serves the collected frames on 127.0.0.1:8585 for `puffin_viewer`.
+puffin_http = { version = "0.17", optional = true }
+# The bridge: a `tracing_subscriber::Layer` turning Bevy's per-system spans into
+# puffin scopes, handed to `LogPlugin::custom_layer`.
+tracing = { version = "0.1", optional = true }
+tracing-subscriber = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+    "registry",
+    "fmt",
+] }
 
 # Configuration: CLI args (clap) layered over a TOML config file.
 clap = { version = "4", features = ["derive"] }
