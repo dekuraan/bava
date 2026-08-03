@@ -291,6 +291,13 @@ jobs:
   #   AUR_USERNAME, AUR_EMAIL  — must match the AUR account
   #   AUR_SSH_PRIVATE_KEY      — private half of a key registered at
   #                              https://aur.archlinux.org/account
+  #
+  # The deploy action is pinned to an exact tag because it publishes no floating
+  # major: `@v4` does not resolve, and v0.4.0's release failed on exactly that —
+  # "Unable to resolve action ... unable to find version `v4`". Note the failure
+  # happened even with every step's `if` false: GitHub resolves all of a job's
+  # actions *before* evaluating step conditions, so an unresolvable ref fails the
+  # job no matter what. Check the tag list before bumping this.
   publish-aur:
     name: Publish to AUR
     needs: release
@@ -321,7 +328,7 @@ jobs:
 
       - name: Publish
         if: env.AUR_KEY != ''
-        uses: KSXGitHub/github-actions-deploy-aur@v4
+        uses: KSXGitHub/github-actions-deploy-aur@v4.2.0
         with:
           pkgname: bava
           pkgbuild: packaging/aur/bava/PKGBUILD
