@@ -29,11 +29,19 @@ jobs:
       - uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          # Both are DoS-on-untrusted-XML in quick-xml <0.41. Our only path to
-          # it is `wayland-scanner`, a *proc-macro* that parses the Wayland
-          # protocol XML shipped alongside the wayland crates at build time —
-          # it never sees attacker-controlled input and isn't in the shipped
-          # binary. We can't upgrade regardless: wayland-scanner pins
-          # quick-xml `^0.39`, so nothing short of a winit/smithay bump moves
-          # it. Drop these two once that lands upstream.
-          ignore: RUSTSEC-2026-0194,RUSTSEC-2026-0195
+          # 0194/0195 are both DoS-on-untrusted-XML in quick-xml <0.41. Our
+          # only path to it is `wayland-scanner`, a *proc-macro* that parses
+          # the Wayland protocol XML shipped alongside the wayland crates at
+          # build time — it never sees attacker-controlled input and isn't in
+          # the shipped binary. We can't upgrade regardless: wayland-scanner
+          # pins quick-xml `^0.39`, so nothing short of a winit/smithay bump
+          # moves it. Drop these two once that lands upstream.
+          #
+          # 0192 (ttf-parser) and 2024-0436 (paste) are unmaintained-crate
+          # warnings, not vulnerabilities — neither has a patched release to
+          # move to. Both are transitive and unreachable from our manifest:
+          # ttf-parser via owned_ttf_parser -> ab_glyph -> sctk-adwaita ->
+          # winit, paste via simba -> parry2d -> avian2d. They go away when
+          # those upstreams drop the deps; until then they'd otherwise open a
+          # fresh issue on every scheduled run.
+          ignore: RUSTSEC-2026-0194,RUSTSEC-2026-0195,RUSTSEC-2026-0192,RUSTSEC-2024-0436
