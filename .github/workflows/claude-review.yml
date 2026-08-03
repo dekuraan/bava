@@ -1,0 +1,77 @@
+name: Claude review
+
+# Automatic PR review. Runs alongside CI (which only type-checks/tests) to catch
+# the things a compiler can't: Bevy 0.19 API drift, the collider/renderer
+# invariant, and the platform backends CI can only *type*-check.
+#
+# Dependabot PRs are skipped — dependabot-auto-merge.yml already gates them on
+# CI, and a dep bump has no code to review.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write
+  actions: read # so Claude can read the CI run's results on the PR
+
+# A force-push supersedes the in-flight review of the old head.
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    name: Review PR
+    runs-on: ubuntu-latest
+    if: github.actor != 'dependabot[bot]'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          # Set by `/install-github-app` in Claude Code. To use an API key
+          # instead, swap this for:
+          #   anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          track_progress: true
+          additional_permissions: |
+            actions: read
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            Review this pull request. The PR branch is already checked out in
+            the working directory, and CLAUDE.md documents the architecture —
+            read it before reviewing.
+
+            Focus on correctness and on this repo's specific traps:
+            - **Bevy 0.19.0 API drift.** Memorized 0.13–0.16 shapes are wrong.
+              Verify any Bevy API against the pinned source in ~/.cargo/registry
+              or the docs before calling it a bug.
+            - **Collider/renderer divergence** (vis/physics.rs). Colliders must
+              read the exact same per-bar values and layout transform the
+              renderer drew from — `bars::mirror_values()`, not raw
+              `cava.mono()`; the same `area_margin`/`area_offset` inset.
+            - **cavacore feeding.** Chunks must stay fixed-size; "all available"
+              stalls the autosens ramp.
+            - **Platform backends** (`cfg(target_os)`-gated). Windows is only
+              cross-checked and macOS isn't compiled at all in CI, so review
+              those paths by reading, and be extra careful there.
+            - Realtime-thread safety in the capture backends (no blocking, no
+              allocation in an IO proc), panics/unwraps on user input or
+              device state, and offline-render determinism (`record/`).
+
+            Be concise and specific. Only flag things you are confident are
+            real problems — say so plainly if the PR looks good rather than
+            manufacturing nits.
+
+            Use `gh pr comment` for the top-level summary and
+            `mcp__github_inline_comment__create_inline_comment` (with
+            `confirmed: true`) for specific lines. Only post GitHub comments —
+            don't emit review text as a chat message.
+          claude_args: |
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh run view:*),Bash(cargo tree:*)"
