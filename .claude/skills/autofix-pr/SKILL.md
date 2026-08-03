@@ -78,9 +78,16 @@ turn:
 
 ```sh
 # WAIT: bounded inline poll. The sleep and the check live in ONE Bash call.
-for i in $(seq 1 15); do gh pr checks <n> | grep -q pending || break; sleep 60; done
+# 7 rounds x 60s = 420s, comfortably under the ~600s per-call Bash timeout.
+for i in $(seq 1 7); do gh pr checks <n> | grep -q pending || break; sleep 60; done
 gh pr checks <n>
 ```
+
+**Keep every WAIT call under ~8 minutes of wall clock.** A single `Bash` call is killed and *moved to
+the background* at ~600s — which hands your wait to the background machinery and parks you, the exact
+failure this rule exists to prevent. So a WAIT is not one long call; it is a **short call you repeat**
+until the condition resolves or you hit the section's hard timeout. Budget `rounds × sleep < 480s` and
+issue the next WAIT call in the same turn.
 
 **Top-level session only.** You may instead end the turn and `ScheduleWakeup` with
 `delaySeconds: 270`, re-firing `/autofix-pr <PR>`.
@@ -227,9 +234,12 @@ The common steady state — review check `IN_PROGRESS`, well under 20 min — is
 > do *not* end your turn here and do *not* start a background poller. Stay in this turn:
 >
 > ```sh
-> for i in $(seq 1 20); do gh pr checks <n> | grep -q '^Review PR.*pending' || break; sleep 60; done
+> for i in $(seq 1 7); do gh pr checks <n> | grep -q '^Review PR.*pending' || break; sleep 60; done
 > gh pr checks <n>
 > ```
+>
+> Repeat that call (up to ~3 times for the 20-minute cap) rather than widening the loop — one call
+> over ~600s is killed and backgrounded, which parks you.
 >
 > Then continue straight into triage in the same turn. Only a top-level session may `ScheduleWakeup`
 > or exit to `/loop` here.
@@ -612,12 +622,12 @@ CI check `IN_PROGRESS` for ≥ 35 minutes is hung; note it and treat gate 2 as u
 > tempting to hand off. As a subagent, do not. Stay in this turn:
 >
 > ```sh
-> for i in $(seq 1 12); do gh pr checks <n> | grep -q pending || break; sleep 300; done
+> for i in $(seq 1 3); do gh pr checks <n> | grep -q pending || break; sleep 150; done
 > gh pr checks <n>
 > ```
 >
-> Repeat the call if you need more than 12 rounds, up to the 35-minute cap, then post the terminal
-> marker. `ScheduleWakeup` here is top-level-session only.
+> That is ~7.5 min per call, under the ~600s cap. Repeat it — roughly five times covers the
+> 35-minute limit — then post the terminal marker. `ScheduleWakeup` here is top-level-session only.
 
 #### When CI is red
 
