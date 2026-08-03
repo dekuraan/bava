@@ -7,6 +7,10 @@ members = [
 
 [workspace.package]
 edition = "2024"
+# Set by Bevy 0.19 (and bevy_egui 0.41), not by anything we write. Declared so
+# too-old toolchains get cargo's one-line explanation instead of a compile
+# error somewhere deep in a dependency.
+rust-version = "1.95"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/dekuraan/bava"
 
