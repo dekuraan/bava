@@ -32,7 +32,7 @@ jobs:
         with:
           fetch-depth: 1
 
-      - uses: anthropics/claude-code-action@v1
+      - uses: anthropics/claude-code-action@v1.0.183
         with:
           # Set by `/install-github-app` in Claude Code. To use an API key
           # instead, swap this for:
