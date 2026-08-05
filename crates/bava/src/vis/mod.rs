@@ -310,6 +310,12 @@ pub struct VisSettings {
     /// Crossfade time constant (seconds) when the dynamic palette changes on a new
     /// track. Larger = slower, more gradual color transition; ~0 snaps instantly.
     pub dynamic_color_fade: f32,
+    /// Gaussian blur on the album-art backdrop: `0` = sharp cover, `1` = a heavy
+    /// frosted wash. Applied on the CPU to a downscaled copy of the art.
+    pub art_blur: f32,
+    /// Brightness multiplier on the album-art backdrop (`0` = black, `1` = the
+    /// art's own brightness), keeping the bars readable over it.
+    pub art_brightness: f32,
     /// Runtime-only animated album colors (most vibrant first), eased toward the
     /// latest extracted set by [`animate_album_colors`]. Not serialized; when
     /// `Some` and [`dynamic_colors`](Self::dynamic_colors) is set it overrides the
@@ -345,6 +351,10 @@ impl Default for VisSettings {
             dynamic_colors: true,
             dynamic_color_count: 2,
             dynamic_color_fade: 0.4,
+            // A frosted backdrop no longer competes with the bars for attention,
+            // so it can be brighter than the sharp cover it replaced (0.4).
+            art_blur: 0.4,
+            art_brightness: 0.62,
             dynamic_fg: None,
         }
     }
