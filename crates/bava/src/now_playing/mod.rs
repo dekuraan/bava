@@ -70,6 +70,10 @@ pub struct AlbumArt {
     /// [`MAX_DYNAMIC_COLORS`]), for the dynamic color profile. `None` when there
     /// is no art or extraction failed.
     pub colors: Option<Vec<Color>>,
+    /// Downscaled, opaque copy of the art retained on the CPU so the HUD can
+    /// re-blur the backdrop when the blur slider moves, without re-decoding.
+    /// See [`downscale_for_blur`].
+    pub small: Option<image::RgbaImage>,
 }
 
 /// Decoded RGBA8 album art produced off-thread.
@@ -79,6 +83,8 @@ struct DecodedArt {
     height: u32,
     /// Accent colors extracted from the art on the decode thread.
     colors: Option<Vec<Color>>,
+    /// Downscaled copy for the blurred backdrop, resized on the decode thread.
+    small: image::RgbaImage,
 }
 
 /// Messages from the now-playing thread to the Bevy world.
@@ -229,11 +235,13 @@ fn apply_now_playing_updates(
                     debug!("bava: album colors — {colors:?}");
                 }
                 album_art.colors = art.colors;
+                album_art.small = Some(art.small);
             }
             NowPlayingMsg::Art(None) => {
                 album_art.image = None;
                 album_art.size = None;
                 album_art.colors = None;
+                album_art.small = None;
             }
         }
     }
@@ -261,19 +269,50 @@ fn decode_art_bytes(bytes: &[u8]) -> Option<DecodedArt> {
     let img = image::load_from_memory(bytes).ok()?;
     let rgba = img.to_rgba8();
     let (width, height) = rgba.dimensions();
-    let pixels = rgba.into_raw();
     // A zero-area / empty decode would build a degenerate texture and can panic
     // color_thief's quantizer — treat it as "no art".
-    if width == 0 || height == 0 || pixels.is_empty() {
+    if width == 0 || height == 0 || rgba.is_empty() {
         return None;
     }
+    let small = downscale_for_blur(&rgba);
+    let pixels = rgba.into_raw();
     let colors = extract_palette(&pixels);
     Some(DecodedArt {
         rgba: pixels,
         width,
         height,
         colors,
+        small,
     })
+}
+
+/// Longest side of the downscaled copy kept for the blurred backdrop.
+///
+/// The backdrop is a heavy blur stretched over the whole window, so any detail
+/// finer than this is destroyed by the blur regardless — and blurring 256px
+/// instead of a 3000px cover is what makes a *live* blur slider affordable
+/// (the GPU's bilinear filtering does the upscale for free).
+const ART_BLUR_SOURCE_MAX: u32 = 256;
+
+/// Downscale album art to at most [`ART_BLUR_SOURCE_MAX`] on its longest side,
+/// preserving aspect, and force it opaque. Runs on the decode thread.
+fn downscale_for_blur(rgba: &image::RgbaImage) -> image::RgbaImage {
+    let (w, h) = rgba.dimensions();
+    let scale = (ART_BLUR_SOURCE_MAX as f32 / w.max(h) as f32).min(1.0);
+    let sw = ((w as f32 * scale).round() as u32).max(1);
+    let sh = ((h as f32 * scale).round() as u32).max(1);
+    let mut small = if (sw, sh) == (w, h) {
+        rgba.clone()
+    } else {
+        image::imageops::resize(rgba, sw, sh, image::imageops::FilterType::Triangle)
+    };
+    // `fast_blur` assumes premultiplied alpha, and a full-window backdrop wants
+    // to be opaque anyway — so flatten transparency here rather than let it
+    // bleed dark halos into the blur.
+    for px in small.pixels_mut() {
+        px.0[3] = u8::MAX;
+    }
+    small
 }
 
 /// Maximum number of accent colors extracted from album art (the dynamic-color
@@ -363,4 +402,50 @@ fn extract_palette(rgba: &[u8]) -> Option<Vec<Color>> {
     }
 
     Some(chosen)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A `w`×`h` cover with a fully transparent pixel, to check both the
+    /// downscale bounds and the opacity flattening.
+    fn art(w: u32, h: u32) -> image::RgbaImage {
+        let mut img = image::RgbaImage::from_pixel(w, h, image::Rgba([200, 40, 90, 255]));
+        img.put_pixel(0, 0, image::Rgba([0, 0, 0, 0]));
+        img
+    }
+
+    #[test]
+    fn downscale_caps_longest_side_and_keeps_aspect() {
+        let small = downscale_for_blur(&art(3000, 1500));
+        assert_eq!(small.dimensions(), (ART_BLUR_SOURCE_MAX, 128));
+    }
+
+    #[test]
+    fn downscale_leaves_small_art_alone() {
+        // Already under the cap: upscaling would only cost memory and blur time.
+        let small = downscale_for_blur(&art(64, 64));
+        assert_eq!(small.dimensions(), (64, 64));
+    }
+
+    #[test]
+    fn downscale_never_collapses_a_thin_cover_to_zero() {
+        // A 4000×1 strip rounds its short side to 0 without the `.max(1)`, and a
+        // zero-area texture is a GPU validation error.
+        let small = downscale_for_blur(&art(4000, 1));
+        assert_eq!(small.dimensions(), (ART_BLUR_SOURCE_MAX, 1));
+    }
+
+    #[test]
+    fn downscale_forces_opaque() {
+        // `fast_blur` assumes premultiplied alpha; transparent pixels left in
+        // place bleed dark halos through the backdrop.
+        for small in [
+            downscale_for_blur(&art(512, 512)),
+            downscale_for_blur(&art(8, 8)),
+        ] {
+            assert!(small.pixels().all(|p| p.0[3] == u8::MAX));
+        }
+    }
 }

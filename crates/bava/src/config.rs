@@ -255,6 +255,10 @@ pub struct VisConfig {
     pub dynamic_color_count: usize,
     /// Crossfade time, in seconds, when dynamic colors change on a new track.
     pub dynamic_color_fade: f32,
+    /// Blur on the album-art backdrop: 0 = sharp cover, 1 = heavy frosted wash.
+    pub art_blur: f32,
+    /// Brightness of the album-art backdrop (0 = black, 1 = the art's own).
+    pub art_brightness: f32,
 }
 
 /// `[[vis.profile]]` — a named color scheme.
@@ -431,6 +435,8 @@ impl Config {
                 dynamic_colors: vis.dynamic_colors,
                 dynamic_color_count: vis.dynamic_color_count,
                 dynamic_color_fade: vis.dynamic_color_fade,
+                art_blur: vis.art_blur,
+                art_brightness: vis.art_brightness,
             },
             physics: PhysicsConfig {
                 enabled: physics.enabled,
@@ -715,6 +721,8 @@ impl Config {
                 .dynamic_color_count
                 .clamp(2, crate::now_playing::MAX_DYNAMIC_COLORS),
             dynamic_color_fade: v.dynamic_color_fade.max(0.0),
+            art_blur: v.art_blur.clamp(0.0, 1.0),
+            art_brightness: v.art_brightness.max(0.0),
             dynamic_fg: None,
         }
     }

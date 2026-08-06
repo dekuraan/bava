@@ -114,6 +114,38 @@ impl FfmpegEncoder {
     }
 }
 
+/// Exactly one frame of RGBA — `width × height × 4` bytes — from a captured
+/// image, discarding any trailing readback padding.
+///
+/// **The padding is not cosmetic.** The GPU→CPU copy behind `bevy_capture` can
+/// hand back a buffer larger than the frame (at 960×540 it is 2 211 840 bytes,
+/// 36 rows past the 2 073 600 the frame needs), with the slack after the last
+/// row. ffmpeg reads *fixed-size* frames off the pipe, so writing the slack
+/// desynchronises the stream: frame 0 is correct, and every frame after it is
+/// shifted down by `padding / row_bytes` rows with the padding showing through
+/// as a black band at the wrap. Whether there is slack depends on the
+/// resolution — 1280×720 and 800×600 come back exact while 640×360, 960×540 and
+/// 1920×1080 do not — which is why this went unnoticed.
+///
+/// Rows themselves are contiguous (a *row* stride mismatch would shear the
+/// picture, and frame 0 is pixel-perfect), so truncating is the whole fix.
+fn frame_payload(image: &Image) -> Result<&[u8]> {
+    let data = image
+        .data
+        .as_ref()
+        .ok_or("captured frame has no CPU-side data")?;
+    let needed = image.width() as usize * image.height() as usize * 4;
+    data.get(..needed).ok_or_else(|| {
+        format!(
+            "captured frame is {} bytes, short of the {needed} a {}x{} RGBA frame needs",
+            data.len(),
+            image.width(),
+            image.height(),
+        )
+        .into()
+    })
+}
+
 impl Encoder for FfmpegEncoder {
     fn encode(&mut self, image: &Image) -> Result<()> {
         let Some(stdin) = self.stdin.as_mut() else {
@@ -126,10 +158,7 @@ impl Encoder for FfmpegEncoder {
                 _ => Err("ffmpeg stdin already closed".into()),
             };
         };
-        let data = image
-            .data
-            .as_ref()
-            .ok_or("captured frame has no CPU-side data")?;
+        let data = frame_payload(image)?;
         if let Err(e) = stdin.write_all(data) {
             // ffmpeg stopped reading. With output trimming (`-t`) it
             // legitimately closes the pipe the moment it has every frame it
@@ -182,4 +211,57 @@ pub fn ffmpeg_available() -> bool {
         .stderr(Stdio::null())
         .status()
         .is_ok_and(|s| s.success())
+}
+
+#[cfg(test)]
+mod tests {
+    use bevy::asset::RenderAssetUsages;
+    use bevy::image::Image;
+    use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+
+    use super::frame_payload;
+
+    /// A `w`×`h` RGBA image whose buffer carries `extra_rows` of trailing
+    /// readback padding, as the GPU copy hands it back at some resolutions.
+    fn padded(w: u32, h: u32, extra_rows: u32) -> Image {
+        let row = w as usize * 4;
+        let mut data = vec![0xABu8; row * h as usize];
+        data.extend(std::iter::repeat_n(0u8, row * extra_rows as usize));
+        let mut image = Image::new(
+            Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+            TextureDimension::D2,
+            vec![0; row * h as usize],
+            TextureFormat::Rgba8UnormSrgb,
+            RenderAssetUsages::RENDER_WORLD,
+        );
+        image.data = Some(data);
+        image
+    }
+
+    #[test]
+    fn trailing_readback_padding_is_stripped() {
+        // The regression: piping the padding to ffmpeg desynchronises its
+        // fixed-size frame reads, rolling every frame after the first.
+        let image = padded(960, 540, 36);
+        let out = frame_payload(&image).unwrap();
+        assert_eq!(out.len(), 960 * 540 * 4);
+        assert!(out.iter().all(|&b| b == 0xAB), "kept only real frame rows");
+    }
+
+    #[test]
+    fn an_exact_buffer_is_passed_through() {
+        let image = padded(1280, 720, 0);
+        assert_eq!(frame_payload(&image).unwrap().len(), 1280 * 720 * 4);
+    }
+
+    #[test]
+    fn a_short_buffer_is_an_error_not_a_truncated_frame() {
+        let mut image = padded(64, 64, 0);
+        image.data.as_mut().unwrap().truncate(64 * 63 * 4);
+        assert!(frame_payload(&image).is_err());
+    }
 }

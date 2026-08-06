@@ -398,6 +398,18 @@ fn colors_section(ui: &mut egui::Ui, vis: &mut VisSettings) {
         )
         .on_hover_text("Crossfade time when the palette changes on a new track. 0 = instant.");
     }
+    ui.add(
+        egui::Slider::new(&mut vis.art_blur, 0.0..=1.0)
+            .text("art blur")
+            .step_by(0.01),
+    )
+    .on_hover_text("Blur the album-art backdrop. 0 = sharp cover, 1 = heavy frosted wash.");
+    ui.add(
+        egui::Slider::new(&mut vis.art_brightness, 0.0..=1.0)
+            .text("art brightness")
+            .step_by(0.01),
+    )
+    .on_hover_text("Brightness of the album-art backdrop. Lower keeps the bars readable.");
     ui.separator();
 
     if vis.profiles.is_empty() {
