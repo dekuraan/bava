@@ -35,7 +35,7 @@ jobs:
           key: wasm
           cache-on-failure: true
 
-      - uses: jetli/trunk-action@v0.5.0
+      - uses: jetli/trunk-action@v0.5.1
         with:
           version: latest
 
@@ -52,7 +52,7 @@ jobs:
 
       - name: Upload artifact
         if: github.event_name != 'pull_request'
-        uses: actions/upload-pages-artifact@v4
+        uses: actions/upload-pages-artifact@v5
         with:
           path: dist
 
@@ -69,4 +69,4 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
