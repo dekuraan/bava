@@ -55,20 +55,7 @@ const WALL_THICKNESS: f32 = 200.0;
 const SAMPLES: usize = 192;
 /// Park an inactive surface/planet/column body far outside the world.
 const PARKED: f32 = 1.0e6;
-/// When ejecting a ball trapped inside the planet blob, give it enough outward
-/// speed to clear the rim by this many ball-radii against `central_gravity`,
-/// instead of dribbling out and immediately re-sinking — which reads as a ball
-/// "stuck in the orb".
-const EJECT_CLEARANCE_RADII: f32 = 4.0;
-/// On eject, also guarantee the ball at least this fraction of circular-orbit
-/// speed *tangentially*. A purely radial kick (the old behaviour) lets a ball
-/// with little sideways motion hop straight out and fall straight back into the
-/// contact band, re-triggering the unstick every frame — it quivers at the rim
-/// forever (the residual "stuck pulsing at the orb edge" case). A tangential
-/// floor turns that radial bob into an orbit that carries the ball clear. It's a
-/// no-op for balls already orbiting faster than this.
-const EJECT_ORBIT_FRACTION: f32 = 0.6;
-/// Floor outward speed (px/s) used to unstick a ball a surface/column/blob has
+/// Floor outward speed (px/s) used to unstick a ball a box surface/column has
 /// swallowed, so even a stationary swallowed ball is carried back out.
 const UNSTICK_FLOOR: f32 = 120.0;
 /// How many balls a single right-click spawns (left-click spawns one).
@@ -290,7 +277,9 @@ impl Plugin for PhysicsPlugin {
                     (reconcile_columns, update_columns, push_columns)
                         .chain()
                         .after(on_mode_change),
-                    (update_planet, planet_forces).chain().after(on_mode_change),
+                    (update_planet, planet_forces, planet_gravity)
+                        .chain()
+                        .after(on_mode_change),
                     reconcile_trails,
                     reconcile_ccd,
                     retint_balls,
@@ -303,7 +292,13 @@ impl Plugin for PhysicsPlugin {
             // Ball and trail geometry is built from the *simulated* transforms,
             // so it has to run after avian writes them back — in `Update` it
             // would render every ball and trail head one frame stale.
-            .add_systems(PostUpdate, update_trails.after(PhysicsSystems::Writeback));
+            .add_systems(
+                PostUpdate,
+                (recover_planet_penetration, update_trails)
+                    .chain()
+                    .after(PhysicsSystems::Writeback)
+                    .before(bevy::transform::TransformSystems::Propagate),
+            );
     }
 }
 
@@ -478,6 +473,7 @@ fn setup_physics(
     commands.spawn((
         RigidBody::Kinematic,
         Collider::circle(10.0),
+        CollisionMargin(0.0),
         Restitution::new(settings.bar_restitution),
         Friction::new(0.0).with_combine_rule(CoefficientCombine::Min),
         Transform::from_xyz(PARKED, PARKED, 0.0),
@@ -697,7 +693,7 @@ fn spawn_one_ball(
             // rigid, so only its `Transform` changes and Bevy never re-uploads it.
             // Batching would trade that for a full CPU rebuild every frame — which
             // measured *slower* (2000 balls: 39 ms/frame → 52 ms/frame). See the
-            // batching note in CLAUDE.md.
+            // batching note in AGENTS.md.
             Mesh2d(meshes.add(Circle::new(radius))),
             MeshMaterial2d(materials.add(color)),
             Transform::from_translation(world.extend(1.0)),
@@ -1233,16 +1229,16 @@ fn update_planet(
     vis: Res<VisSettings>,
     windows: Query<&Window>,
     planet: ResMut<Planet>,
-    mut body: Query<(&mut Collider, &mut Transform), With<PlanetBody>>,
-    // (extent, inner_radius, rotation) of the last active frame; `None` after
+    mut body: Query<(&mut Collider, &mut Transform, &mut CollisionMargin), With<PlanetBody>>,
+    // (extent, inner_radius, rotation, half-width) of the last active frame; `None` after
     // a parked stretch. Same role as `update_columns`' guard: a geometry
     // change must not read as one frame's radial expansion.
-    mut last_geom: Local<Option<(f32, f32, f32)>>,
+    mut last_geom: Local<Option<(f32, f32, f32, f32)>>,
 ) {
     if !settings.enabled {
         return;
     }
-    let Ok((mut collider, mut transform)) = body.single_mut() else {
+    let Ok((mut collider, mut transform, mut margin)) = body.single_mut() else {
         return;
     };
     if !planet_active(*mode) {
@@ -1274,10 +1270,23 @@ fn update_planet(
 
     // Cache radii (this frame + last) for the radial velocity field, and the
     // closed-loop indices (rebuilt only when the segment count changes).
-    let geom = (extent, vis.inner_radius, vis.rotation);
+    // The polyline follows the stroke center; its collision margin covers the
+    // visible half-width instead of letting balls sink into the drawn outline.
+    let thickness = (vis.line_thickness * 0.5).max(0.0);
+    if margin.0 != thickness {
+        margin.0 = thickness;
+    }
+    let geom = (extent, vis.inner_radius, vis.rotation, thickness);
     let resync = *last_geom != Some(geom);
     *last_geom = Some(geom);
     let planet = planet.into_inner();
+    let changed = resync
+        || planet.radii.len() != n
+        || planet
+            .radii
+            .iter()
+            .zip(&ring)
+            .any(|(r, p)| *r != p.length());
     if planet.radii.len() != n {
         planet.radii = ring.iter().map(|p| p.length()).collect();
         planet.prev = planet.radii.clone();
@@ -1294,154 +1303,136 @@ fn update_planet(
         planet.prev.copy_from_slice(&planet.radii);
     }
 
-    // Closed-loop polyline matching the rendered blob (positions change each
-    // frame, so the BVH rebuild is unavoidable; the index list is reused).
-    *collider = Collider::polyline(ring, Some(planet.indices.clone()));
+    // Keep steady geometry intact so contacts can settle without a BVH rebuild.
+    if changed {
+        *collider = Collider::polyline(ring, Some(planet.indices.clone()));
+    }
 }
 
-/// Planet-mode radial forces: pull every ball toward the center, fling balls the
-/// expanding blob touches outward along the radius, and unstick any it swallows.
+/// Radial gravity is integrated by Avian so settled contacts can sleep.
+fn planet_gravity(
+    mode: Res<DrawingMode>,
+    settings: Res<PhysicsSettings>,
+    body: Query<Ref<Collider>, With<PlanetBody>>,
+    mut balls: Query<(Forces, &Transform), With<Ball>>,
+) {
+    if !settings.enabled || !planet_active(*mode) {
+        return;
+    }
+    let shape_changed = body.single().is_ok_and(|collider| collider.is_changed());
+    for (mut forces, transform) in &mut balls {
+        let direction = -transform.translation.truncate().normalize_or_zero();
+        let acceleration = direction * settings.central_gravity;
+        // Replacing a collider shape does not wake contacts automatically.
+        // In particular, a shrinking orb must not leave sleeping balls floating.
+        if shape_changed {
+            forces.apply_linear_acceleration(acceleration);
+        } else {
+            forces.non_waking().apply_linear_acceleration(acceleration);
+        }
+    }
+}
+
+/// Radius of the actual polygon edge along a ray from the orb's center.
+fn planet_radius(radii: &[f32], outward: Vec2, rotation: f32) -> f32 {
+    use std::f32::consts::{FRAC_PI_2, TAU};
+    let n = radii.len();
+    let segment =
+        ((outward.y.atan2(outward.x) + FRAC_PI_2 - rotation) / TAU).rem_euclid(1.0) * n as f32;
+    let k = segment.floor() as usize % n;
+    let point = |i: usize| {
+        let angle = i as f32 / n as f32 * TAU - FRAC_PI_2 + rotation;
+        Vec2::new(angle.cos(), angle.sin()) * radii[i % n]
+    };
+    let a = point(k);
+    let b = point(k + 1);
+    a.perp_dot(b) / outward.perp_dot(b - a)
+}
+
+/// Put a swallowed ball beyond all edges within its angular footprint.
+/// Normal rim contacts are left to the solver; this only handles centers inside
+/// the hollow polyline after spawning or a shape change.
+fn planet_clearance(radii: &[f32], outward: Vec2, rotation: f32, radius: f32) -> f32 {
+    use std::f32::consts::{FRAC_PI_2, TAU};
+    let surface = planet_radius(radii, outward, rotation);
+    let n = radii.len();
+    let segment =
+        ((outward.y.atan2(outward.x) + FRAC_PI_2 - rotation) / TAU).rem_euclid(1.0) * n as f32;
+    let k = segment.floor() as usize % n;
+    let half_arc = (radius / (surface + radius)).asin();
+    let span = (half_arc / (TAU / n as f32)).ceil() as usize + 1;
+    let mut rim = surface;
+    for offset in 0..=span {
+        rim = rim.max(radii[(k + offset) % n]);
+        rim = rim.max(radii[(k + n - offset % n) % n]);
+    }
+    rim + radius
+}
+
+/// Only a growing orb supplies launch velocity. Steady contacts get no kicks.
 fn planet_forces(
     mode: Res<DrawingMode>,
     settings: Res<PhysicsSettings>,
     vis: Res<VisSettings>,
     time: Res<Time>,
     planet: Res<Planet>,
-    mut balls: Query<(&mut Transform, &mut LinearVelocity, &Ball)>,
+    mut balls: Query<(&Transform, &mut LinearVelocity, &Ball)>,
 ) {
-    if !settings.enabled || !planet_active(*mode) {
+    if !settings.enabled || !planet_active(*mode) || planet.radii.len() < 3 {
         return;
     }
     let dt = time.delta_secs();
     if dt <= 0.0 {
         return;
     }
-    use std::f32::consts::{FRAC_PI_2, TAU};
-    let n = planet.radii.len();
-    let has_blob = n >= 3;
-    for (mut transform, mut vel, ball) in &mut balls {
+    for (transform, mut vel, ball) in &mut balls {
         let pos = transform.translation.truncate();
         let r = pos.length();
+        let outward = pos.try_normalize().unwrap_or(Vec2::Y);
+        let surface = planet_radius(&planet.radii, outward, vis.rotation);
+        let previous = planet_radius(&planet.prev, outward, vis.rotation);
+        let expand = (surface - previous) / dt;
 
-        // Outward unit direction. A ball sitting on (or arbitrarily close to) the
-        // center has no radial direction of its own, so fall back to its travel
-        // direction, then to a fixed axis — otherwise a dead-center ball could
-        // never be ejected and would stay buried in the blob forever (the bug
-        // this guards against: spawn in the middle → must leave the surface).
-        let outward = if r > 1.0 {
-            pos / r
-        } else if vel.0.length_squared() > 1.0 {
-            vel.0.normalize()
-        } else {
-            Vec2::Y
-        };
-
-        // With no blob geometry yet (startup, before `update_planet` runs) and no
-        // radial direction, there's nothing meaningful to do for a center ball.
-        if !has_blob && r <= 1.0 {
-            continue;
-        }
-
-        // Blob radius + expansion rate in this ball's direction by inverting
-        // `ring_point`'s mapping: angle = t·TAU − π/2 + rotation. The `rotation`
-        // term is essential — the polyline collider is built rotated, so omitting
-        // it here samples the wrong segment whenever `rotation != 0` and the force
-        // field stops matching the surface the ball actually rests on (balls then
-        // pin to the rim with no matching fling — the "stuck to the blob" bug).
-        //
-        // The blob is a 256-segment *spiky* polyline, and a ball doesn't rest on
-        // one segment — its body spans an arc and physically contacts the
-        // *tallest* feature within it. Sampling only the segment under the ball's
-        // center reads the valley floor *behind* a spike the ball is wedged
-        // against: the unstick band below then never fires (`r` looks safely
-        // outside the valley) or, worse, teleports the ball back *down* into the
-        // crevice between the spikes that hold it — central gravity pins it there
-        // jittering (the recurring "trapped between spikes" bug). So take the
-        // farthest-reaching segment over the arc the ball covers as the surface it
-        // contacts; a wedged ball is then lifted onto the local spike envelope,
-        // never the crevice floor.
-        let (surf_r, expand) = if has_blob {
-            let ang = outward.y.atan2(outward.x);
-            let t = ((ang + FRAC_PI_2 - vis.rotation) / TAU).rem_euclid(1.0);
-            let k0 = ((t * n as f32).round() as usize) % n;
-            // Half-arc the ball's body subtends at this radius, in segments. Far
-            // outside the blob this collapses to the single center segment (`span
-            // == 0`), so distant balls behave exactly as before.
-            let half = (ball.radius / r.max(ball.radius)).asin();
-            let span = (half / (TAU / n as f32)).ceil() as usize;
-            let mut best = k0;
-            for d in 1..=span {
-                let lo = (k0 + n - d % n) % n;
-                let hi = (k0 + d) % n;
-                if planet.radii[lo] > planet.radii[best] {
-                    best = lo;
-                }
-                if planet.radii[hi] > planet.radii[best] {
-                    best = hi;
-                }
-            }
-            (
-                planet.radii[best],
-                (planet.radii[best] - planet.prev[best]) / dt,
-            )
-        } else {
-            (0.0, 0.0)
-        };
-
-        // Unstick: the blob is solid, so a ball touching the rim from inside *or*
-        // resting against it from outside should be flung clear, not pinned. The
-        // band extends a full `ball.radius` beyond the surface so a ball that
-        // central gravity has pressed onto the rim (center at ~`surf_r +
-        // ball.radius`, surface in contact) qualifies too — that's the "trapped at
-        // the edge" case, where the self-cancelling expansion fling below never
-        // nets enough outward push to escape. Lift it back onto the rim and give it
-        // enough outward speed to actually clear the surface against central
-        // gravity — and crucially do *not* apply the inward pull this frame, which
-        // would otherwise drag it straight back in and pin it jittering to the rim
-        // (the "stuck in the orb" failure). A dead-center ball lands here too via
-        // the `outward` fallback above and is flung clear.
-        if has_blob && r < surf_r + ball.radius {
-            transform.translation =
-                (outward * (surf_r + ball.radius)).extend(transform.translation.z);
-            let clearance = ball.radius * EJECT_CLEARANCE_RADII;
-            let escape = (2.0 * settings.central_gravity * clearance).sqrt();
-            let target = expand.max(0.0).max(escape);
-            let along = vel.0.dot(outward);
-            if target > along {
-                vel.0 += outward * (target - along);
-            }
-
-            // Tangential floor: ensure the ball orbits clear instead of bobbing
-            // straight back into the rim. Conserve whatever sideways direction it
-            // already has; a dead-radial ball (v_t ≈ 0) is nudged onto a stable
-            // side picked from its id so the choice is steady frame-to-frame.
-            let tangent = Vec2::new(-outward.y, outward.x);
-            let v_t = vel.0.dot(tangent);
-            let orbit = (settings.central_gravity * (surf_r + ball.radius)).sqrt();
-            let min_t = orbit * EJECT_ORBIT_FRACTION;
-            if v_t.abs() < min_t {
-                let dir = if v_t.abs() > 1.0e-3 {
-                    v_t.signum()
-                } else if ball.id % 2 == 0 {
-                    1.0
-                } else {
-                    -1.0
-                };
-                vel.0 += tangent * (dir * min_t - v_t);
-            }
-            continue;
-        }
-
-        // Outside the blob: central gravity accelerates the ball toward center.
-        vel.0 -= outward * settings.central_gravity * dt;
-
-        // Contact band + expanding blob → fling outward.
-        if has_blob && (r - surf_r).abs() < ball.radius + 4.0 && expand > 0.0 {
+        if r < surface + ball.radius + (vis.line_thickness * 0.5).max(0.0) + 4.0 && expand > 0.0 {
             let target = expand * settings.bar_push;
             let along = vel.0.dot(outward);
             if target > along {
                 vel.0 += outward * (target - along);
             }
+        }
+    }
+}
+
+/// A changing hollow boundary can swallow a ball, and a sudden velocity change
+/// can outrun Avian's cached CCD bounds. Recover actual interior centers after
+/// simulation, before drawing, without injecting energy into resting contacts.
+fn recover_planet_penetration(
+    mode: Res<DrawingMode>,
+    settings: Res<PhysicsSettings>,
+    vis: Res<VisSettings>,
+    planet: Res<Planet>,
+    mut balls: Query<(&mut Position, &mut Transform, &mut LinearVelocity, &Ball)>,
+) {
+    if !settings.enabled || !planet_active(*mode) || planet.radii.len() < 3 {
+        return;
+    }
+    for (mut position, mut transform, mut velocity, ball) in &mut balls {
+        let outward = position.0.try_normalize().unwrap_or(Vec2::Y);
+        let surface = planet_radius(&planet.radii, outward, vis.rotation);
+        if position.length() >= surface {
+            continue;
+        }
+        let clearance = planet_clearance(
+            &planet.radii,
+            outward,
+            vis.rotation,
+            ball.radius + (vis.line_thickness * 0.5).max(0.0),
+        );
+        position.0 = outward * clearance;
+        transform.translation = position.0.extend(transform.translation.z);
+        let inward = velocity.dot(outward);
+        if inward < 0.0 {
+            velocity.0 -= outward * inward;
         }
     }
 }
@@ -1723,6 +1714,12 @@ mod tests {
         app.init_resource::<Columns>();
         app.init_resource::<Planet>();
         app.init_resource::<BallCounter>();
+        app.add_systems(
+            PostUpdate,
+            recover_planet_penetration
+                .after(PhysicsSystems::Writeback)
+                .before(bevy::transform::TransformSystems::Propagate),
+        );
         app.world_mut().spawn(Window::default());
         app.finish();
         app
@@ -1743,6 +1740,7 @@ mod tests {
         app.world_mut().spawn((
             RigidBody::Kinematic,
             Collider::circle(10.0),
+            CollisionMargin(0.0),
             Restitution::new(1.0),
             Friction::new(0.0).with_combine_rule(CoefficientCombine::Min),
             Transform::from_xyz(PARKED, PARKED, 0.0),
@@ -1763,6 +1761,7 @@ mod tests {
                 Collider::circle(radius),
                 Restitution::new(restitution),
                 LinearVelocity(vel),
+                Position(pos),
                 Mass(1.0),
                 ball_ccd(&PhysicsSettings::default()).expect("CCD on by default"),
                 Transform::from_translation(pos.extend(1.0)),
@@ -2308,6 +2307,57 @@ mod tests {
         assert!(y > floor, "fast ball tunneled the floor: y={y}");
     }
 
+    #[test]
+    fn l4_silent_orb_balls_settle_without_repeated_launches() {
+        for hz in [30, 60, 144] {
+            let mut app = physics_app(DrawingMode::WaveCircle);
+            app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+                Duration::from_secs_f64(1.0 / hz as f64),
+            ));
+            app.world_mut().resource_mut::<Cava>().bars.fill(0.0);
+            app.add_systems(
+                Update,
+                (
+                    update_gravity_mode,
+                    update_planet,
+                    planet_forces,
+                    planet_gravity,
+                )
+                    .chain(),
+            );
+            spawn_planet_body(&mut app);
+            app.update();
+            let rim = orb_rim(&app);
+            let radius = 12.0;
+            let ball = spawn_ball(&mut app, Vec2::Y * (rim + radius), radius, 0.85, Vec2::ZERO);
+            app.world_mut().entity_mut(ball).insert(LinearDamping(0.1));
+            step(&mut app, hz * 15);
+            assert!(
+                app.world().get::<Sleeping>(ball).is_some(),
+                "{hz} Hz: quiet orb never sleeps"
+            );
+            let resting = pos_of(&app, ball);
+            let mut min_r = f32::MAX;
+            let mut max_r = 0.0_f32;
+            for _ in 0..hz * 3 {
+                app.update();
+                assert_eq!(pos_of(&app, ball), resting, "{hz} Hz: sleeping ball moved");
+                let r = pos_of(&app, ball).length();
+                min_r = min_r.min(r);
+                max_r = max_r.max(r);
+            }
+            assert!(
+                max_r - min_r < 0.5,
+                "{hz} Hz: resting ball jumps by {} px",
+                max_r - min_r
+            );
+            assert!(
+                min_r >= rim + radius - 1.0,
+                "{hz} Hz: ball penetrated orb: r={min_r}, rim={rim}"
+            );
+        }
+    }
+
     // --- L4: scenarios (the reported "stuck in the orb" bug) ----------------
 
     /// The orb surface radius this frame (uniform for a steady spectrum).
@@ -2321,11 +2371,17 @@ mod tests {
     }
 
     #[test]
-    fn l4_ball_spawned_dead_center_leaves_the_orb_surface() {
+    fn l4_ball_spawned_dead_center_reaches_the_orb_surface() {
         let mut app = physics_app(DrawingMode::WaveCircle);
         app.add_systems(
             Update,
-            (update_gravity_mode, update_planet, planet_forces).chain(),
+            (
+                update_gravity_mode,
+                update_planet,
+                planet_forces,
+                planet_gravity,
+            )
+                .chain(),
         );
         spawn_planet_body(&mut app);
 
@@ -2342,8 +2398,8 @@ mod tests {
         let rim = orb_rim(&app);
         assert!(rim > 0.0, "orb should have a real rim");
         assert!(
-            max_r > rim + radius,
-            "center ball never cleared the surface: max_r={max_r}, rim={rim}"
+            max_r >= rim + radius - 0.5,
+            "center ball never reached the surface: max_r={max_r}, rim={rim}"
         );
     }
 
@@ -2352,7 +2408,13 @@ mod tests {
         let mut app = physics_app(DrawingMode::WaveCircle);
         app.add_systems(
             Update,
-            (update_gravity_mode, update_planet, planet_forces).chain(),
+            (
+                update_gravity_mode,
+                update_planet,
+                planet_forces,
+                planet_gravity,
+            )
+                .chain(),
         );
         spawn_planet_body(&mut app);
 
@@ -2381,54 +2443,25 @@ mod tests {
         );
     }
 
-    /// Tangential-eject regression: the unstick must impart *sideways* velocity,
-    /// not only a radial kick. A purely radial eject (the old behaviour) leaves a
-    /// dead-radial ball with zero tangential speed, so on a smooth/quiet rim it
-    /// hops straight out and falls straight back into the contact band — quivering
-    /// at the edge instead of orbiting clear. Read the eject directly (solver-free)
-    /// so the imparted tangential speed is exact: without the floor it is 0, with
-    /// it a real fraction of orbital speed.
     #[test]
-    fn l4_eject_imparts_tangential_orbit_velocity() {
-        let mut app = bare_app();
-        app.insert_resource(PhysicsSettings::default());
-        app.insert_resource(VisSettings::default());
-        app.insert_resource(DrawingMode::WaveCircle);
-        app.insert_resource(Cava {
-            bars: vec![0.3; 24],
-            bars_per_channel: 24,
-            channels: 1,
-        });
-        app.init_resource::<Planet>();
-        app.init_resource::<BallCounter>();
+    fn l4_interior_recovery_adds_no_velocity() {
+        let mut app = physics_app(DrawingMode::WaveCircle);
+        app.add_systems(Update, update_planet);
         spawn_planet_body(&mut app);
-
-        // Build the blob and clear Bevy's zero-dt first frame before spawning.
-        app.add_systems(Update, (update_planet, planet_forces.after(update_planet)));
         app.update();
-
-        // Dead center, no velocity → the pathological zero-tangential case: a
-        // radial-only eject would leave it bobbing on a fixed diameter.
-        let radius = 12.0;
-        let ball = spawn_ball(&mut app, Vec2::ZERO, radius, 0.9, Vec2::ZERO);
-        app.update();
-
-        let pos = pos_of(&app, ball);
-        let r = pos.length();
-        assert!(r > 1.0, "ball was not ejected outward: r={r}");
-        let tangent = Vec2::new(-pos.y, pos.x) / r;
-        let v_t = app
-            .world()
-            .get::<LinearVelocity>(ball)
-            .unwrap()
-            .0
-            .dot(tangent)
-            .abs();
-        // The floor is a fraction of orbital speed at the ejection radius.
-        let orbit = (PhysicsSettings::default().central_gravity * r).sqrt();
-        assert!(
-            v_t > 0.5 * orbit * EJECT_ORBIT_FRACTION,
-            "eject gave no tangential orbit velocity (ball would bob radially): v_t={v_t}, orbit={orbit}"
+        let ball = spawn_ball(&mut app, Vec2::ZERO, 12.0, 0.85, Vec2::ZERO);
+        // Exercise recovery without the solver or gravity changing its result.
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(Duration::from_secs_f32(DT));
+        use bevy::ecs::system::RunSystemOnce;
+        app.world_mut()
+            .run_system_once(recover_planet_penetration)
+            .unwrap();
+        assert!(pos_of(&app, ball).length() >= orb_rim(&app) + 12.0 - 0.01);
+        assert_eq!(
+            app.world().get::<LinearVelocity>(ball).unwrap().0,
+            Vec2::ZERO
         );
     }
 
@@ -2494,7 +2527,7 @@ mod tests {
             0.9,
             Vec2::ZERO,
         );
-        app.add_systems(Update, planet_forces.after(update_planet));
+        app.add_systems(Update, recover_planet_penetration.after(update_planet));
         app.update();
 
         let landed = pos_of(&app, ball).length();
@@ -2511,134 +2544,251 @@ mod tests {
         );
     }
 
-    /// Rim-pinned regression: a ball pressed onto the rim from *outside* —
-    /// surface in contact, center still beyond the surface (`surf_r < r <
-    /// surf_r + radius`) — must be flung clear, not welded to the rim by central
-    /// gravity. The spectrum is steady, so the rim is *not* expanding and the
-    /// contact-band fling never fires; escape must come from the unstick band
-    /// alone. Under the old band (`r < surf_r`, center fully inside) such a ball
-    /// never qualified, so central gravity pinned it to the surface forever (the
-    /// "trapped at the edge" report). Solver-free so the eject is read exactly.
     #[test]
-    fn l4_ball_pinned_on_the_rim_is_ejected() {
-        let mut app = bare_app();
-        app.insert_resource(PhysicsSettings::default());
-        app.insert_resource(VisSettings::default());
-        app.insert_resource(DrawingMode::WaveCircle);
-        // Steady, uniform spectrum → a smooth, non-pulsing rim.
-        app.insert_resource(Cava {
-            bars: vec![0.3; 24],
-            bars_per_channel: 24,
-            channels: 1,
-        });
-        app.init_resource::<Planet>();
-        app.init_resource::<BallCounter>();
-        spawn_planet_body(&mut app);
-
-        // Build the blob and clear Bevy's zero-dt first frame before spawning.
-        app.add_systems(Update, (update_planet, planet_forces.after(update_planet)));
-        app.update();
-
-        let rim = orb_rim(&app);
-        assert!(rim > 0.0, "orb should have a real rim");
-
-        // Center half a radius past the surface: body overlaps the rim, center
-        // still outside it. This is the gap the old `r < surf_r` band missed.
-        let radius = 12.0;
-        let start = Vec2::new(rim + 0.5 * radius, 0.0);
-        let ball = spawn_ball(&mut app, start, radius, 0.9, Vec2::ZERO);
-
-        app.update();
-
-        let r = pos_of(&app, ball).length();
-        let vel = app.world().get::<LinearVelocity>(ball).unwrap().0;
-        let outward = Vec2::X;
-        // The fix kicks it outward and lifts it onto the rim; the bug left it
-        // pulled inward (negative radial velocity), still buried in the old band.
-        assert!(
-            vel.dot(outward) > 0.0,
-            "rim-pinned ball got no outward kick (welded to the rim): vel={vel:?}"
+    fn l4_overlapping_rim_contact_resolves_without_an_ejection_kick() {
+        let mut app = physics_app(DrawingMode::WaveCircle);
+        app.world_mut().resource_mut::<Cava>().bars.fill(0.0);
+        app.add_systems(
+            Update,
+            (
+                update_gravity_mode,
+                update_planet,
+                planet_forces,
+                planet_gravity,
+            )
+                .chain(),
         );
+        spawn_planet_body(&mut app);
+        app.update();
+        let rim = orb_rim(&app);
+        let ball = spawn_ball(&mut app, Vec2::Y * (rim + 6.0), 12.0, 0.85, Vec2::ZERO);
+        app.world_mut().entity_mut(ball).insert(LinearDamping(0.1));
+        step(&mut app, 900);
+        let distance = pos_of(&app, ball).length();
+        assert!(distance >= rim + 11.0, "ball penetrates rim: {distance}");
         assert!(
-            r >= rim + radius - 0.5,
-            "rim-pinned ball was not lifted clear of the surface: r={r}, rim={rim}"
+            distance <= rim + 16.0,
+            "contact injected a bounce: {distance}"
+        );
+        assert!(app.world().get::<Sleeping>(ball).is_some());
+        let resting = pos_of(&app, ball);
+        step(&mut app, 180);
+        assert_eq!(
+            pos_of(&app, ball),
+            resting,
+            "sleeping contact must stay still"
         );
     }
 
-    /// Crevice regression: a ball resting in a valley with a taller spike within
-    /// its body's arc must be lifted onto that spike's envelope, not left sitting
-    /// on (or teleported back down to) the valley floor where the flanking spikes
-    /// pin it. Injects a flat blob with one tall segment a few steps off the
-    /// ball's center angle and reads the eject directly (solver-free). Under the
-    /// old single-segment sample `surf_r` is the valley (the ball looks safely
-    /// outside it), so the unstick never fires and central gravity drags the ball
-    /// *inward* — the "trapped between spikes" report.
     #[test]
-    fn l4_ball_in_a_crevice_is_lifted_onto_the_spike_envelope() {
-        use std::f32::consts::TAU;
+    fn l4_orb_contacts_settle_at_different_angles() {
+        for angle in [0.0_f32, 0.123, 0.75, 2.3, 4.8] {
+            let mut app = physics_app(DrawingMode::WaveCircle);
+            app.world_mut().resource_mut::<Cava>().bars.fill(0.0);
+            app.add_systems(
+                Update,
+                (
+                    update_gravity_mode,
+                    update_planet,
+                    planet_forces,
+                    planet_gravity,
+                )
+                    .chain(),
+            );
+            spawn_planet_body(&mut app);
+            app.update();
+            let direction = Vec2::new(angle.cos(), angle.sin());
+            let start = direction * (orb_rim(&app) + 50.0);
+            let ball = spawn_ball(&mut app, start, 12.0, 0.85, Vec2::ZERO);
+            app.world_mut().entity_mut(ball).insert(LinearDamping(0.1));
+            step(&mut app, 60 * 30);
+            assert!(
+                app.world().get::<Sleeping>(ball).is_some(),
+                "angle={angle}: ball does not sleep"
+            );
+            let resting = pos_of(&app, ball);
+            step(&mut app, 180);
+            assert_eq!(
+                pos_of(&app, ball),
+                resting,
+                "angle={angle}: resting ball moves"
+            );
+            assert!(pos_of(&app, ball).length() >= orb_rim(&app) + 11.0);
+        }
+    }
 
-        let mut app = bare_app();
-        app.insert_resource(PhysicsSettings::default());
-        app.insert_resource(VisSettings::default()); // rotation 0
-        app.insert_resource(DrawingMode::WaveCircle);
-        app.insert_resource(Cava {
-            bars: vec![0.3; 24],
-            bars_per_channel: 24,
-            channels: 1,
-        });
-        app.init_resource::<BallCounter>();
-
-        // A flat rim at 100px with a single 200px spike. The ball sits on the +X
-        // axis → center segment k0 = n/4; place the spike a few segments off it,
-        // inside the arc a 12px ball spans at r≈112 (≈5 segments each side).
-        let n = 256usize;
-        let mut radii = vec![100.0_f32; n];
-        let valley = 100.0_f32;
-        let spike = 200.0_f32;
-        let k0 = n / 4; // +X axis under the (rotation-0) inverse mapping
-        radii[k0 + 3] = spike;
-        app.insert_resource(Planet {
-            radii: radii.clone(),
-            prev: radii, // steady → no expansion fling; escape must come from unstick
-            indices: (0..n as u32).map(|k| [k, (k + 1) % n as u32]).collect(),
-        });
-
-        // Clear Bevy's zero-dt first frame (planet_forces no-ops on dt==0) before
-        // spawning, so the single step we assert on sees a real dt.
-        app.add_systems(Update, planet_forces);
+    #[test]
+    fn l4_deforming_orb_does_not_swallow_balls() {
+        let mut app = physics_app(DrawingMode::WaveCircle);
+        app.world_mut().resource_mut::<VisSettings>().monstercat = 1.0;
+        app.add_systems(
+            Update,
+            (
+                update_gravity_mode,
+                update_planet,
+                planet_forces,
+                planet_gravity,
+            )
+                .chain(),
+        );
+        spawn_planet_body(&mut app);
         app.update();
-
-        let radius = 12.0;
-        // Resting on the valley floor: center at valley + radius. The old sample
-        // reads `surf_r == valley`, so `r == surf_r + radius` is *not* `<` it and
-        // the unstick is skipped — central gravity then pulls the ball inward.
-        let ball = spawn_ball(
-            &mut app,
-            Vec2::new(valley + radius, 0.0),
-            radius,
-            0.9,
-            Vec2::ZERO,
-        );
-
-        // Sanity: the spike really is within the ball's angular span at this r.
-        let span = (radius / (valley + radius)).asin() / (TAU / n as f32);
+        let ball = spawn_ball(&mut app, Vec2::new(110.0, 20.0), 12.0, 0.85, Vec2::ZERO);
+        app.world_mut().entity_mut(ball).insert(LinearDamping(0.1));
+        let mut max_penetration = 0.0_f32;
+        for frame in 0..600 {
+            for (i, bar) in app
+                .world_mut()
+                .resource_mut::<Cava>()
+                .bars
+                .iter_mut()
+                .enumerate()
+            {
+                *bar = if frame < 300 {
+                    ((frame as f32 * 0.08 + i as f32 * 1.3).sin() + 1.0) * 0.3
+                } else {
+                    0.0
+                };
+            }
+            app.update();
+            let pos = pos_of(&app, ball);
+            let surface = planet_radius(
+                &app.world().resource::<Planet>().radii,
+                pos.normalize(),
+                0.0,
+            );
+            assert!(
+                pos.length() >= surface,
+                "frame={frame}: ball center swallowed by orb"
+            );
+            let mut bodies = app
+                .world_mut()
+                .query_filtered::<&Collider, With<PlanetBody>>();
+            let collider = bodies.single(app.world()).unwrap();
+            let distance = collider.distance_to_point(Vec2::ZERO, 0.0, pos, false);
+            max_penetration = max_penetration.max(12.0 - distance);
+        }
         assert!(
-            span >= 3.0,
-            "test mis-tuned: spike outside the ball's arc (span={span})"
+            max_penetration <= 1.0,
+            "maximum overlap={max_penetration} px"
         );
+    }
 
+    #[test]
+    fn l4_fast_ball_does_not_tunnel_through_orb() {
+        for hz in [30, 60, 144] {
+            let mut app = physics_app(DrawingMode::WaveCircle);
+            app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+                Duration::from_secs_f64(1.0 / hz as f64),
+            ));
+            app.world_mut().resource_mut::<Cava>().bars.fill(0.0);
+            app.add_systems(
+                Update,
+                (
+                    update_gravity_mode,
+                    update_planet,
+                    planet_forces,
+                    planet_gravity,
+                )
+                    .chain(),
+            );
+            spawn_planet_body(&mut app);
+            app.update();
+            let rim = orb_rim(&app);
+            let ball = spawn_ball(
+                &mut app,
+                Vec2::Y * (rim + 100.0),
+                12.0,
+                0.85,
+                Vec2::NEG_Y * 6000.0,
+            );
+            for frame in 0..hz {
+                app.update();
+                let pos = pos_of(&app, ball);
+                assert_eq!(
+                    app.world()
+                        .get::<GlobalTransform>(ball)
+                        .unwrap()
+                        .translation()
+                        .truncate(),
+                    pos,
+                    "rendered ball must use the corrected position in the same frame"
+                );
+                assert!(
+                    pos.length() >= rim + 11.0,
+                    "{hz} Hz frame={frame}: fast ball penetrated orb, pos={pos:?}, rim={rim}, velocity={:?}",
+                    app.world().get::<LinearVelocity>(ball)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn l4_sleeping_ball_falls_when_orb_shrinks() {
+        let mut app = physics_app(DrawingMode::WaveCircle);
+        app.add_systems(
+            Update,
+            (
+                update_gravity_mode,
+                update_planet,
+                planet_forces,
+                planet_gravity,
+            )
+                .chain(),
+        );
+        spawn_planet_body(&mut app);
         app.update();
-
-        let r = pos_of(&app, ball).length();
-        let vel = app.world().get::<LinearVelocity>(ball).unwrap().0;
+        let rim = orb_rim(&app);
+        let ball = spawn_ball(&mut app, Vec2::Y * (rim + 12.0), 12.0, 0.85, Vec2::ZERO);
+        app.world_mut().entity_mut(ball).insert(LinearDamping(0.1));
+        step(&mut app, 180);
+        assert!(app.world().get::<Sleeping>(ball).is_some());
+        app.world_mut().resource_mut::<Cava>().bars.fill(0.0);
+        step(&mut app, 900);
         assert!(
-            vel.dot(Vec2::X) > 0.0,
-            "crevice ball got no outward kick (pulled into the valley): vel={vel:?}"
+            pos_of(&app, ball).length() < rim,
+            "sleeping ball floated above the smaller orb"
         );
+        assert!(pos_of(&app, ball).length() >= orb_rim(&app) + 11.0);
+        assert!(app.world().get::<Sleeping>(ball).is_some());
+    }
+
+    #[test]
+    fn l4_silent_orb_wakes_when_audio_expands_it() {
+        let mut app = physics_app(DrawingMode::WaveCircle);
+        app.world_mut().resource_mut::<Cava>().bars.fill(0.0);
+        app.add_systems(
+            Update,
+            (
+                update_gravity_mode,
+                update_planet,
+                planet_forces,
+                planet_gravity,
+            )
+                .chain(),
+        );
+        spawn_planet_body(&mut app);
+        app.update();
+        let rim = orb_rim(&app);
+        let ball = spawn_ball(&mut app, Vec2::Y * (rim + 12.0), 12.0, 0.85, Vec2::ZERO);
+        step(&mut app, 180);
         assert!(
-            r >= spike + radius - 0.5,
-            "crevice ball was not lifted onto the spike envelope: r={r}, want≈{}",
-            spike + radius
+            app.world().get::<Sleeping>(ball).is_some(),
+            "silent contact should sleep"
+        );
+        app.world_mut().resource_mut::<Cava>().bars.fill(0.5);
+        app.update();
+        assert!(
+            app.world().get::<Sleeping>(ball).is_none(),
+            "expansion must wake the ball"
+        );
+        assert!(pos_of(&app, ball).length() >= orb_rim(&app) + 11.0);
+        assert!(
+            app.world()
+                .get::<LinearVelocity>(ball)
+                .unwrap()
+                .dot(Vec2::Y)
+                > 0.0
         );
     }
 }
