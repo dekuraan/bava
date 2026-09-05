@@ -93,6 +93,21 @@ pub struct CavaRebuild(pub bool);
 #[derive(Resource, Default)]
 pub struct CavaRebuildStatus(pub Option<String>);
 
+/// Current native capture state, shared with the settings editor.
+#[derive(Resource, Clone, Default)]
+pub struct CaptureStatus(Arc<Mutex<String>>);
+
+impl CaptureStatus {
+    pub fn message(&self) -> String {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn set(&self, message: String) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = message;
+    }
+}
+
 /// Latest visualization bars, refreshed each frame from the capture thread.
 ///
 /// For stereo, [`bars`](Self::bars) is all left-channel bars (low→high) followed
@@ -303,9 +318,11 @@ impl Plugin for CavaPlugin {
         {
             let reader_ring = ring.clone();
             let reader_settings = settings.clone();
+            let status = CaptureStatus::default();
+            app.insert_resource(status.clone());
             thread::Builder::new()
                 .name("bava-capture".into())
-                .spawn(move || capture_reader(reader_settings, reader_ring))
+                .spawn(move || capture_reader(reader_settings, reader_ring, status))
                 .expect("failed to spawn capture thread");
         }
         app.insert_resource(ring);
@@ -380,7 +397,7 @@ fn active_sink_monitor() -> Option<String> {
 /// reopens the capture there — so audio routed to a non-default output (an HDMI
 /// display, say) is visualized without the user pinning a source by hand.
 #[cfg(not(target_arch = "wasm32"))]
-fn capture_reader(settings: CavaSettings, ring: AudioRing) {
+fn capture_reader(settings: CavaSettings, ring: AudioRing, status: CaptureStatus) {
     // Follow the active sink only when the user hasn't pinned an explicit source.
     let follow = settings.source.is_none() && settings.follow_active_sink;
 
@@ -400,12 +417,21 @@ fn capture_reader(settings: CavaSettings, ring: AudioRing) {
         current_device = active_sink_monitor();
     }
 
-    let mut capture = match open(&current_device) {
-        Ok(c) => c,
-        Err(e) => {
-            error!("bava: audio capture unavailable, visualizer will be idle: {e}");
-            return;
-        }
+    let reopen = |device: &mut Option<String>| {
+        open_with_retry(
+            &ring.running,
+            &status,
+            || {
+                if follow {
+                    *device = active_sink_monitor();
+                }
+                open(device)
+            },
+            || thread::sleep(std::time::Duration::from_millis(100)),
+        )
+    };
+    let Some(mut capture) = reopen(&mut current_device) else {
+        return;
     };
 
     info!(
@@ -441,24 +467,29 @@ fn capture_reader(settings: CavaSettings, ring: AudioRing) {
             // Back off before retrying: if the server died or the source was
             // removed, read() errors immediately every call, which would spin
             // a core at 100% and flood the log without this pause.
+            status.set(format!("Audio interrupted: {e}. Reconnecting…"));
             error!("bava: {e}");
             thread::sleep(std::time::Duration::from_millis(100));
             consecutive_failures += 1;
             if consecutive_failures >= REOPEN_AFTER_FAILURES {
                 consecutive_failures = 0;
-                match open(&current_device) {
-                    Ok(c) => {
-                        capture = c;
-                        ring.negotiated_rate
-                            .store(capture.rate(), Ordering::Relaxed);
-                        ring.negotiated_channels
-                            .store(capture.channels(), Ordering::Relaxed);
-                        info!("bava: audio capture reopened after repeated read failures");
-                    }
-                    Err(e) => warn!("bava: audio capture reopen failed, will retry: {e}"),
+                let Some(c) = reopen(&mut current_device) else {
+                    return;
+                };
+                capture = c;
+                if let Ok(mut q) = ring.buf.lock() {
+                    q.clear();
                 }
+                ring.negotiated_rate
+                    .store(capture.rate(), Ordering::Relaxed);
+                ring.negotiated_channels
+                    .store(capture.channels(), Ordering::Relaxed);
+                info!("bava: audio capture reopened after repeated read failures");
             }
             continue;
+        }
+        if consecutive_failures > 0 {
+            status.set("Capturing audio".into());
         }
         consecutive_failures = 0;
         if let Ok(mut q) = ring.buf.lock() {
@@ -492,6 +523,34 @@ fn capture_reader(settings: CavaSettings, ring: AudioRing) {
             }
         }
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn open_with_retry<T>(
+    running: &AtomicBool,
+    status: &CaptureStatus,
+    mut open: impl FnMut() -> Result<T, capture::CaptureError>,
+    mut wait: impl FnMut(),
+) -> Option<T> {
+    while running.load(Ordering::Relaxed) {
+        match open() {
+            Ok(capture) => {
+                status.set("Capturing audio".into());
+                return Some(capture);
+            }
+            Err(e) => {
+                status.set(format!("Audio unavailable: {e}. Retrying…"));
+                warn!("bava: {e}; retrying capture in one second");
+            }
+        }
+        for _ in 0..10 {
+            if !running.load(Ordering::Relaxed) {
+                return None;
+            }
+            wait();
+        }
+    }
+    None
 }
 
 /// Each rendered frame: accumulate newly captured audio and feed cavacore in
@@ -778,6 +837,46 @@ fn stop_on_exit(mut exit: MessageReader<AppExit>, ring: Option<Res<AudioRing>>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn capture_open_recovers_after_startup_failures() {
+        let running = AtomicBool::new(true);
+        let status = CaptureStatus::default();
+        let mut attempts = 0;
+        let mut waits = 0;
+        let result = open_with_retry(
+            &running,
+            &status,
+            || {
+                attempts += 1;
+                if attempts < 3 {
+                    Err(capture::CaptureError::Init("server offline".into()))
+                } else {
+                    Ok(42)
+                }
+            },
+            || waits += 1,
+        );
+        assert_eq!(result, Some(42));
+        assert_eq!(waits, 20);
+        assert_eq!(status.message(), "Capturing audio");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn capture_retry_stops_during_backoff() {
+        let running = AtomicBool::new(true);
+        let status = CaptureStatus::default();
+        let result: Option<()> = open_with_retry(
+            &running,
+            &status,
+            || Err(capture::CaptureError::Init("offline".into())),
+            || running.store(false, Ordering::Relaxed),
+        );
+        assert!(result.is_none());
+        assert!(status.message().contains("offline"));
+    }
 
     #[test]
     fn mono_input_left_is_all_right_is_empty() {

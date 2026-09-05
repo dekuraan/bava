@@ -15,7 +15,7 @@
 use bevy::prelude::*;
 use bevy_egui::{EguiContexts, EguiPrimaryContextPass, egui};
 
-use crate::cava::{CavaRebuild, CavaRebuildStatus, CavaSettings};
+use crate::cava::{CaptureStatus, CavaRebuild, CavaRebuildStatus, CavaSettings};
 use crate::config::{Config, ConfigHandle};
 use crate::vis::physics::PhysicsSettings;
 use crate::vis::{ColorProfile, Direction, DrawingMode, MirrorMode, Theme, ToneMap, VisSettings};
@@ -95,6 +95,7 @@ fn editor_ui(
     mut cava: ResMut<CavaSettings>,
     mut rebuild: ResMut<CavaRebuild>,
     mut rebuild_status: ResMut<CavaRebuildStatus>,
+    capture_status: Option<Res<CaptureStatus>>,
     mut physics: ResMut<PhysicsSettings>,
     handle: Res<ConfigHandle>,
 ) {
@@ -159,6 +160,9 @@ fn editor_ui(
                 ui.separator();
                 physics_section(ui, &mut physics);
                 ui.separator();
+                if let Some(status) = &capture_status {
+                    ui.label(status.message());
+                }
                 audio_section(ui, &mut cava, &mut rebuild, &mut editor.status);
             });
             if !editor.status.is_empty() {
