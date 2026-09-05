@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Balls settle on a silent orb instead of receiving repeated outward and orbital kicks. Radial gravity respects sleeping, changing geometry wakes contacts, and the collider includes the outline thickness.
+- Audio capture retries failed startup connections and reports its state in settings.
+- Config saves use atomic replacement. Failed backups leave malformed settings untouched.
+- Offline previews stop decoding at the requested duration instead of loading the full track.
+
+### Changed
+
+- Project instructions live in `AGENTS.md`, with `CLAUDE.md` linked to it.
+
 ## [0.4.0](https://github.com/dekuraan/bava/releases/tag/v0.4.0) - 2026-08-03
 
 ### Added
