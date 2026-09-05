@@ -546,7 +546,13 @@ impl Config {
                     let backup = path.with_extension("toml.bak");
                     let where_to = match store::rename(path, &backup) {
                         Ok(()) => format!("backed up to {}", backup.display()),
-                        Err(be) => format!("could not back it up: {be}"),
+                        Err(be) => {
+                            eprintln!(
+                                "bava: {} failed to parse ({e}); backup failed ({be}); leaving file untouched and using defaults",
+                                path.display()
+                            );
+                            return Config::default();
+                        }
                     };
                     eprintln!(
                         "bava: {} failed to parse ({e}); {where_to}, writing fresh defaults",
@@ -882,10 +888,21 @@ mod store {
     }
 
     pub fn write(path: &Path, text: &str) -> std::io::Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+        use std::io::Write;
+
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        std::fs::create_dir_all(parent)?;
+        let mut pending = tempfile::NamedTempFile::new_in(parent)?;
+        if let Ok(metadata) = std::fs::metadata(path) {
+            pending.as_file().set_permissions(metadata.permissions())?;
         }
-        std::fs::write(path, text)
+        pending.write_all(text.as_bytes())?;
+        pending.as_file().sync_all()?;
+        pending.persist(path).map_err(|e| e.error)?;
+        Ok(())
     }
 
     pub fn rename(from: &Path, to: &Path) -> std::io::Result<()> {
@@ -1196,6 +1213,45 @@ fn color_to_hex(c: Color) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn failed_backup_preserves_invalid_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let original = "[vis\nmy irreplaceable settings";
+        std::fs::write(&path, original).unwrap();
+        std::fs::create_dir(path.with_extension("toml.bak")).unwrap();
+        Config::load_or_create(&path);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn malformed_config_is_backed_up_before_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[broken").unwrap();
+        Config::load_or_create(&path);
+        assert_eq!(
+            std::fs::read_to_string(path.with_extension("toml.bak")).unwrap(),
+            "[broken"
+        );
+        assert!(Config::load(&path).is_some());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn atomic_save_replaces_existing_config_and_cleans_temporary_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut cfg = Config::default();
+        cfg.write(&path).unwrap();
+        cfg.cava.bars_per_channel = 37;
+        cfg.write(&path).unwrap();
+        assert_eq!(Config::load(&path).unwrap().cava.bars_per_channel, 37);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
 
     fn srgba(c: Color) -> (u8, u8, u8, u8) {
         let s = c.to_srgba();

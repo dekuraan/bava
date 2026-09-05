@@ -131,6 +131,7 @@ symphonia = { version = "0.6", features = ["mp3", "aac", "isomp4"] }
 # `~/.config/bava` resolution. No filesystem in the browser, where the config
 # store is `window.localStorage` instead.
 dirs = "6"
+tempfile = "3"
 
 # --- Web build (`wasm32-unknown-unknown`, see `web/` and `docs/WEB.md`).
 # Audio comes from a tab-share `MediaStream` the page pushes in through
