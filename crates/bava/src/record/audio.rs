@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Offline audio decoding for `--input`, via symphonia (pure Rust).
 //!
-//! Decodes a whole audio file (mp3/flac/ogg/wav/m4a — whatever the enabled
-//! symphonia codecs cover) into interleaved `f64` samples at the file's native
+//! Decodes an audio file or preview into interleaved `f64` samples at its native
 //! rate, plus the tag metadata and embedded cover art that feed the recording's
 //! now-playing HUD and dynamic colors.
 
@@ -42,9 +41,11 @@ impl DecodedTrack {
     }
 }
 
-/// Decode `path` completely. Errors are stringly typed — this runs once at
-/// startup and any failure is fatal for the recording.
-pub fn decode(path: &Path) -> Result<DecodedTrack, String> {
+/// Decode `path`, stopping after `duration` seconds when supplied.
+pub fn decode(path: &Path, duration: Option<f64>) -> Result<DecodedTrack, String> {
+    if duration.is_some_and(|s| !s.is_finite() || s <= 0.0) {
+        return Err("--duration must be a finite, positive number of seconds".into());
+    }
     let file = File::open(path).map_err(|e| format!("cannot open {}: {e}", path.display()))?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
 
@@ -106,6 +107,8 @@ pub fn decode(path: &Path) -> Result<DecodedTrack, String> {
     let mut rate = 0u32;
     let mut src_channels = 0usize;
     let mut scratch: Vec<f64> = Vec::new();
+    let mut channels = 0;
+    let mut max_frames = usize::MAX;
 
     loop {
         let packet = match format.next_packet() {
@@ -136,36 +139,35 @@ pub fn decode(path: &Path) -> Result<DecodedTrack, String> {
             let spec = decoded.spec();
             rate = spec.rate();
             src_channels = spec.channels().count();
-            if let Some(n) = n_frames_hint {
-                samples.reserve_exact((n as usize).saturating_mul(src_channels));
-            }
+            channels = src_channels.clamp(1, 2);
+            max_frames = duration.map_or(usize::MAX, |s| (s * rate as f64).ceil() as usize);
+            // Header frame counts are only hints. Never reserve more than a
+            // minute up front, and never reserve beyond the requested preview.
+            let reserve_frames = n_frames_hint
+                .unwrap_or(0)
+                .min(max_frames as u64)
+                .min(u64::from(rate) * 60) as usize;
+            samples.reserve_exact(reserve_frames * channels);
         }
 
         decoded.copy_to_vec_interleaved(&mut scratch);
-        samples.extend_from_slice(&scratch);
+        let remaining = max_frames.saturating_sub(samples.len() / channels);
+        for frame in scratch.chunks_exact(src_channels).take(remaining) {
+            if src_channels > 2 {
+                let rest: f64 = frame[2..].iter().sum::<f64>() * std::f64::consts::FRAC_1_SQRT_2;
+                samples.extend_from_slice(&[frame[0] + rest, frame[1] + rest]);
+            } else {
+                samples.extend_from_slice(frame);
+            }
+        }
+        if samples.len() / channels >= max_frames {
+            break;
+        }
     }
 
     if rate == 0 || samples.is_empty() {
         return Err(format!("{}: no audio decoded", path.display()));
     }
-
-    // cavacore handles 1 or 2 channels; fold anything wider down to stereo.
-    // The first two channels are front L/R in every common layout; the rest
-    // (center — where 5.1 mixes put lead vocals — LFE, surrounds) are mixed
-    // into both sides at -3 dB so the analysis hears everything the muxed
-    // full-mix audio track carries. Absolute scale doesn't matter (autosens).
-    let channels = if src_channels > 2 {
-        samples = samples
-            .chunks_exact(src_channels)
-            .flat_map(|frame| {
-                let rest: f64 = frame[2..].iter().sum::<f64>() * std::f64::consts::FRAC_1_SQRT_2;
-                [frame[0] + rest, frame[1] + rest]
-            })
-            .collect();
-        2
-    } else {
-        src_channels.max(1)
-    };
 
     Ok(DecodedTrack {
         rate,
@@ -219,5 +221,60 @@ fn merge_metadata(out: &mut TagScratch, rev: &MetadataRevision) {
         && let Some(visual) = rev.media.visuals.first()
     {
         out.art = Some(visual.data.to_vec());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn wav(seconds: u32) -> tempfile::NamedTempFile {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        let data_len = seconds * 8_000 * 2;
+        file.write_all(b"RIFF").unwrap();
+        file.write_all(&(36 + data_len).to_le_bytes()).unwrap();
+        file.write_all(b"WAVEfmt ").unwrap();
+        file.write_all(&16u32.to_le_bytes()).unwrap();
+        for value in [1u16, 1] {
+            file.write_all(&value.to_le_bytes()).unwrap();
+        }
+        for value in [8_000u32, 16_000] {
+            file.write_all(&value.to_le_bytes()).unwrap();
+        }
+        for value in [2u16, 16] {
+            file.write_all(&value.to_le_bytes()).unwrap();
+        }
+        file.write_all(b"data").unwrap();
+        file.write_all(&data_len.to_le_bytes()).unwrap();
+        file.write_all(&vec![0; data_len as usize]).unwrap();
+        file
+    }
+
+    #[test]
+    fn preview_decodes_only_requested_pcm_frames() {
+        let file = wav(10);
+        let track = decode(file.path(), Some(0.125)).unwrap();
+        assert_eq!(track.rate, 8_000);
+        assert_eq!(track.channels, 1);
+        assert_eq!(track.pcm_frames(), 1_000);
+        assert!(track.samples.capacity() < 80_000);
+    }
+
+    #[test]
+    fn preview_longer_than_file_stops_at_eof() {
+        let file = wav(1);
+        assert_eq!(decode(file.path(), Some(2.0)).unwrap().pcm_frames(), 8_000);
+        assert_eq!(decode(file.path(), None).unwrap().pcm_frames(), 8_000);
+    }
+
+    #[test]
+    fn invalid_duration_is_rejected_before_opening_input() {
+        for duration in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let error = decode(Path::new("missing.wav"), Some(duration))
+                .err()
+                .unwrap();
+            assert!(error.contains("--duration"));
+        }
     }
 }

@@ -417,16 +417,11 @@ pub fn run(cli: &Cli, config: &Config) -> Result<(), String> {
         return Err(format!("--fps {fps} is out of range (1..=240)"));
     }
 
-    let track = audio::decode(&input)?;
+    let track = audio::decode(&input, cli.duration)?;
     let headless = cli
         .headless
         .unwrap_or_else(|| !std::io::stdout().is_terminal());
-    let total_pcm = cli
-        .duration
-        .filter(|s| *s > 0.0)
-        .map_or(track.pcm_frames(), |s| {
-            ((s * track.rate as f64) as usize).min(track.pcm_frames())
-        });
+    let total_pcm = track.pcm_frames();
     // The video is a whole number of frames covering all fed audio; ffmpeg
     // trims both streams to exactly this length.
     let total_frames = (total_pcm as u64 * fps as u64).div_ceil(track.rate.max(1) as u64);
