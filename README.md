@@ -1,10 +1,9 @@
 # bava
 
-A cross-platform music visualizer built with [Bevy](https://bevyengine.org/),
-driven by [cavacore](https://github.com/karlstav/cava) (the DSP engine from CAVA).
-Loopback audio capture feeds the analyzer, which publishes smoothed frequency bars
-into a Bevy resource every frame; visualizers read that resource and render in
-real-time. Now-playing metadata and album art are pulled from the OS media session.
+A music visualizer built with [Bevy](https://bevyengine.org/) and a Rust port of
+[CAVA's analysis engine](https://github.com/karlstav/cava). It captures playing
+audio and draws its frequency spectrum, with track info and album art from the
+OS media session.
 
 | Platform | Audio capture | Now-playing |
 |---|---|---|
@@ -13,22 +12,22 @@ real-time. Now-playing metadata and album art are pulled from the OS media sessi
 | macOS 14.2+ | Core Audio process tap (no extra install) | MediaRemote adapter |
 | Web (Chrome) | Tab share via `getDisplayMedia` | YouTube IFrame API + thumbnail |
 
-**[Try it in your browser →](https://dekuraan.github.io/bava/)** (Chrome/Chromium;
-no install, share a tab and it visualizes what that tab is playing.)
+[Try it in Chrome or Chromium](https://dekuraan.github.io/bava/). Share a tab
+to visualize its audio.
 
 ![bava rendering a spectrum](docs/screenshot.png)
 
 ## Install
 
-Nothing to install for the web version — **<https://dekuraan.github.io/bava/>**.
-
-For the desktop app, every tagged release ships a `.deb`, an `.rpm`, a
-self-contained `.AppImage`, and plain binaries for Linux, Windows, and macOS on
-the [releases page](https://github.com/dekuraan/bava/releases):
+Download a `.deb`, `.rpm`, `.AppImage`, or a binary for Linux, Windows, or macOS
+from the [releases page](https://github.com/dekuraan/bava/releases).
 
 ```sh
-# Debian/Ubuntu               # Fedora/RHEL
-sudo apt install ./bava_*.deb   sudo dnf install ./bava-*.rpm
+# Debian/Ubuntu
+sudo apt install ./bava_*.deb
+
+# Fedora/RHEL
+sudo dnf install ./bava-*.rpm
 
 # Anything else (no install, no root)
 chmod +x bava-*.AppImage && ./bava-*.AppImage
@@ -41,18 +40,16 @@ flatpak run io.github.dekuraan.bava
 nix run github:dekuraan/bava
 ```
 
-The AppImage is the PulseAudio-only build, which works on pure-PulseAudio hosts
-*and* on PipeWire hosts via pipewire-pulse. The `.deb`/`.rpm` also use the
-PulseAudio-only build for compatibility with older distributions.
+The AppImage, `.deb`, and `.rpm` use the PulseAudio-only build for compatibility
+with older distributions. They also work on PipeWire hosts through pipewire-pulse.
 
 Building from source is [below](#build--run).
 
 ### Not yet published
 
-The manifests for these are written and in-tree, but the packages are **not on
-the stores yet** — the commands are here so they're accurate when they land, not
-because they work today. [`packaging/README.md`](packaging/README.md) tracks
-what each one still needs.
+The AUR, Flathub, and Snap manifests are in the repository, but the packages
+are not published yet. These commands will work after publication.
+See [packaging status](packaging/README.md) for the remaining work.
 
 ```sh
 paru -S bava                                          # AUR (or bava-git for HEAD)
@@ -62,54 +59,47 @@ sudo snap install bava && sudo snap connect bava:audio-record
 
 ## Features
 
-- **11 visualizer modes** — Space cycles: Bars, Levels, Particles, Spine, Wave,
-  Splitter (box family) and Circle variants. All modes support mirror/direction
-  and a configurable color theme with HDR bloom.
-- **Physics mode** — avian2d rigid bodies react to the frequency bars; balls
-  spawn, collide, and fade with color trails.
-- **In-app settings editor** — press `p` (configurable) for a live egui overlay
-  covering all vis, DSP, and color options. Changes apply instantly; DSP/source
-  changes need an explicit Apply.
-- **Album art + now-playing HUD** — title, artist, and album art as a dimmed
-  full-window backdrop. The previous cover stays visible for up to five seconds
-  while new art loads, and is replaced immediately when ready. Adjust
-  `[vis] album_art_linger` (0–60 seconds), or **cover linger (s)** in the editor.
-  Set it to `0` to clear missing art immediately.
-- **Config file + profiles** — `~/.config/bava/config.toml` (auto-created on
-  first run), with named profile snapshots under `~/.config/bava/profiles/`.
-  CLI flags override file values. Load a profile with `--profile NAME`.
-- **Offline music-video rendering** — `--input song.mp3 --out video.mp4`
-  renders the visualization of an audio file to video (no live capture),
-  faster than realtime, with YouTube-ready encoding (H.264 high / yuv420p /
-  AAC 384k / faststart). See below.
+- Cycle through 11 modes with Space. Bars, Levels, Particles, Spine, and Wave
+  each have box and circle variants; Splitter is box-only. Customize colors,
+  mirror and direction settings, and HDR bloom.
+- Spawn physics balls that collide with the spectrum and leave color trails.
+  Physics uses avian2d.
+- Press `p` to open the settings editor. Visual changes apply immediately;
+  DSP changes require Apply. The editor key is configurable.
+- Show the track title, artist, and cover art, with the cover as a dimmed
+  backdrop. The previous cover stays for up to five seconds while new art
+  loads. Adjust `[vis] album_art_linger` from 0 to 60 seconds, or use
+  "cover linger (s)" in the editor. Set it to `0` to clear missing art immediately.
+- Save settings in `~/.config/bava/config.toml`, created on first run.
+  Named profiles live in `~/.config/bava/profiles/`; load one with
+  `--profile NAME`. CLI flags override file values.
+- Render an audio file to video with `--input song.mp3 --out video.mp4`.
+  Output uses H.264 high, yuv420p, AAC at 384 kbps, and faststart.
 
 ## In the browser
 
-**<https://dekuraan.github.io/bava/>** — no install. bava builds to WebAssembly,
-with an embedded YouTube player on the page. Browsers have no loopback device,
-so audio comes from **sharing a tab**: **Start visualizing** cues the video,
-captures this tab, and plays it in one action. *Capture another tab* points it
-at Spotify Web, Bandcamp, anything; *Play a file* takes a local audio file
-through the same path with no screen-share prompt at all (also reachable
-directly at [`?source=file`](https://dekuraan.github.io/bava/?source=file)).
+The [web app](https://dekuraan.github.io/bava/) runs through WebAssembly and
+includes a YouTube player. Choose "Start visualizing" to share the tab's audio
+and play the video. "Capture another tab" lets you use audio from sites such as
+Spotify Web or Bandcamp. "Play a file" opens a local audio file without a
+screen-share prompt. You can also [open the file player directly](https://dekuraan.github.io/bava/?source=file).
 
 ```sh
 trunk serve --cargo-profile web-dev   # http://localhost:8080
 trunk build --release                 # → dist/, static files for any host
 ```
 
-Use `web-dev` for iteration, not the default `dev` profile: `dev` optimizes
-dependencies but leaves bava's own per-frame code at `opt-level = 0`, and the
-debug info alone takes the module past 100 MB for the browser to fetch and
-instantiate on every reload. `web-dev` is 61 MB, `--release` 34 MB (12 MB
-gzipped).
+Use `web-dev` for local development. The default `dev` profile leaves bava's
+per-frame code at `opt-level = 0`, and debug info pushes the module past 100 MB.
+The browser must load it on every reload. `web-dev` is about 61 MB;
+`--release` is about 34 MB, or 12 MB gzipped.
 
-Chrome only, and the share picker's **"Also share tab audio"** must be ticked —
-sharing a window or a whole screen carries no audio outside Windows. Every
-visualizer mode, the physics balls, dynamic album colors and the settings editor
-work the same as on the desktop; settings persist in `localStorage`, and the
-page's query string takes the same flags as the CLI
-(`?bars=48&mode=wave-circle`). See [docs/WEB.md](docs/WEB.md).
+Use Chrome or Chromium and tick "Also share tab audio" in the share picker.
+Window and whole-screen shares carry no audio outside Windows. All visualizer
+modes, physics balls, dynamic album colors, and the settings editor work in the
+browser. Settings persist in `localStorage`. The query string accepts the same
+flags as the CLI, for example `?bars=48&mode=wave-circle`.
+See [docs/WEB.md](docs/WEB.md).
 
 ## Rendering a music video
 
@@ -119,22 +109,21 @@ bava --input song.flac --out out.mp4 --width 3840 --height 2160 --fps 60
 bava --input song.mp3 --out test.mp4 --duration 10  # quick 10-second preview
 ```
 
-Requires an `ffmpeg` binary on `PATH` (it does the H.264/AAC encoding; frames
-are streamed to it while they render). Input can be anything symphonia decodes:
-mp3, flac, ogg/vorbis, wav, m4a/aac. The track's tags supply the now-playing
-HUD, and embedded cover art drives the dynamic color palette, same as live.
+Requires `ffmpeg` on `PATH` to encode the rendered frames and audio. Supported
+inputs include MP3, FLAC, Ogg/Vorbis, WAV, and M4A/AAC, decoded with symphonia.
+Track tags supply the now-playing HUD, and embedded cover art supplies the
+dynamic color palette.
 
-In a terminal, a preview window shows frames as they render — keyboard and
-mouse still work there, so you can cycle modes with Space or click to spawn
-physics balls *into* the video. When run non-interactively (scripts, CI, SSH)
-bava records **headless** — no window at all; force it either way with
-`--headless` / `--headless=false`. Audio/video stay in exact sync regardless
-of render speed: time is stepped exactly one frame's worth per frame.
+When launched from a terminal, bava opens a preview window. Press Space to
+cycle modes or click to add physics balls to the recording. When stdout isn't
+a terminal, bava records without a window. Set `--headless` or
+`--headless=false` to choose explicitly. Each frame advances time by a fixed
+step, so audio and video stay in sync regardless of render speed.
 
 ## Build & run
 
-Requires [Rust stable](https://rustup.rs/) **1.95 or newer** (Bevy 0.19). bava is
-pure Rust — no C toolchain or FFTW is needed on any platform.
+Requires [Rust stable](https://rustup.rs/) 1.95 or newer for Bevy 0.19. bava is
+pure Rust and does not require a C toolchain or FFTW.
 
 ### Linux
 
@@ -163,8 +152,8 @@ export BAVA_MEDIAREMOTE_ADAPTER_DIR=/path/to/adapter
 cargo run -p bava
 ```
 
-The first launch prompts for the **Audio Recording** permission (needed for the
-Core Audio process tap). Without it the app runs without audio capture.
+On first launch, grant Audio Recording permission for the Core Audio process
+tap. Without it, the app runs but cannot capture audio.
 
 ### Tests
 
@@ -177,11 +166,9 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 ### Profiling
 
-`--features profile` bridges Bevy's per-system `tracing` spans into
-[puffin](https://github.com/EmbarkStudios/puffin), so the whole schedule is
-profiled without hand-instrumenting anything. Use the `profiling` cargo profile —
-`dev` leaves our own crates at `opt-level = 0`, which makes every measurement
-meaningless.
+`--features profile` sends Bevy's per-system `tracing` spans to
+[puffin](https://github.com/EmbarkStudios/puffin). Use the `profiling` cargo
+profile for measurements. The `dev` profile leaves bava's code unoptimized.
 
 ```sh
 cargo run -p bava --profile profiling --features profile
@@ -191,16 +178,16 @@ puffin_viewer --url 127.0.0.1:8585                        # attach to it
 BAVA_PROFILE_REPORT=600 cargo run -p bava --profile profiling --features profile
 ```
 
-Under a compositor every frame that fits the budget costs one refresh interval,
-and Wayland has no immediate present mode — so for real A/B numbers use the
-offline path (`--input … --out … --duration 5`), which is display-free and
-fixed-frame-count.
+Compositor pacing can hide performance differences between frames that finish
+within one refresh interval. For A/B measurements, use offline rendering with
+`--input song.mp3 --out video.mp4 --duration 5 --headless`. This renders a fixed
+number of frames without display pacing.
 
 ## Workspace layout
 
 ```
 crates/
-  cavacore-rs/         # pure-Rust cavacore port (realfft); CavaConfig → CavaPlan; rigorous test suite
+  cavacore-rs/         # Rust cavacore port using realfft; DSP tests
   bava/
     src/cava/          # CavaPlugin, Cava resource, capture thread, feed_cava system
     src/cava/capture/  # AudioCapture trait; backends: pipewire.rs / pulse.rs / wasapi.rs / coreaudio.rs / web.rs
@@ -212,7 +199,7 @@ crates/
     src/profiling.rs   # puffin bridge, behind --features profile
     web/               # the browser page: index.html, bava.js, audio-worklet.js, style.css
 docs/                  # WEB.md and the generated screenshot
-packaging/             # icons, AUR, AppImage, Nix, web assets — see packaging/README.md
+packaging/             # icons, AUR, AppImage, Nix, web assets; see packaging/README.md
 flatpak/  snap/        # Flathub manifest and snapcraft.yaml
 ```
 
@@ -242,17 +229,14 @@ fn my_vis(cava: Res<bava::cava::Cava>) {
 }
 ```
 
-New visualizer plugins are independent: spawn their own camera/mesh entities and
-add a system that reads `Cava`. The existing modes in `vis/` are self-contained
-examples.
+To add a visualizer, create its entities and a system that reads `Cava`.
+See the existing modes in `vis/` for examples.
 
 ## License
 
-bava is dual-licensed under the **MIT License** ([`LICENSE-MIT`](LICENSE-MIT))
-and the **Apache License, Version 2.0** ([`LICENSE-APACHE`](LICENSE-APACHE)),
-at your option.
+bava is available under the [MIT License](LICENSE-MIT) or
+[Apache License, Version 2.0](LICENSE-APACHE), at your option.
 
 The `cavacore-rs` crate is a pure-Rust reimplementation of the analysis engine
-from [karlstav/cava](https://github.com/karlstav/cava) (MIT), built on the
-[`realfft`](https://crates.io/crates/realfft) FFT crate — no C or FFTW is
-linked.
+from [karlstav/cava](https://github.com/karlstav/cava), under the MIT license.
+It uses [`realfft`](https://crates.io/crates/realfft) and does not link C or FFTW.
