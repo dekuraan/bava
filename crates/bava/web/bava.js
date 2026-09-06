@@ -102,10 +102,9 @@ setTimeout(() => {
   const boot = document.getElementById("boot");
   if (!boot) return;
   boot.querySelector(".loading").textContent = hasWebGL2()
-    ? "Still loading — a few tens of MB have to arrive before the visualizer " +
-      "starts. Check the browser console if this doesn't clear."
-    : "This browser has no WebGL2, which the visualizer requires. Try a " +
-      "current Chrome, Edge, Firefox or Safari.";
+    ? "Still loading. The first download can take a minute on a slow connection. " +
+      "If loading stalls, check your connection and reload the page."
+    : "WebGL2 is unavailable. Try updating your browser or enabling hardware acceleration.";
 }, 20000);
 
 // --- status -----------------------------------------------------------------
@@ -141,7 +140,7 @@ async function attachWorklet(context, sourceNode, { audible, onStop, label, gene
     onStop?.();
     await context.close();
     if (generation === captureGeneration) {
-      setStatus(`Could not load the audio worklet: ${err}`, "error", { retry: true });
+      setStatus(`Could not load audio processing. Try again. ${err}`, "error", { retry: true });
     }
     return false;
   }
@@ -179,9 +178,9 @@ async function attachWorklet(context, sourceNode, { audible, onStop, label, gene
         settled = true;
         setStatus(
           audible
-            ? "That file decoded, but it is silent."
-            : "Capturing, but that tab is silent — is it muted, or was " +
-                "“Also share tab audio” left off?",
+            ? "No sound detected in this file yet."
+            : "No sound detected. Check that the tab is playing and unmuted, " +
+                'and that "Also share tab audio" is on.',
           "error",
           { retry: true },
         );
@@ -218,7 +217,7 @@ async function attachWorklet(context, sourceNode, { audible, onStop, label, gene
     };
 
     BTN_STOP.hidden = false;
-    setStatus(`${label} at ${context.sampleRate} Hz.`, "ok");
+    setStatus(`${label}.`, "ok");
     // The panel has done its job; the visualizer is the point.
     setPanelOpen(false);
     document.getElementById("bava-canvas")?.focus();
@@ -317,7 +316,7 @@ async function startCapture(currentTab) {
   if (!audioTrack) {
     stream.getTracks().forEach((t) => t.stop());
     setStatus(
-      "That share had no audio. Pick a tab and tick “Also share tab audio”.",
+      "No audio in this share. Choose a tab and turn on \"Also share tab audio\".",
       "error",
       { retry: true },
     );
@@ -443,7 +442,7 @@ async function startFile(file) {
     } catch {
       // Autoplay refused — the element has controls, so say so rather than
       // leaving a silent visualizer.
-      if (generation === captureGeneration) setStatus(`Loaded ${file.name} — press play below.`, "ok");
+      if (generation === captureGeneration) setStatus(`Loaded ${file.name}. Press play below.`, "ok");
     }
   }
   return ok;
@@ -470,7 +469,7 @@ async function startEverything() {
   if (typed) {
     const id = parseVideoId(typed);
     if (!id) {
-      setStatus("That doesn't look like a YouTube URL or video id.", "error");
+      setStatus("Enter a YouTube link or video ID.", "error");
       return;
     }
     // Cue, don't play: the picker is about to open, and anything playing behind
@@ -501,7 +500,7 @@ onClick(BTN_OTHER_TAB, () => startCapture(false));
 onClick(BTN_FILE, () => FILE_INPUT.click());
 onClick(BTN_RETRY, () => lastIntent?.());
 onClick(BTN_STOP, async () => {
-  setStatus("Not capturing.");
+  setStatus("Stopped.");
   await stopCapture();
 });
 
@@ -661,8 +660,7 @@ addEventListener("keydown", (event) => {
 
 if (!CAN_WORKLET) {
   setStatus(
-    "This browser has no AudioWorklet, which is how audio reaches the " +
-      "visualizer. Try a current Chrome, Edge, Firefox or Safari.",
+    "Audio processing is unavailable in this browser. Try an updated browser.",
     "error",
   );
   BTN_START.disabled = true;
@@ -673,13 +671,12 @@ if (!CAN_WORKLET) {
   // offering buttons that open a picker which cannot deliver audio.
   BTN_START.textContent = "Choose an audio file";
   START_SUB.textContent =
-    "Plays a file from this device — no permission prompt, and it works " +
-    "on phones. You can also drop a file anywhere on this page.";
+    "Choose an audio file from this device, or drop one anywhere on the page.";
   BTN_OTHER_TAB.hidden = true;
   BTN_FILE.hidden = true;
   if (YT_SECTION) YT_SECTION.hidden = true;
   if (!CAN_CAPTURE) {
-    setStatus("This browser can't capture tab audio — play a file instead.");
+    setStatus("This browser can't capture tab audio. Choose an audio file.");
   }
 }
 

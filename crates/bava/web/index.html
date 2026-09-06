@@ -3,10 +3,10 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>bava — music visualizer</title>
+    <title>bava music visualizer</title>
     <meta
       name="description"
-      content="bava, a cavacore-driven music visualizer, running in the browser on audio captured from a browser tab."
+      content="Visualize music from a browser tab or an audio file."
     />
     <!-- Inline so there is no second request (and no 404 for the one every
          browser asks for unprompted): three bars in the accent colour. -->
@@ -70,7 +70,7 @@
     <div id="boot" class="overlay">
       <div class="boot-card">
         <h1>bava</h1>
-        <p class="loading">loading the visualizer…</p>
+        <p class="loading">Loading visualizer…</p>
       </div>
     </div>
 
@@ -86,9 +86,8 @@
           Start visualizing
         </button>
         <p id="start-sub" class="hint">
-          Plays the video below and captures this tab in one go — your browser
-          will ask you to confirm the share. Clicking the visualizer or pasting
-          a YouTube link anywhere does the same thing.
+          Share this tab's audio to visualize the YouTube video below.
+          You can also start by clicking the visualizer or pasting a YouTube link.
         </p>
         <div class="buttons">
           <button id="capture-other" type="button">Capture another tab</button>
@@ -97,13 +96,11 @@
         </div>
         <input id="file-input" type="file" accept="audio/*" hidden />
         <p class="hint">
-          In the share dialog, pick a <strong>tab</strong> and make sure
-          <strong>“Also share tab audio”</strong> is on — a window or whole
-          screen carries no audio on Linux or macOS. You can switch which tab is
-          being shared from the browser's own sharing bar, without coming back
-          here.
+          Choose a tab and turn on "Also share tab audio" in the share dialog.
+          Window and screen shares have no audio on Linux or macOS.
+          To switch tabs, use the browser's sharing bar.
         </p>
-        <p id="capture-status" class="status" role="status">Not capturing.</p>
+        <p id="capture-status" class="status" role="status">No audio selected.</p>
         <button id="capture-retry" type="button" hidden>Try again</button>
       </section>
 
@@ -121,16 +118,15 @@
             id="yt-url"
             type="text"
             inputmode="url"
-            placeholder="YouTube URL or video ID"
-            aria-label="YouTube URL or video ID"
+            placeholder="YouTube link or video ID"
+            aria-label="YouTube link or video ID"
           />
           <button type="submit">Load &amp; start</button>
         </form>
         <div id="yt-wrap"><div id="yt-player"></div></div>
         <p class="hint">
-          Or play audio in any other tab — Spotify, Bandcamp, another YouTube —
-          and capture that instead. No screen sharing available?
-          <a href="./?source=file">Play a local file</a>.
+          To use Spotify, Bandcamp, or another site, choose "Capture another tab".
+          You can also <a href="./?source=file">play an audio file</a>.
         </p>
       </section>
 
@@ -139,18 +135,19 @@
         <dl class="keys">
           <dt>Space</dt><dd>next visualizer mode</dd>
           <dt>P</dt><dd>settings editor</dd>
-          <dt>F3</dt><dd>debug overlay + collider wireframes</dd>
-          <dt>Click</dt><dd>drop a physics ball (right-click sprays)</dd>
+          <dt>F3</dt><dd>show FPS, ball count, and colliders</dd>
+          <dt>Click</dt><dd>drop a physics ball</dd>
+          <dt>Hold right-click</dt><dd>spray physics balls</dd>
           <dt>H</dt><dd>hide or show this panel</dd>
         </dl>
         <p class="hint">
-          Settings are saved in this browser. Query-string flags work too, e.g.
+          Settings are saved in this browser. You can also set them in the URL:
           <code>?bars=48&amp;mode=wave-circle&amp;monstercat=2</code>.
         </p>
       </section>
 
       <footer>
-        <a href="https://github.com/dekuraan/bava">source — dekuraan/bava</a>
+        <a href="https://github.com/dekuraan/bava">Source on GitHub</a>
       </footer>
     </aside>
 

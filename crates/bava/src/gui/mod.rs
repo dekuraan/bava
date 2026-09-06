@@ -286,7 +286,7 @@ fn persistence_section(
             ],
         );
         ui.label(
-            egui::RichText::new("Change takes effect immediately. Save to persist.")
+            egui::RichText::new("Changes apply immediately. Save to keep them.")
                 .weak()
                 .small(),
         );
@@ -334,7 +334,7 @@ fn geometry_section(ui: &mut egui::Ui, vis: &mut VisSettings) {
 
     ui.checkbox(&mut vis.reverse_mirror, "Reverse mirror side");
     ui.checkbox(&mut vis.reverse_order, "Reverse bar order");
-    ui.checkbox(&mut vis.filling, "Fill (vs. outline)");
+    ui.checkbox(&mut vis.filling, "Fill shape");
     ui.checkbox(&mut vis.hearts, "Hearts (spine modes)");
 
     ui.add(egui::Slider::new(&mut vis.line_thickness, 0.5..=40.0).text("line thickness"));
@@ -383,8 +383,8 @@ fn colors_section(ui: &mut egui::Ui, vis: &mut VisSettings) {
     );
     ui.checkbox(&mut vis.dynamic_colors, "Dynamic colors (from album art)")
         .on_hover_text(
-            "Override the foreground gradient with colors extracted from the \
-             current track's cover. Eases on song change.",
+            "Use colors from the current track's cover for the foreground gradient. \
+             Colors fade when the track changes.",
         );
     ui.add(egui::Slider::new(&mut vis.album_art_linger, 0.0..=60.0).text("cover linger (s)"))
         .on_hover_text("Keep the previous cover while waiting for new art. 0 = clear immediately.");
@@ -396,7 +396,7 @@ fn colors_section(ui: &mut egui::Ui, vis: &mut VisSettings) {
             )
             .text("dynamic colors"),
         )
-        .on_hover_text("How many album-art colors to spread across the gradient and balls.");
+        .on_hover_text("Number of cover colors used for the gradient and balls.");
         ui.add(
             egui::Slider::new(&mut vis.dynamic_color_fade, 0.0..=5.0)
                 .text("color fade (s)")
@@ -493,16 +493,16 @@ fn audio_section(
         cava.high_cutoff_freq = high.min(high_max);
     }
 
-    if ui.button("Apply audio (rebuild plan)").clicked() {
+    if ui.button("Apply audio settings").clicked() {
         rebuild.0 = true;
-        *status = "Rebuilding cavacore plan…".into();
+        *status = "Applying audio settings…".into();
     }
 
     ui.collapsing("Capture (restart required)", |ui| {
         let mut frame = cava.frame_samples as u32;
         if ui
             .add(egui::DragValue::new(&mut frame).range(16..=8192).speed(8.0))
-            .on_hover_text("frame_samples — cava update granularity")
+            .on_hover_text("Audio frames per analysis update")
             .changed()
         {
             cava.frame_samples = frame as usize;
@@ -534,7 +534,7 @@ fn audio_section(
             }
         });
         ui.label(
-            egui::RichText::new("Rate/channels/source apply after Save + relaunch.")
+            egui::RichText::new("Save and restart to apply the sample rate, channels, and source.")
                 .weak()
                 .small(),
         );
@@ -547,13 +547,13 @@ fn image_section(ui: &mut egui::Ui, vis: &mut VisSettings) {
     image_layer_editor(
         ui,
         "Background image",
-        "Absolute path or relative to working dir.",
+        "Use an absolute path or a path relative to the working directory.",
         &mut vis.background,
     );
     image_layer_editor(
         ui,
         "Foreground overlay",
-        "Rendered above bars, below HUD text.",
+        "Shown above the bars and below the track text.",
         &mut vis.foreground,
     );
 }
@@ -670,9 +670,8 @@ fn physics_section(ui: &mut egui::Ui, physics: &mut PhysicsSettings) {
 
     ui.checkbox(&mut physics.ccd, "continuous collision detection")
         .on_hover_text(
-            "Stops very fast balls passing through a bar or the floor. \
-             The most expensive part of the ball simulation — turn it off \
-             for a large win with a lot of balls on screen.",
+            "Prevents fast balls from passing through bars or the floor. \
+             Turn it off to reduce simulation work at high ball counts.",
         );
 
     ui.collapsing("Trails", |ui| {
