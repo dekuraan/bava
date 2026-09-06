@@ -37,11 +37,11 @@ git clone "ssh://aur@aur.archlinux.org/$pkg.git" "$work/$pkg"
 cp "$src/PKGBUILD" "$src/.SRCINFO" "$work/$pkg/"
 
 cd "$work/$pkg"
-if git diff --quiet; then
+git add PKGBUILD .SRCINFO
+if git diff --cached --quiet; then
     echo "==> nothing changed on the AUR side"
     exit 0
 fi
-git add PKGBUILD .SRCINFO
 git commit -m "Update $pkg to $(sed -n 's/^\tpkgver = //p' .SRCINFO)"
 git --no-pager show --stat
 read -rp "==> push to the AUR? [y/N] " reply

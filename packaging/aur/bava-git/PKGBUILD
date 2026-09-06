@@ -30,7 +30,7 @@ makedepends=(
     'git'
 )
 optdepends=(
-    'pipewire-pulse: PipeWire as PulseAudio drop-in (replaces libpulse at runtime)'
+    'pipewire-pulse: PulseAudio-compatible server for PipeWire capture'
     'spotifyd: Spotify MPRIS player for album art and now-playing info'
     'ffmpeg: offline music-video rendering (--input song.mp3 --out video.mp4)'
     'vulkan-radeon: Vulkan driver for AMD GPUs'
