@@ -221,7 +221,12 @@ wasm at the domain root and gets the 404 page back. Pages must be set to the
 - **Snap Store:** register the `bava` name under your publisher account, then
   authenticate Snapcraft before uploading the built `.snap`. Do not paste
   credentials into issues or chat. The Distribution packages workflow builds
-  an artifact without requiring store credentials.
+  an artifact without requiring store credentials. For CI publication, put the
+  output of `snapcraft export-login` in the `SNAPCRAFT_STORE_CREDENTIALS`
+  repository secret, scoped to this snap and the stable channel. Run
+  `gh workflow run distribution.yml --ref main -f target=snap -f publish_snap=true`
+  after the name is registered. Publication only runs on an explicit manual
+  dispatch from `main`; pull requests never receive the publishing credential.
 - **Nix:** the GitHub flake can be used directly once its build passes. Inclusion
   in nixpkgs is a separate contribution. Its
   [automation policy](https://github.com/NixOS/nixpkgs/blob/master/CONTRIBUTING.md#automationai-policy)
