@@ -110,3 +110,31 @@ test("stopping resets audio before an asynchronous context close finishes", asyn
   await stopping;
   assert.equal(s.resets(), 1);
 });
+
+test("an old share's ended event cannot stop its replacement", async () => {
+  const s = setup();
+  const old = s.run('startCapture(true)');
+  const shared = stream("old");
+  s.pickers[0].resolve(shared);
+  await flush();
+  s.contexts[0].module.resolve();
+  await old;
+  const next = s.run('startFile({name:"new.mp3"})');
+  await flush();
+  s.contexts[1].module.resolve();
+  await next;
+  shared.track.ended();
+  assert.equal(s.contexts[1].closed, false);
+});
+
+test("failed worklet loading releases the stream and context", async () => {
+  const s = setup();
+  const start = s.run('startCapture(true)');
+  const shared = stream("broken");
+  s.pickers[0].resolve(shared);
+  await flush();
+  s.contexts[0].module.reject(Error("network failure"));
+  assert.equal(await start, false);
+  assert.equal(shared.track.stopped, true);
+  assert.equal(s.contexts[0].closed, true);
+});
