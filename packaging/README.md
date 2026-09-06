@@ -13,7 +13,7 @@ takes to publish. Artwork for all of them comes from one generator —
 | **.rpm** | `[package.metadata.generate-rpm]` in the same file | none | ready — same |
 | **AppImage** | [`appimage/build-appimage.sh`](appimage/build-appimage.sh) | none | ready — same |
 | **Nix** | [`../flake.nix`](../flake.nix), [`nix/package.nix`](nix/package.nix) | none (nixpkgs PR is optional) | x86_64 Linux build and CLI check passed; usable directly from GitHub |
-| **Snap Store** | [`../snap/snapcraft.yaml`](../snap/snapcraft.yaml) | Snapcraft account; manual review only if you go classic | CI build added; publisher account needed for upload |
+| **Snap Store** | [`../snap/snapcraft.yaml`](../snap/snapcraft.yaml) | Snapcraft account; manual review only if you go classic | amd64 snap built and published on GitHub; store name and credential needed for upload |
 | **macOS** | [`macos/bava.icns`](macos) | — | icon only; no `.app` bundling yet |
 | **Web/wasm** | [`web/`](web), [`../crates/bava/web/`](../crates/bava/web) | — | **live** — built by trunk and deployed to GitHub Pages on every push to `main` |
 | **TV app stores** | — | — | not viable, see [below](#tv-app-stores) |

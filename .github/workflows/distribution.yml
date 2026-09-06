@@ -57,7 +57,7 @@ jobs:
         with:
           manifest-path: submission/io.github.dekuraan.bava.yml
           bundle: bava.flatpak
-          cache-key: bava-flatpak-25.08
+          cache-key: bava-flatpak-25.08-${{ hashFiles('submission/**') }}
       - name: Check the installed Flatpak
         run: |
           flatpak install --user -y bava.flatpak

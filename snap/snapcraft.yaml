@@ -7,6 +7,7 @@
 # See packaging/README.md for the two confinement caveats: audio-record must be
 # connected by hand, and MPRIS now-playing only sees snap-packaged players.
 name: bava
+title: Bava
 base: core24
 adopt-info: bava
 summary: Music visualizer driven by cavacore, MPRIS, and PipeWire/PulseAudio
@@ -26,6 +27,8 @@ license: MIT OR Apache-2.0
 icon: flatpak/io.github.dekuraan.bava.svg
 website: https://github.com/dekuraan/bava
 issues: https://github.com/dekuraan/bava/issues
+contact: https://github.com/dekuraan/bava/issues
+source-code: https://github.com/dekuraan/bava
 grade: stable
 confinement: strict
 compression: lzo
