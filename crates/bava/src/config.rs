@@ -255,6 +255,8 @@ pub struct VisConfig {
     pub dynamic_color_count: usize,
     /// Crossfade time, in seconds, when dynamic colors change on a new track.
     pub dynamic_color_fade: f32,
+    /// Seconds to retain the previous cover while replacement art is unavailable.
+    pub album_art_linger: f32,
 }
 
 /// `[[vis.profile]]` — a named color scheme.
@@ -431,6 +433,7 @@ impl Config {
                 dynamic_colors: vis.dynamic_colors,
                 dynamic_color_count: vis.dynamic_color_count,
                 dynamic_color_fade: vis.dynamic_color_fade,
+                album_art_linger: vis.album_art_linger,
             },
             physics: PhysicsConfig {
                 enabled: physics.enabled,
@@ -721,6 +724,11 @@ impl Config {
                 .dynamic_color_count
                 .clamp(2, crate::now_playing::MAX_DYNAMIC_COLORS),
             dynamic_color_fade: v.dynamic_color_fade.max(0.0),
+            album_art_linger: if v.album_art_linger.is_finite() {
+                v.album_art_linger.clamp(0.0, 60.0)
+            } else {
+                5.0
+            },
             dynamic_fg: None,
         }
     }
@@ -1377,6 +1385,30 @@ mod tests {
         assert_eq!(phys_back.central_gravity, physics.central_gravity);
 
         assert_eq!(cfg.vis_mode(), DrawingMode::BarsCircle);
+    }
+
+    #[test]
+    fn cover_linger_defaults_round_trips_and_rejects_nonfinite_values() {
+        let mut cfg: Config = toml::from_str("").unwrap();
+        assert_eq!(cfg.to_vis_settings().album_art_linger, 5.0);
+        cfg.vis.album_art_linger = 12.5;
+        let encoded = toml::to_string(&cfg).unwrap();
+        let decoded: Config = toml::from_str(&encoded).unwrap();
+        let vis = decoded.to_vis_settings();
+        assert_eq!(vis.album_art_linger, 12.5);
+        let saved = Config::from_settings(
+            &CavaSettings::default(),
+            &vis,
+            DrawingMode::BarsCircle,
+            &PhysicsSettings::default(),
+        );
+        assert_eq!(saved.vis.album_art_linger, 12.5);
+        for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            cfg.vis.album_art_linger = value;
+            assert_eq!(cfg.to_vis_settings().album_art_linger, 5.0);
+        }
+        cfg.vis.album_art_linger = -2.0;
+        assert_eq!(cfg.to_vis_settings().album_art_linger, 0.0);
     }
 
     #[test]

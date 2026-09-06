@@ -310,6 +310,8 @@ pub struct VisSettings {
     /// Crossfade time constant (seconds) when the dynamic palette changes on a new
     /// track. Larger = slower, more gradual color transition; ~0 snaps instantly.
     pub dynamic_color_fade: f32,
+    /// Seconds to retain the previous cover while replacement art is unavailable.
+    pub album_art_linger: f32,
     /// Runtime-only animated album colors (most vibrant first), eased toward the
     /// latest extracted set by [`animate_album_colors`]. Not serialized; when
     /// `Some` and [`dynamic_colors`](Self::dynamic_colors) is set it overrides the
@@ -345,6 +347,7 @@ impl Default for VisSettings {
             dynamic_colors: true,
             dynamic_color_count: 2,
             dynamic_color_fade: 0.4,
+            album_art_linger: 5.0,
             dynamic_fg: None,
         }
     }

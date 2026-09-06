@@ -67,7 +67,10 @@ sudo snap install bava && sudo snap connect bava:audio-record
   covering all vis, DSP, and color options. Changes apply instantly; DSP/source
   changes need an explicit Apply.
 - **Album art + now-playing HUD** — title, artist, and album art as a dimmed
-  full-window backdrop. Degrades gracefully when no player is active.
+  full-window backdrop. The previous cover stays visible for up to five seconds
+  while new art loads, and is replaced immediately when ready. Adjust
+  `[vis] album_art_linger` (0–60 seconds), or **cover linger (s)** in the editor.
+  Set it to `0` to clear missing art immediately.
 - **Config file + profiles** — `~/.config/bava/config.toml` (auto-created on
   first run), with named profile snapshots under `~/.config/bava/profiles/`.
   CLI flags override file values. Load a profile with `--profile NAME`.
