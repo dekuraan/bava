@@ -52,6 +52,7 @@ apps:
 parts:
   bava:
     plugin: rust
+    build-snaps: [rustup]
     source: .
     rust-path: [crates/bava]
     override-pull: |

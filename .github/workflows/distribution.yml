@@ -23,7 +23,10 @@ permissions:
 
 concurrency:
   group: distribution-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: v0.4.1
 
 jobs:
   flatpak:
@@ -36,15 +39,22 @@ jobs:
       - uses: actions/checkout@v7
       - name: Generate release sources
         run: |
-          python3 flatpak/gen-cargo-sources.py
           mkdir submission
-          python3 flatpak/gen-flathub-manifest.py v0.4.1 -o submission/io.github.dekuraan.bava.yml
-          cp flatpak/cargo-sources.json submission/
+          curl --fail --location "https://raw.githubusercontent.com/dekuraan/bava/$RELEASE_TAG/Cargo.lock" -o /tmp/release-Cargo.lock
+          python3 flatpak/gen-cargo-sources.py --lock /tmp/release-Cargo.lock -o submission/cargo-sources.json
+          python3 flatpak/gen-flathub-manifest.py "$RELEASE_TAG" -o submission/io.github.dekuraan.bava.yml
       - uses: flatpak/flatpak-github-actions/flatpak-builder@v6.8
         with:
           manifest-path: submission/io.github.dekuraan.bava.yml
-          bundle: bava-0.4.1.flatpak
+          bundle: bava.flatpak
           cache-key: bava-flatpak-25.08
+      - name: Check the installed Flatpak
+        run: |
+          flatpak install --user -y bava.flatpak
+          flatpak run io.github.dekuraan.bava --version
+          flatpak run --command=ffmpeg io.github.dekuraan.bava -hide_banner -encoders > encoders.txt
+          grep -q libx264 encoders.txt
+          grep -q " aac " encoders.txt
       - uses: actions/upload-artifact@v7
         with:
           name: flathub-submission
