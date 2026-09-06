@@ -1,6 +1,6 @@
 # Maintainer: dekuraan <declan.li.carney@gmail.com>
 pkgname=bava
-pkgver=0.3.0
+pkgver=0.4.1
 pkgrel=1
 pkgdesc="Music visualizer driven by cavacore, MPRIS, and PipeWire/PulseAudio"
 arch=('x86_64')
@@ -44,7 +44,7 @@ conflicts=('bava-git')
 # profile.release already does thin LTO inside cargo, so nothing is lost.
 options=('!lto')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('a965c9c564062f850f579bd69c6a92240fb8672d85ce0095bcf01868b68e5868')
+sha256sums=('38f5b8722a6169d854e53c9528c1d06e106bd4bf3e306c2a696f337f0cdb63b6')
 
 prepare() {
     cd "$pkgname-$pkgver"

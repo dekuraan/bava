@@ -1,0 +1,81 @@
+name: Distribution packages
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/distribution.yml'
+      - 'flatpak/**'
+      - 'snap/**'
+      - 'flake.*'
+      - 'packaging/nix/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/distribution.yml'
+      - 'flatpak/**'
+      - 'snap/**'
+      - 'flake.*'
+      - 'packaging/nix/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: distribution-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  flatpak:
+    name: Flatpak release manifest
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-25.08
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v7
+      - name: Generate release sources
+        run: |
+          python3 flatpak/gen-cargo-sources.py
+          mkdir submission
+          python3 flatpak/gen-flathub-manifest.py v0.4.1 -o submission/io.github.dekuraan.bava.yml
+          cp flatpak/cargo-sources.json submission/
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6.8
+        with:
+          manifest-path: submission/io.github.dekuraan.bava.yml
+          bundle: bava-0.4.1.flatpak
+          cache-key: bava-flatpak-25.08
+      - uses: actions/upload-artifact@v7
+        with:
+          name: flathub-submission
+          path: submission/
+
+  snap:
+    name: Snap
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: snapcore/action-build@v1
+        id: snapcraft
+      - uses: actions/upload-artifact@v7
+        with:
+          name: bava-snap
+          path: ${{ steps.snapcraft.outputs.snap }}
+
+  nix:
+    name: Nix flake
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: cachix/install-nix-action@v31.11.1
+      - name: Evaluate and build
+        run: |
+          nix flake lock
+          nix flake check --no-build
+          nix build --print-build-logs .#bava
+          ./result/bin/bava --version
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: nix-flake-lock
+          path: flake.lock

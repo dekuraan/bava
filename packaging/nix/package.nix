@@ -25,7 +25,7 @@
   ffmpeg,
   withFfmpeg ? false,
   src ? ../..,
-  version ? "0.4.0",
+  version ? (builtins.fromTOML (builtins.readFile (src + "/crates/bava/Cargo.toml"))).package.version,
 }:
 
 let
