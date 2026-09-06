@@ -12,7 +12,7 @@ use std::thread;
 use std::time::Duration;
 
 use bevy::prelude::*;
-use crossbeam_channel::Sender;
+use crossbeam_channel::{Receiver, Sender};
 
 use super::{DecodedArt, NowPlaying, NowPlayingMsg, decode_art_bytes};
 
@@ -28,6 +28,7 @@ pub(super) fn run(tx: Sender<NowPlayingMsg>) {
         }
     };
 
+    let (art_requests, art_results) = art_worker(fetch_and_decode_art, Duration::from_secs(5));
     let mut last_art_url: Option<String> = None;
     // Whether we've published a track since the last clear — art-URL presence
     // is the wrong proxy (a track without art would otherwise leave the dead
@@ -42,6 +43,7 @@ pub(super) fn run(tx: Sender<NowPlayingMsg>) {
                 // No player right now; clear state once and wait.
                 if std::mem::take(&mut published) {
                     last_art_url = None;
+                    let _ = art_requests.send(None);
                     let _ = tx.send(NowPlayingMsg::Track(NowPlaying::default()));
                     let _ = tx.send(NowPlayingMsg::Art(None));
                 }
@@ -71,22 +73,58 @@ pub(super) fn run(tx: Sender<NowPlayingMsg>) {
             let _ = tx.send(NowPlayingMsg::Track(track));
             published = true;
 
-            // Only refetch art when the URL changes.
             if art_url != last_art_url {
                 last_art_url = art_url.clone();
-                match art_url.as_deref().and_then(fetch_and_decode_art) {
-                    Some(art) => {
-                        let _ = tx.send(NowPlayingMsg::Art(Some(art)));
-                    }
-                    None => {
-                        let _ = tx.send(NowPlayingMsg::Art(None));
-                    }
-                }
+                let _ = tx.send(NowPlayingMsg::Art(None));
+                let _ = art_requests.send(art_url);
+            }
+        }
+
+        // A previous track's slow download must not replace the current cover.
+        for (url, art) in art_results.try_iter() {
+            if url == last_art_url && tx.send(NowPlayingMsg::Art(art)).is_err() {
+                return;
             }
         }
 
         thread::sleep(Duration::from_millis(500));
     }
+}
+
+type ArtResult = (Option<String>, Option<DecodedArt>);
+
+fn art_worker(
+    fetch: impl Fn(&str) -> Option<DecodedArt> + Send + 'static,
+    retry: Duration,
+) -> (Sender<Option<String>>, Receiver<ArtResult>) {
+    let (requests, rx) = crossbeam_channel::unbounded::<Option<String>>();
+    let (tx, results) = crossbeam_channel::bounded(1);
+    thread::Builder::new()
+        .name("bava-album-art".into())
+        .spawn(move || {
+            let mut request = rx.recv();
+            while let Ok(mut url) = request {
+                // Skip queued obsolete tracks before starting another download.
+                for latest in rx.try_iter() {
+                    url = latest;
+                }
+                let art = url.as_deref().and_then(&fetch);
+                let failed = url.is_some() && art.is_none();
+                if tx.send((url.clone(), art)).is_err() {
+                    return;
+                }
+                request = if failed {
+                    match rx.recv_timeout(retry) {
+                        Err(crossbeam_channel::RecvTimeoutError::Timeout) => Ok(url),
+                        other => other.map_err(|_| crossbeam_channel::RecvError),
+                    }
+                } else {
+                    rx.recv()
+                };
+            }
+        })
+        .expect("failed to spawn album-art thread");
+    (requests, results)
 }
 
 /// Derive a thumbnail image URL from a YouTube watch/short URL, so YouTube
@@ -202,6 +240,73 @@ mod tests {
     use base64::Engine;
 
     use super::*;
+
+    #[test]
+    fn failed_art_retries_without_a_new_request() {
+        let attempts = std::sync::atomic::AtomicUsize::new(0);
+        let (requests, results) = art_worker(
+            move |_| {
+                if attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0 {
+                    None
+                } else {
+                    fetch_and_decode_art(&png_data_uri())
+                }
+            },
+            Duration::from_millis(1),
+        );
+        requests.send(Some("cover".into())).unwrap();
+        assert!(
+            results
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap()
+                .1
+                .is_none()
+        );
+        assert!(
+            results
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap()
+                .1
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn blocked_download_does_not_block_requests_and_skips_obsolete_tracks() {
+        let (started, starts) = crossbeam_channel::unbounded();
+        let (release, blocked) = crossbeam_channel::bounded(1);
+        let (requests, results) = art_worker(
+            move |url| {
+                started.send(url.to_owned()).unwrap();
+                if url == "first" {
+                    blocked.recv().unwrap();
+                }
+                fetch_and_decode_art(&png_data_uri())
+            },
+            Duration::from_secs(5),
+        );
+        requests.send(Some("first".into())).unwrap();
+        assert_eq!(
+            starts.recv_timeout(Duration::from_secs(2)).unwrap(),
+            "first"
+        );
+        requests.send(Some("obsolete".into())).unwrap();
+        requests.send(Some("latest".into())).unwrap();
+        release.send(()).unwrap();
+        results.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(
+            starts.recv_timeout(Duration::from_secs(2)).unwrap(),
+            "latest"
+        );
+        assert_eq!(
+            results
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap()
+                .0
+                .as_deref(),
+            Some("latest")
+        );
+    }
 
     /// A real 2×2 PNG, base64'd — the form jellyfin-desktop embeds inline as
     /// `mpris:artUrl`. Built via the `image` crate so the bytes are always valid.

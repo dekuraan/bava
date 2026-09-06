@@ -64,6 +64,7 @@ const STAGE = document.getElementById("stage");
 let wasm = null;
 /** The live source: `{ stop() }`, or null. */
 let capture = null;
+let captureGeneration = 0;
 /** The YT.Player instance, once the IFrame API has finished loading. */
 let player = null;
 /** Video id whose metadata we last pushed, so we only push on real changes. */
@@ -131,88 +132,112 @@ function setStatus(text, kind = "", { retry = false } = {}) {
  *   re-emitting would double it. A file must, or nothing is heard.
  * @param {() => void} opts.onStop Extra teardown for the owning source.
  * @param {string} opts.label Shown in the status line.
+ * @param {number} opts.generation Start request that owns this graph.
  */
-async function attachWorklet(context, sourceNode, { audible, onStop, label }) {
+async function attachWorklet(context, sourceNode, { audible, onStop, label, generation }) {
   try {
     await context.audioWorklet.addModule("./audio-worklet.js");
   } catch (err) {
     onStop?.();
     await context.close();
-    setStatus(`Could not load the audio worklet: ${err}`, "error", { retry: true });
+    if (generation === captureGeneration) {
+      setStatus(`Could not load the audio worklet: ${err}`, "error", { retry: true });
+    }
     return false;
   }
 
-  const worklet = new AudioWorkletNode(context, "bava-capture");
+  if (generation !== captureGeneration) {
+    onStop?.();
+    await context.close();
+    return false;
+  }
 
-  // A silent source is the most confusing failure here: everything reports
-  // success, the bars sit at zero, and it reads as a broken build. Watch the
-  // opening seconds and name the likely cause instead.
-  let peak = 0;
-  let settled = false;
-  const deadline = performance.now() + 3500;
+  let worklet, mute;
+  try {
+    worklet = new AudioWorkletNode(context, "bava-capture");
 
-  worklet.port.onmessage = (event) => {
-    const { samples, channels, rate } = event.data;
-    wasm?.bava_push_audio(samples, channels, rate);
+    // A silent source is the most confusing failure here: everything reports
+    // success, the bars sit at zero, and it reads as a broken build. Watch the
+    // opening seconds and name the likely cause instead.
+    let peak = 0;
+    let settled = false;
+    const deadline = performance.now() + 3500;
 
-    if (settled) return;
-    // Sparse scan: enough to notice signal, cheap enough for every block.
-    for (let i = 0; i < samples.length; i += 32) {
-      const v = Math.abs(samples[i]);
-      if (v > peak) peak = v;
-    }
-    if (peak > 1e-4) {
-      settled = true;
-    } else if (performance.now() > deadline) {
-      settled = true;
-      setStatus(
-        audible
-          ? "That file decoded, but it is silent."
-          : "Capturing, but that tab is silent — is it muted, or was " +
-              "“Also share tab audio” left off?",
-        "error",
-        { retry: true },
-      );
-    }
-  };
+    worklet.port.onmessage = (event) => {
+      const { samples, channels, rate } = event.data;
+      wasm?.bava_push_audio(samples, channels, rate);
 
-  // An AudioWorkletNode is only pulled if it lies on a path to the context's
-  // destination — a dangling node never runs. Route it through a zero gain so
-  // it is scheduled without being heard; anything that *should* be audible gets
-  // its own direct connection instead.
-  const mute = context.createGain();
-  mute.gain.value = 0;
-  sourceNode.connect(worklet);
-  worklet.connect(mute);
-  mute.connect(context.destination);
-  if (audible) sourceNode.connect(context.destination);
-
-  capture = {
-    async stop() {
-      worklet.port.onmessage = null;
-      try {
-        sourceNode.disconnect();
-      } catch {
-        // Already torn down with its context; nothing to undo.
+      if (settled) return;
+      // Sparse scan: enough to notice signal, cheap enough for every block.
+      for (let i = 0; i < samples.length; i += 32) {
+        const v = Math.abs(samples[i]);
+        if (v > peak) peak = v;
       }
-      worklet.disconnect();
-      mute.disconnect();
-      onStop?.();
-      await context.close();
-      // Drop whatever was buffered, so restarting doesn't replay the old tail.
-      wasm?.bava_reset_audio();
-    },
-  };
+      if (peak > 1e-4) {
+        settled = true;
+      } else if (performance.now() > deadline) {
+        settled = true;
+        setStatus(
+          audible
+            ? "That file decoded, but it is silent."
+            : "Capturing, but that tab is silent — is it muted, or was " +
+                "“Also share tab audio” left off?",
+          "error",
+          { retry: true },
+        );
+      }
+    };
 
-  BTN_STOP.hidden = false;
-  setStatus(`${label} at ${context.sampleRate} Hz.`, "ok");
-  // The panel has done its job; the visualizer is the point.
-  setPanelOpen(false);
-  document.getElementById("bava-canvas")?.focus();
-  return true;
+    // An AudioWorkletNode is only pulled if it lies on a path to the context's
+    // destination — a dangling node never runs. Route it through a zero gain so
+    // it is scheduled without being heard; anything that *should* be audible gets
+    // its own direct connection instead.
+    mute = context.createGain();
+    mute.gain.value = 0;
+    sourceNode.connect(worklet);
+    worklet.connect(mute);
+    mute.connect(context.destination);
+    if (audible) sourceNode.connect(context.destination);
+
+    capture = {
+      context,
+      async stop() {
+        worklet.port.onmessage = null;
+        try {
+          sourceNode.disconnect();
+        } catch {
+          // Already torn down with its context; nothing to undo.
+        }
+        worklet.disconnect();
+        mute.disconnect();
+        onStop?.();
+        // Reset before close yields: a newer source may start while it awaits.
+        wasm?.bava_reset_audio();
+        await context.close();
+      },
+    };
+
+    BTN_STOP.hidden = false;
+    setStatus(`${label} at ${context.sampleRate} Hz.`, "ok");
+    // The panel has done its job; the visualizer is the point.
+    setPanelOpen(false);
+    document.getElementById("bava-canvas")?.focus();
+    return true;
+  } catch (err) {
+    sourceNode.disconnect();
+    worklet?.disconnect();
+    mute?.disconnect();
+    onStop?.();
+    await context.close();
+    if (generation === captureGeneration) {
+      setStatus(`Could not start audio capture: ${err}`, "error", { retry: true });
+    }
+    return false;
+  }
 }
 
-async function stopCapture() {
+async function stopCapture(invalidate = true) {
+  if (invalidate) captureGeneration++;
   const current = capture;
   capture = null;
   BTN_STOP.hidden = true;
@@ -229,6 +254,7 @@ async function stopCapture() {
  *   tab is excluded from it, so the obvious choice is some other tab.
  */
 async function startCapture(currentTab) {
+  const generation = ++captureGeneration;
   lastIntent = () => startCapture(currentTab);
   if (!CAN_CAPTURE) {
     setStatus(
@@ -271,6 +297,7 @@ async function startCapture(currentTab) {
       systemAudio: "include",
     });
   } catch (err) {
+    if (generation !== captureGeneration) return false;
     // A user dismissing the picker is not an error worth shouting about.
     const dismissed = err?.name === "NotAllowedError";
     setStatus(
@@ -281,6 +308,11 @@ async function startCapture(currentTab) {
     return false;
   }
 
+  const releaseStream = () => stream.getTracks().forEach((t) => t.stop());
+  if (generation !== captureGeneration) {
+    releaseStream();
+    return false;
+  }
   const [audioTrack] = stream.getAudioTracks();
   if (!audioTrack) {
     stream.getTracks().forEach((t) => t.stop());
@@ -298,22 +330,44 @@ async function startCapture(currentTab) {
 
   // The gesture has done its job — now it is safe to tear down whatever was
   // playing before, ahead of building this stream's graph.
-  await stopCapture();
+  await stopCapture(false);
+  if (generation !== captureGeneration) {
+    releaseStream();
+    return false;
+  }
 
   const context = new AudioContext();
   // Chrome starts an AudioContext suspended unless it can attribute it to a
   // gesture; the picker interaction counts, but resume() is cheap insurance.
-  if (context.state === "suspended") await context.resume();
+  try {
+    if (context.state === "suspended") await context.resume();
+  } catch (err) {
+    releaseStream();
+    await context.close();
+    if (generation === captureGeneration) setStatus(`Capture failed: ${err}`, "error", { retry: true });
+    return false;
+  }
 
   // Ending the share from the browser's own "Stop sharing" bar fires this.
   audioTrack.addEventListener("ended", () => {
+    if (capture?.context !== context) {
+      if (generation === captureGeneration) captureGeneration++;
+      return;
+    }
     stopCapture();
     setStatus("Sharing ended.");
   });
 
+  if (audioTrack.readyState === "ended") {
+    releaseStream();
+    await context.close();
+    return false;
+  }
+
   return attachWorklet(context, context.createMediaStreamSource(stream), {
     audible: false,
-    onStop: () => stream.getTracks().forEach((t) => t.stop()),
+    generation,
+    onStop: releaseStream,
     label: `Capturing ${audioTrack.label || "tab audio"}`,
   });
 }
@@ -325,7 +379,9 @@ async function startCapture(currentTab) {
  * capture this works on phones.
  */
 async function startFile(file) {
-  await stopCapture();
+  const generation = ++captureGeneration;
+  await stopCapture(false);
+  if (generation !== captureGeneration) return false;
 
   // `createMediaElementSource` binds an element to one AudioContext for the
   // element's lifetime, and we close the context on every stop. Replacing the
@@ -344,48 +400,50 @@ async function startFile(file) {
   // scanning does not honour inline `codeql[...]` suppression comments, so the
   // alert is dismissed in the security tab instead; this comment is the record
   // of why, for whoever sees it re-raised if the line ever moves.
-  audioEl.src = url;
-  audioEl.loop = true;
+  fresh.src = url;
+  fresh.loop = true;
   if (FILE_SECTION) FILE_SECTION.hidden = false;
   // Re-picking the same File isn't possible programmatically, but re-opening
   // the picker is the right retry for a file source.
   lastIntent = () => FILE_INPUT.click();
 
   const context = new AudioContext();
-  if (context.state === "suspended") await context.resume();
-
   let source;
   try {
-    source = context.createMediaElementSource(audioEl);
+    if (context.state === "suspended") await context.resume();
+    source = context.createMediaElementSource(fresh);
   } catch (err) {
     await context.close();
     URL.revokeObjectURL(url);
-    setStatus(`Could not read that file: ${err}`, "error", { retry: true });
+    if (generation === captureGeneration) setStatus(`Could not read that file: ${err}`, "error", { retry: true });
     return false;
   }
 
   // Title from the file name: there is no tag reader on this side, since the
   // desktop build's symphonia path isn't compiled for wasm.
   const name = file.name.replace(/\.[^.]+$/, "");
-  wasm?.bava_set_now_playing(name || undefined, undefined, undefined);
-  wasm?.bava_set_album_art(new Uint8Array());
+
 
   const ok = await attachWorklet(context, source, {
     audible: true,
+    generation,
     onStop: () => {
-      audioEl.pause();
+      fresh.pause();
       URL.revokeObjectURL(url);
     },
     label: `Playing ${file.name}`,
   });
 
-  if (ok) {
+  if (ok && generation === captureGeneration) {
+    lastVideoId = null;
+    wasm?.bava_set_now_playing(name || undefined, undefined, undefined);
+    wasm?.bava_set_album_art(new Uint8Array());
     try {
-      await audioEl.play();
+      await fresh.play();
     } catch {
       // Autoplay refused — the element has controls, so say so rather than
       // leaving a silent visualizer.
-      setStatus(`Loaded ${file.name} — press play below.`, "ok");
+      if (generation === captureGeneration) setStatus(`Loaded ${file.name} — press play below.`, "ok");
     }
   }
   return ok;
@@ -443,8 +501,8 @@ onClick(BTN_OTHER_TAB, () => startCapture(false));
 onClick(BTN_FILE, () => FILE_INPUT.click());
 onClick(BTN_RETRY, () => lastIntent?.());
 onClick(BTN_STOP, async () => {
-  await stopCapture();
   setStatus("Not capturing.");
+  await stopCapture();
 });
 
 FILE_INPUT?.addEventListener("change", () => {
@@ -570,7 +628,7 @@ async function pushNowPlaying() {
       // visualizer just keeps its configured colors.
     }
   }
-  wasm.bava_set_album_art(new Uint8Array());
+  if (lastVideoId === videoId) wasm.bava_set_album_art(new Uint8Array());
 }
 
 // --- panel ------------------------------------------------------------------

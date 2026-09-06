@@ -386,6 +386,8 @@ fn colors_section(ui: &mut egui::Ui, vis: &mut VisSettings) {
             "Override the foreground gradient with colors extracted from the \
              current track's cover. Eases on song change.",
         );
+    ui.add(egui::Slider::new(&mut vis.album_art_linger, 0.0..=60.0).text("cover linger (s)"))
+        .on_hover_text("Keep the previous cover while waiting for new art. 0 = clear immediately.");
     if vis.dynamic_colors {
         ui.add(
             egui::Slider::new(

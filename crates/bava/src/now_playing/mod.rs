@@ -176,14 +176,24 @@ fn pump_web_now_playing(keep_alive: Res<NowPlayingTxKeepAlive>) {
     web::pump(&keep_alive.0);
 }
 
+#[derive(Default)]
+struct UpdateState {
+    warned: bool,
+    clear_at: Option<f64>,
+}
+
 /// Drain now-playing messages and update resources / create art textures.
 fn apply_now_playing_updates(
     rx: Res<NowPlayingRx>,
-    mut warned: Local<bool>,
+    mut state: Local<UpdateState>,
+    time: Res<Time>,
+    vis: Res<crate::vis::VisSettings>,
     mut now_playing: ResMut<NowPlaying>,
     mut album_art: ResMut<AlbumArt>,
     mut images: ResMut<Assets<Image>>,
 ) {
+    let UpdateState { warned, clear_at } = &mut *state;
+    let now = time.elapsed_secs_f64();
     loop {
         let msg = match rx.0.try_recv() {
             Ok(msg) => msg,
@@ -209,9 +219,18 @@ fn apply_now_playing_updates(
                         track.artist.as_deref().unwrap_or("?")
                     );
                 }
+                let changed = track.title != now_playing.title
+                    || track.artist != now_playing.artist
+                    || track.album != now_playing.album
+                    || track.art_url != now_playing.art_url;
+                let same_cover = track.art_url.is_some() && track.art_url == now_playing.art_url;
+                if changed && !same_cover && album_art.image.is_some() && clear_at.is_none() {
+                    *clear_at = Some(now + f64::from(vis.album_art_linger));
+                }
                 *now_playing = track;
             }
             NowPlayingMsg::Art(Some(art)) => {
+                *clear_at = None;
                 let image = Image::new(
                     Extent3d {
                         width: art.width,
@@ -231,11 +250,15 @@ fn apply_now_playing_updates(
                 album_art.colors = art.colors;
             }
             NowPlayingMsg::Art(None) => {
-                album_art.image = None;
-                album_art.size = None;
-                album_art.colors = None;
+                if album_art.image.is_some() && clear_at.is_none() {
+                    *clear_at = Some(now + f64::from(vis.album_art_linger));
+                }
             }
         }
+    }
+    if clear_at.is_some_and(|deadline| now >= deadline) {
+        *album_art = AlbumArt::default();
+        *clear_at = None;
     }
 }
 
@@ -363,4 +386,110 @@ fn extract_palette(rgba: &[u8]) -> Option<Vec<Color>> {
     }
 
     Some(chosen)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn setup(linger: f32) -> (App, crossbeam_channel::Sender<NowPlayingMsg>) {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<NowPlaying>()
+            .init_resource::<AlbumArt>()
+            .init_resource::<Assets<Image>>()
+            .insert_resource(crate::vis::VisSettings {
+                album_art_linger: linger,
+                ..default()
+            })
+            .insert_resource(NowPlayingRx(rx))
+            .add_systems(Update, apply_now_playing_updates);
+        (app, tx)
+    }
+
+    fn art() -> NowPlayingMsg {
+        NowPlayingMsg::Art(Some(DecodedArt {
+            rgba: vec![255; 4],
+            width: 1,
+            height: 1,
+            colors: Some(vec![Color::WHITE]),
+        }))
+    }
+
+    fn advance(app: &mut App, seconds: f64) {
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(Duration::from_secs_f64(seconds));
+        app.update();
+    }
+
+    #[test]
+    fn missing_cover_lingers_then_expires_without_repeated_updates_extending_it() {
+        let (mut app, tx) = setup(5.0);
+        tx.send(art()).unwrap();
+        app.update();
+        let original = app.world().resource::<AlbumArt>().image.clone();
+        tx.send(NowPlayingMsg::Art(None)).unwrap();
+        app.update();
+        advance(&mut app, 4.0);
+        tx.send(NowPlayingMsg::Art(None)).unwrap();
+        app.update();
+        assert_eq!(app.world().resource::<AlbumArt>().image, original);
+        assert!(app.world().resource::<AlbumArt>().colors.is_some());
+        advance(&mut app, 1.0);
+        assert!(app.world().resource::<AlbumArt>().image.is_none());
+        assert!(app.world().resource::<AlbumArt>().colors.is_none());
+    }
+
+    #[test]
+    fn replacement_arrives_immediately_and_cancels_expiration() {
+        let (mut app, tx) = setup(5.0);
+        tx.send(art()).unwrap();
+        app.update();
+        let original = app.world().resource::<AlbumArt>().image.clone();
+        tx.send(NowPlayingMsg::Track(NowPlaying {
+            title: Some("Next".into()),
+            ..default()
+        }))
+        .unwrap();
+        app.update();
+        advance(&mut app, 2.0);
+        tx.send(art()).unwrap();
+        app.update();
+        let replacement = app.world().resource::<AlbumArt>().image.clone();
+        assert_ne!(replacement, original);
+        advance(&mut app, 10.0);
+        assert_eq!(app.world().resource::<AlbumArt>().image, replacement);
+    }
+
+    #[test]
+    fn zero_linger_clears_immediately() {
+        let (mut app, tx) = setup(0.0);
+        tx.send(art()).unwrap();
+        app.update();
+        tx.send(NowPlayingMsg::Art(None)).unwrap();
+        app.update();
+        assert!(app.world().resource::<AlbumArt>().image.is_none());
+    }
+
+    #[test]
+    fn same_album_url_keeps_cover_across_tracks() {
+        let (mut app, tx) = setup(5.0);
+        for title in ["First", "Second"] {
+            tx.send(NowPlayingMsg::Track(NowPlaying {
+                title: Some(title.into()),
+                art_url: Some("file:///cover.png".into()),
+                ..default()
+            }))
+            .unwrap();
+            if title == "First" {
+                tx.send(art()).unwrap();
+            }
+            app.update();
+        }
+        advance(&mut app, 10.0);
+        assert!(app.world().resource::<AlbumArt>().image.is_some());
+    }
 }

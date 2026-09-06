@@ -7,7 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1](https://github.com/dekuraan/bava/releases/tag/v0.4.1) - 2026-09-06
+
+### Added
+
+- Configurable cover linger (`[vis] album_art_linger`, default 5 seconds), also available in the settings editor. The previous cover and palette remain while replacement art loads.
+
 ### Fixed
+
+- Browser capture starts cannot overwrite newer sources or leak streams when async operations finish out of order.
+- Service-worker caches are isolated per installation, preserve unrelated apps, and retain at most two hashed versions per asset.
+- Linux album-art downloads no longer block metadata polling; failed downloads retry and obsolete results are ignored.
 
 - Balls settle on a silent orb instead of receiving repeated outward and orbital kicks. Radial gravity respects sleeping, changing geometry wakes contacts, and the collider includes the outline thickness.
 - Audio capture retries failed startup connections and reports its state in settings.
