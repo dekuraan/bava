@@ -8,7 +8,7 @@ takes to publish. Artwork for all of them comes from one generator —
 | --- | --- | --- | --- |
 | **AUR** `bava` | [`aur/bava/`](aur/bava) | AUR account + SSH key | v0.4.1 manifest prepared; not published (CI credentials absent) |
 | **AUR** `bava-git` | [`aur/bava-git/`](aur/bava-git) | AUR account + SSH key | not published; publish once, then `pkgver()` tracks HEAD |
-| **Flathub** | [`../flatpak/`](../flatpak) | Flathub review PR | release manifest generated; CI validates the bundle before human submission |
+| **Flathub** | [`../flatpak/`](../flatpak) | Flathub review PR | bundle published on GitHub; install, CLI, and encoder checks passed; human Flathub submission pending |
 | **.deb** | `[package.metadata.deb]` in `crates/bava/Cargo.toml` | none | ready — built and attached on every `v*` tag |
 | **.rpm** | `[package.metadata.generate-rpm]` in the same file | none | ready — same |
 | **AppImage** | [`appimage/build-appimage.sh`](appimage/build-appimage.sh) | none | ready — same |

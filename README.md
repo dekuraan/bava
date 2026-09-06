@@ -33,6 +33,10 @@ sudo apt install ./bava_*.deb   sudo dnf install ./bava-*.rpm
 # Anything else (no install, no root)
 chmod +x bava-*.AppImage && ./bava-*.AppImage
 
+# Flatpak bundle from the release assets
+flatpak install --user ./bava-0.4.1-x86_64.flatpak
+flatpak run io.github.dekuraan.bava
+
 # Nix
 nix run github:dekuraan/bava
 ```
