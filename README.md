@@ -38,8 +38,8 @@ nix run github:dekuraan/bava
 ```
 
 The AppImage is the PulseAudio-only build, which works on pure-PulseAudio hosts
-*and* on PipeWire hosts via pipewire-pulse. The `.deb`/`.rpm` also use the PulseAudio-only build for compatibility with
-older distributions.
+*and* on PipeWire hosts via pipewire-pulse. The `.deb`/`.rpm` also use the
+PulseAudio-only build for compatibility with older distributions.
 
 Building from source is [below](#build--run).
 

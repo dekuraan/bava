@@ -6,14 +6,14 @@ takes to publish. Artwork for all of them comes from one generator —
 
 | Channel | Files | Gatekeeper | State |
 | --- | --- | --- | --- |
-| **AUR** `bava` | [`aur/bava/`](aur/bava) | none (AUR account) | ready — published by `publish.sh`, then automatically on every tag |
-| **AUR** `bava-git` | [`aur/bava-git/`](aur/bava-git) | none (AUR account) | ready — publish once, `pkgver()` tracks HEAD afterwards |
-| **Flathub** | [`../flatpak/`](../flatpak) | Flathub review PR | builds locally; needs a submittable `sources:` before the PR (see below) |
+| **AUR** `bava` | [`aur/bava/`](aur/bava) | AUR account + SSH key | v0.4.1 manifest prepared; not published (CI credentials absent) |
+| **AUR** `bava-git` | [`aur/bava-git/`](aur/bava-git) | AUR account + SSH key | not published; publish once, then `pkgver()` tracks HEAD |
+| **Flathub** | [`../flatpak/`](../flatpak) | Flathub review PR | release manifest generated; CI validates the bundle before human submission |
 | **.deb** | `[package.metadata.deb]` in `crates/bava/Cargo.toml` | none | ready — built and attached on every `v*` tag |
 | **.rpm** | `[package.metadata.generate-rpm]` in the same file | none | ready — same |
 | **AppImage** | [`appimage/build-appimage.sh`](appimage/build-appimage.sh) | none | ready — same |
-| **Nix** | [`../flake.nix`](../flake.nix), [`nix/package.nix`](nix/package.nix) | none (nixpkgs PR is optional) | written, **not yet evaluated** — no nix on the dev box |
-| **Snap Store** | [`../snap/snapcraft.yaml`](../snap/snapcraft.yaml) | Snapcraft account; manual review only if you go classic | written, **not yet built** — needs LXD + snapcraft |
+| **Nix** | [`../flake.nix`](../flake.nix), [`nix/package.nix`](nix/package.nix) | none (nixpkgs PR is optional) | CI evaluation and build added; publication check in progress |
+| **Snap Store** | [`../snap/snapcraft.yaml`](../snap/snapcraft.yaml) | Snapcraft account; manual review only if you go classic | CI build added; publisher account needed for upload |
 | **macOS** | [`macos/bava.icns`](macos) | — | icon only; no `.app` bundling yet |
 | **Web/wasm** | [`web/`](web), [`../crates/bava/web/`](../crates/bava/web) | — | **live** — built by trunk and deployed to GitHub Pages on every push to `main` |
 | **TV app stores** | — | — | not viable, see [below](#tv-app-stores) |
@@ -26,7 +26,7 @@ Both install the binary plus the `.desktop`, icon, and AppStream metainfo.
 ```sh
 packaging/aur/publish.sh bava-git          # one-time
 packaging/aur/publish.sh bava              # one-time; CI handles it after that
-packaging/aur/publish.sh bava 0.4.0        # manual bump: rewrites pkgver + sha256sums
+packaging/aur/publish.sh bava 0.4.1        # manual bump: rewrites pkgver + sha256sums
 ```
 
 Publishing needs an [AUR account](https://aur.archlinux.org/register) with your
@@ -53,26 +53,27 @@ makepkg --printsrcinfo > .SRCINFO               # publish.sh does this for you
 The manifest, desktop entry, metainfo, and icon live in [`../flatpak/`](../flatpak);
 that README covers building and running locally. Submitting:
 
-1. **Swap `sources:` for something Flathub can fetch.** The in-tree manifest
-   uses `type: dir, path: ..`, which only resolves when building from a
-   checkout of *this* repo. Flathub's buildbot checks out only the flathub
-   repo, so a submission needs the released tarball instead:
+1. Generate the release manifest and refresh vendored dependencies:
 
-   ```yaml
-   sources:
-     - type: archive
-       url: https://github.com/dekuraan/bava/archive/refs/tags/v0.4.0.tar.gz
-       sha256: <sha256sum of that exact tarball>
-     - cargo-sources.json
+   ```sh
+   python3 flatpak/gen-cargo-sources.py
+   mkdir -p /tmp/bava-flathub
+   python3 flatpak/gen-flathub-manifest.py v0.4.1 -o /tmp/bava-flathub/io.github.dekuraan.bava.yml
+   cp flatpak/cargo-sources.json /tmp/bava-flathub/
    ```
 
-   Both values depend on the tag, so this step can only happen after a release
-   is tagged — keep the `type: dir` version in-tree for local builds.
-2. Fork [flathub/flathub](https://github.com/flathub/flathub), branch
-   `new-pr`, add `io.github.dekuraan.bava.yml` (plus `cargo-sources.json`), open
-   a PR against the `new-pr` branch. A bot builds it; a reviewer follows up.
-3. Re-run `python3 flatpak/gen-cargo-sources.py` after **any** dependency
-   change — Flathub builds offline, and a stale vendored list fails the build.
+   Use the matching release checkout: the vendor list must match its `Cargo.lock`.
+   The Distribution packages workflow builds this archive-based manifest and
+   uploads the submission files and Flatpak bundle.
+2. Review and test the package before submitting it. Follow the current
+   [Flathub submission instructions](https://docs.flathub.org/docs/for-app-authors/submission).
+   A human must open the PR against `flathub/flathub`'s `new-pr` branch and write
+   its commit messages, description, and replies. Flathub's
+   [generative AI policy](https://docs.flathub.org/docs/for-app-authors/requirements#generative-ai-policy)
+   prohibits agents from doing those submission interactions and requires
+   disclosure of known generated material in the app and packaging.
+3. After approval, accept the app repository invitation and complete developer
+   verification. A prepared manifest is not a published store listing.
 
 The `io.github.*` app-id requires you to own `github.com/dekuraan/bava`, which
 you do. `docs/screenshot.png` is already committed and the metainfo points at
@@ -147,8 +148,8 @@ nearly verbatim — swap the `src` default for a `fetchFromGitHub` and
 libxkbcommon, so `postFixup` patchelfs them onto the binary's rpath; without
 that the app dies at window creation.
 
-**Unverified.** Neither file has been evaluated — there's no nix on the machine
-they were written on. Expect to iterate on `nix build .#bava` once.
+The Distribution packages workflow evaluates the flake, builds the package,
+and runs `bava --version` on an isolated Linux runner.
 
 ## Snap
 
@@ -171,8 +172,8 @@ Two confinement caveats worth knowing before you publish:
   written justification. Strict-but-degraded is the honest default; revisit if
   users complain.
 
-**Unbuilt.** snapcraft needs LXD and a Ubuntu-ish host; this was written on
-Arch. Expect one round of fixes on the first `snapcraft` run.
+The Distribution packages workflow builds the snap in LXD on Ubuntu and
+uploads it as an artifact. Store publication is a separate authenticated step.
 
 ## TV app stores
 
@@ -210,3 +211,20 @@ The `--public-url` matters: a project page is served from
 `https://<user>.github.io/<repo>/`, and without the prefix the page requests the
 wasm at the domain root and gets the 404 page back. Pages must be set to the
 "GitHub Actions" source once in repo settings.
+
+## Publication prerequisites
+
+- **AUR:** register an account and an SSH public key. Configure repository secrets
+  `AUR_USERNAME`, `AUR_EMAIL`, and `AUR_SSH_PRIVATE_KEY` for release automation.
+  A green workflow does not prove publication: the AUR steps skip when the key
+  is absent. Verify the package on AUR after a push.
+- **Snap Store:** register the `bava` name under your publisher account, then
+  authenticate Snapcraft before uploading the built `.snap`. Do not paste
+  credentials into issues or chat. The Distribution packages workflow builds
+  an artifact without requiring store credentials.
+- **Nix:** the GitHub flake can be used directly once its build passes. Inclusion
+  in nixpkgs is a separate contribution. Its
+  [automation policy](https://github.com/NixOS/nixpkgs/blob/master/CONTRIBUTING.md#automationai-policy)
+  requires human review and disclosure before submitting generated changes.
+- **GitHub Releases / web:** v0.4.1 binaries and packages are published, and
+  GitHub Pages is deployed. These do not require another store account.

@@ -19,6 +19,7 @@ Output: flatpak/cargo-sources.json
 """
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 import tomllib
@@ -33,7 +34,11 @@ VENDOR = "cargo/vendor"
 
 
 def main() -> int:
-    with LOCK.open("rb") as f:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--lock", type=Path, default=LOCK)
+    parser.add_argument("-o", "--output", type=Path, default=OUT)
+    args = parser.parse_args()
+    with args.lock.open("rb") as f:
         lock = tomllib.load(f)
 
     sources: list[dict] = []
@@ -111,9 +116,9 @@ def main() -> int:
         )
         return 1
 
-    OUT.write_text(json.dumps(sources, indent=4) + "\n")
+    args.output.write_text(json.dumps(sources, indent=4) + "\n")
     crates = sum(1 for s in sources if s["type"] == "archive")
-    print(f"wrote {OUT.relative_to(ROOT)} ({crates} crates)")
+    print(f"wrote {args.output} ({crates} crates)")
     return 0
 
 
