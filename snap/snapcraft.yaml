@@ -52,7 +52,6 @@ apps:
 parts:
   bava:
     plugin: rust
-    build-snaps: [rustup]
     source: .
     rust-path: [crates/bava]
     override-pull: |
@@ -60,6 +59,7 @@ parts:
       # Single source of truth for the version: the crate manifest.
       craftctl set version="$(sed -n '0,/^version = /s/^version = "\(.*\)"/\1/p' crates/bava/Cargo.toml)"
     build-packages:
+      - rustup
       - clang            # libspa-sys bindgen over the PipeWire headers
       - libclang-dev
       - pkg-config

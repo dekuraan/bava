@@ -12,7 +12,7 @@ takes to publish. Artwork for all of them comes from one generator —
 | **.deb** | `[package.metadata.deb]` in `crates/bava/Cargo.toml` | none | ready — built and attached on every `v*` tag |
 | **.rpm** | `[package.metadata.generate-rpm]` in the same file | none | ready — same |
 | **AppImage** | [`appimage/build-appimage.sh`](appimage/build-appimage.sh) | none | ready — same |
-| **Nix** | [`../flake.nix`](../flake.nix), [`nix/package.nix`](nix/package.nix) | none (nixpkgs PR is optional) | CI evaluation and build added; publication check in progress |
+| **Nix** | [`../flake.nix`](../flake.nix), [`nix/package.nix`](nix/package.nix) | none (nixpkgs PR is optional) | x86_64 Linux build and CLI check passed; usable directly from GitHub |
 | **Snap Store** | [`../snap/snapcraft.yaml`](../snap/snapcraft.yaml) | Snapcraft account; manual review only if you go classic | CI build added; publisher account needed for upload |
 | **macOS** | [`macos/bava.icns`](macos) | — | icon only; no `.app` bundling yet |
 | **Web/wasm** | [`web/`](web), [`../crates/bava/web/`](../crates/bava/web) | — | **live** — built by trunk and deployed to GitHub Pages on every push to `main` |
@@ -136,7 +136,7 @@ dependency list is only correct when built on the CI runner.
 ## Nix
 
 ```sh
-nix run github:dekuraan/bava      # once the flake is on the default branch
+nix run github:dekuraan/bava
 nix build .#bava
 nix develop                       # dev shell with the runtime libs on LD_LIBRARY_PATH
 ```
