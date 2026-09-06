@@ -21,15 +21,14 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: distribution-${{ github.ref }}
-  cancel-in-progress: false
-
 env:
   RELEASE_TAG: v0.4.1
 
 jobs:
   flatpak:
+    concurrency:
+      group: distribution-flatpak-${{ github.ref }}
+      cancel-in-progress: false
     name: Flatpak release manifest
     runs-on: ubuntu-latest
     container:
@@ -61,6 +60,9 @@ jobs:
           path: submission/
 
   snap:
+    concurrency:
+      group: distribution-snap-${{ github.ref }}
+      cancel-in-progress: false
     name: Snap
     runs-on: ubuntu-24.04
     steps:
@@ -73,6 +75,9 @@ jobs:
           path: ${{ steps.snapcraft.outputs.snap }}
 
   nix:
+    concurrency:
+      group: distribution-nix-${{ github.ref }}
+      cancel-in-progress: false
     name: Nix flake
     runs-on: ubuntu-latest
     steps:
