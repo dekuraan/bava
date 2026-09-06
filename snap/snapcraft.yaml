@@ -54,6 +54,10 @@ parts:
     plugin: rust
     source: .
     rust-path: [crates/bava]
+    # Build with Ubuntu's tools; the GNOME SDK environment is for GTK builds.
+    build-environment:
+      - PATH: /usr/bin:/bin:${PATH}
+      - LD_LIBRARY_PATH: ""
     override-pull: |
       craftctl default
       # Single source of truth for the version: the crate manifest.
