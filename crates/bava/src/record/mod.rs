@@ -31,7 +31,7 @@ use bevy::window::{ExitCondition, PresentMode, WindowCloseRequested, WindowResol
 use bevy::winit::WinitPlugin;
 use bevy_capture::{Capture, CaptureBundle, CapturePlugin, RenderTargetHeadless};
 
-use crate::cava::{AudioInjector, CavaPlugin, OfflineCavaSet};
+use crate::cava::{AudioInjector, CavaPlugin, CavaSettings, OfflineCavaSet};
 use crate::config::{Cli, Config};
 use crate::gui::EditorState;
 use crate::now_playing::NowPlayingPlugin;
@@ -390,6 +390,25 @@ fn pcm_target(frames: u64, rate: u32, fps: u32, total: usize) -> usize {
     ((frames * rate as u64 / fps.max(1) as u64) as usize).min(total)
 }
 
+fn analysis_settings(
+    config: &Config,
+    debug: bool,
+    rate: u32,
+    channels: usize,
+) -> Result<CavaSettings, String> {
+    let mut settings = config.to_cava_settings(debug);
+    settings.rate = rate;
+    settings.channels = channels;
+    settings.source = None;
+    settings.follow_active_sink = false;
+    settings.high_cutoff_freq = settings.high_cutoff_freq.min((rate / 2).saturating_sub(1));
+    settings
+        .plan_config()
+        .build()
+        .map_err(|e| format!("cannot analyze decoded audio: {e}"))?;
+    Ok(settings)
+}
+
 /// Decode `--input`, build the offline app, render, encode. Returns an error
 /// string for `main` to print; `Ok` means the video was written and verified
 /// by ffmpeg's exit status.
@@ -443,11 +462,7 @@ pub fn run(cli: &Cli, config: &Config) -> Result<(), String> {
 
     // The cavacore plan must match the decoded stream exactly; capture-thread
     // options are meaningless offline.
-    let mut settings = config.to_cava_settings(cli.debug);
-    settings.rate = track.rate;
-    settings.channels = track.channels;
-    settings.source = None;
-    settings.follow_active_sink = false;
+    let settings = analysis_settings(config, cli.debug, track.rate, track.channels)?;
 
     let offline_track = track.track.clone();
     let spec = RecordSpec {
@@ -545,6 +560,28 @@ pub fn run(cli: &Cli, config: &Config) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn low_rate_audio_gets_a_valid_analysis_band() {
+        for rate in [8_000, 16_000, 22_050, 44_100, 48_000] {
+            let settings = analysis_settings(&Config::default(), false, rate, 1).unwrap();
+            let plan = settings
+                .plan_config()
+                .build()
+                .expect("decoded audio must be analyzable");
+            assert_eq!(plan.rate(), rate);
+            assert_eq!(plan.channels(), 1);
+            assert_eq!(settings.low_cutoff_freq, 50);
+            assert_eq!(settings.high_cutoff_freq, 10_000.min(rate / 2 - 1));
+        }
+    }
+
+    #[test]
+    fn invalid_offline_analysis_fails_before_rendering() {
+        let mut config = Config::default();
+        config.cava.low_cutoff_freq = 5_000;
+        assert!(analysis_settings(&config, false, 8_000, 1).is_err());
+    }
 
     /// Feeding frame by frame must cover every sample exactly once, in order,
     /// with steady per-frame chunks — cavacore's autosens depends on it.

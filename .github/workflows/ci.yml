@@ -27,6 +27,16 @@ env:
   CARGO_PROFILE_DEV_DEBUG: "1"
 
 jobs:
+  flatpak-sources:
+    name: Flatpak sources match lockfile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - run: python3 flatpak/gen-cargo-sources.py --check
+
   web-js:
     name: Web JavaScript tests
     runs-on: ubuntu-latest

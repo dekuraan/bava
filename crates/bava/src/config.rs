@@ -325,8 +325,6 @@ pub struct PhysicsConfig {
     /// workload, so this is how you reproduce a loaded scene — for a benchmark or
     /// just to start with the playground already full.
     pub spawn_on_launch: usize,
-    /// Spectrum-surface smoothing time constant, in seconds (larger = smoother).
-    pub bar_smoothing: f32,
     /// Restitution of the spectrum surface.
     pub bar_restitution: f32,
     /// Launch gain: how strongly a rising surface flings balls along its normal.
@@ -446,7 +444,6 @@ impl Config {
                 randomize: physics.randomize,
                 spawn_debounce_ms: physics.spawn_debounce_ms,
                 spawn_on_launch: physics.spawn_on_launch,
-                bar_smoothing: physics.bar_smoothing,
                 bar_restitution: physics.bar_restitution,
                 bar_push: physics.bar_push,
                 central_gravity: physics.central_gravity,
@@ -747,7 +744,6 @@ impl Config {
             randomize: p.randomize,
             spawn_debounce_ms: p.spawn_debounce_ms,
             spawn_on_launch: p.spawn_on_launch,
-            bar_smoothing: p.bar_smoothing,
             bar_restitution: p.bar_restitution,
             bar_push: p.bar_push,
             // Inward pull magnitude; negative values would make the orbit

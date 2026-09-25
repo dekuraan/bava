@@ -646,11 +646,6 @@ fn physics_section(ui: &mut egui::Ui, physics: &mut PhysicsSettings) {
 
     ui.collapsing("Surface / wave", |ui| {
         ui.add(
-            egui::Slider::new(&mut physics.bar_smoothing, 0.005..=1.0)
-                .text("smoothing (s)")
-                .step_by(0.005),
-        );
-        ui.add(
             egui::Slider::new(&mut physics.bar_restitution, 0.0..=2.0)
                 .text("surface restitution")
                 .step_by(0.01),

@@ -52,7 +52,7 @@ const LENGTH_UNIT: f32 = 100.0;
 const WALL_THICKNESS: f32 = 200.0;
 /// Horizontal resolution of the Wave heightfield collider. Higher = smoother
 /// curve and finer slope normals.
-const SAMPLES: usize = 192;
+const SAMPLES: usize = super::bars::WAVE_SEGMENTS + 1;
 /// Park an inactive surface/planet/column body far outside the world.
 const PARKED: f32 = 1.0e6;
 /// Floor outward speed (px/s) used to unstick a ball a box surface/column has
@@ -85,8 +85,6 @@ pub struct PhysicsSettings {
     /// Balls to spawn across the drawing area at launch (0 = start empty), from
     /// `[physics] spawn_on_launch` / `--spawn-balls N`. See [`spawn_initial_balls`].
     pub spawn_on_launch: usize,
-    /// Surface smoothing time constant, in seconds (larger = smoother/slower).
-    pub bar_smoothing: f32,
     /// Restitution of the spectrum surface.
     pub bar_restitution: f32,
     /// Launch gain: how strongly a rising surface/column flings balls.
@@ -118,7 +116,6 @@ impl Default for PhysicsSettings {
             randomize: true,
             spawn_debounce_ms: 500,
             spawn_on_launch: 3,
-            bar_smoothing: 0.05,
             bar_restitution: 1.0,
             bar_push: 1.6,
             central_gravity: 1500.0,
@@ -831,19 +828,10 @@ fn despawn_escaped_balls(
 /// Resolve the smoothed Wave surface height for column `s` (0..SAMPLES) from the
 /// cava bar `values`, interpolating smoothly between bars for a blobby curve.
 fn sample_height(values: &[f32], s: usize) -> f32 {
-    let n = values.len();
-    if n == 1 {
-        return values[0];
-    }
-    let f = s as f32 / (SAMPLES - 1) as f32 * (n - 1) as f32;
-    let i0 = (f.floor() as usize).min(n - 1);
-    let i1 = (i0 + 1).min(n - 1);
-    let frac = f - i0 as f32;
-    let t = frac * frac * (3.0 - 2.0 * frac); // smoothstep
-    values[i0] + (values[i1] - values[i0]) * t
+    super::bars::sample_h(values, s as f32 / (SAMPLES - 1) as f32)
 }
 
-/// Rebuild the **Wave** heightfield collider from the latest audio, time-smoothed.
+/// Rebuild the **Wave** heightfield collider from the rendered spectrum.
 /// Parked offscreen unless WaveBox is active. Updates the shared [`Surface`] for
 /// [`push_balls`].
 #[allow(clippy::too_many_arguments)]
@@ -852,7 +840,6 @@ fn update_surface(
     settings: Res<PhysicsSettings>,
     cava: Res<Cava>,
     vis: Res<VisSettings>,
-    time: Res<Time>,
     windows: Query<&Window>,
     surface: ResMut<Surface>,
     mut body: Query<(&mut Collider, &mut Transform), With<SurfaceBody>>,
@@ -873,7 +860,6 @@ fn update_surface(
     let oy = vis.area_offset.y * h * 0.5;
     let floor = -eff_h * 0.5 + oy;
     let max_h = eff_h * MAX_HEIGHT_FRAC;
-    let dt = time.delta_secs();
     let active = wave_active(*mode, &vis);
 
     // Save last frame's heights for the velocity field, then compute targets.
@@ -881,32 +867,20 @@ fn update_surface(
     let surface = surface.into_inner();
     surface.prev.copy_from_slice(&surface.heights);
 
-    let alpha = if settings.bar_smoothing > 0.0 {
-        1.0 - (-dt / settings.bar_smoothing).exp()
-    } else {
-        1.0
-    };
-
     let n = cava.bars_per_channel;
-    if !active {
+    if !active || n == 0 {
         // The body is parked offscreen the moment Wave deactivates, so no one
         // can see a gradual relax — snap flat so `settled` below skips the
         // collider/BVH rebuild immediately instead of reconstructing an
         // unreachable heightfield for another second of easing.
         surface.heights.fill(floor);
-    } else if n == 0 {
-        // Active but no audio yet: relax the surface flat to the floor.
-        for hgt in &mut surface.heights {
-            *hgt += (floor - *hgt) * alpha;
-        }
     } else {
         // Same value array the rendered Wave line is built from (monstercat,
         // mirror and `reverse_order` all applied).
         let values = mirror_values(&cava, &vis, n);
         for s in 0..SAMPLES {
             let v = sample_height(&values, s).clamp(0.0, 1.5);
-            let target = floor + v * max_h;
-            surface.heights[s] += (target - surface.heights[s]) * alpha;
+            surface.heights[s] = floor + v * max_h;
         }
     }
 
@@ -1670,6 +1644,33 @@ mod tests {
     use std::time::Duration;
 
     const DT: f32 = 1.0 / 60.0;
+
+    #[test]
+    fn wave_surface_tracks_spectrum_changes_in_the_same_frame() {
+        let mut app = bare_app();
+        app.insert_resource(PhysicsSettings::default());
+        app.insert_resource(VisSettings::default());
+        app.insert_resource(DrawingMode::WaveBox);
+        app.insert_resource(Cava {
+            bars: vec![0.3; 24],
+            bars_per_channel: 24,
+            channels: 1,
+        });
+        app.init_resource::<Surface>();
+        app.add_systems(Update, update_surface);
+        step(&mut app, 120);
+        for level in [0.8, 0.1] {
+            app.world_mut().resource_mut::<Cava>().bars.fill(level);
+            step(&mut app, 1);
+            let drawn_height = -360.0 + level * 720.0 * MAX_HEIGHT_FRAC;
+            for &height in &app.world().resource::<Surface>().heights {
+                assert!(
+                    (height - drawn_height).abs() < 0.01,
+                    "collider {height}, wave {drawn_height}"
+                );
+            }
+        }
+    }
 
     // --- shared builders ----------------------------------------------------
 

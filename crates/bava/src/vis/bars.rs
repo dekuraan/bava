@@ -38,7 +38,7 @@ pub(crate) const BAR_GAP: f32 = 2.0;
 /// Discrete steps a Levels column snaps to.
 pub(crate) const LEVEL_STEPS: f32 = 14.0;
 /// Smooth segments used to draw a Wave line.
-const WAVE_SEGMENTS: usize = 192;
+pub(crate) const WAVE_SEGMENTS: usize = 192;
 
 /// Marks the visualizer's main camera — the one that draws the spectrum (as
 /// opposed to e.g. the record-mode preview camera). Post-process syncing and
@@ -616,7 +616,7 @@ fn update_box_lines(
 
 /// Smoothstep-interpolated value at `t` (0..1) across the spectrum, for the
 /// continuous Wave line.
-fn sample_h(values: &[f32], t: f32) -> f32 {
+pub(crate) fn sample_h(values: &[f32], t: f32) -> f32 {
     let n = values.len();
     if n == 0 {
         return 0.0;
