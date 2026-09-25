@@ -77,6 +77,20 @@ impl Default for CavaSettings {
     }
 }
 
+impl CavaSettings {
+    pub fn plan_config(&self) -> CavaConfig {
+        CavaConfig {
+            bars: self.bars_per_channel as u32,
+            rate: self.rate,
+            channels: self.channels as u32,
+            autosens: self.autosens,
+            noise_reduction: self.noise_reduction,
+            low_cutoff_freq: self.low_cutoff_freq,
+            high_cutoff_freq: self.high_cutoff_freq,
+        }
+    }
+}
+
 /// Request to rebuild the cavacore plan from the current [`CavaSettings`].
 ///
 /// Set `.0 = true` (e.g. from the settings editor) after changing DSP-relevant
@@ -272,15 +286,7 @@ impl Plugin for CavaPlugin {
         }
 
         // Build the cavacore plan on the main thread and keep it there.
-        let cfg = CavaConfig {
-            bars: settings.bars_per_channel as u32,
-            rate: settings.rate,
-            channels: settings.channels as u32,
-            autosens: settings.autosens,
-            noise_reduction: settings.noise_reduction,
-            low_cutoff_freq: settings.low_cutoff_freq,
-            high_cutoff_freq: settings.high_cutoff_freq,
-        };
+        let cfg = settings.plan_config();
         match cfg.build() {
             Ok(plan) => {
                 info!(
@@ -397,7 +403,11 @@ fn active_sink_monitor() -> Option<String> {
 /// reopens the capture there — so audio routed to a non-default output (an HDMI
 /// display, say) is visualized without the user pinning a source by hand.
 #[cfg(not(target_arch = "wasm32"))]
-fn capture_reader(settings: CavaSettings, ring: AudioRing, status: CaptureStatus) {
+fn capture_reader(mut settings: CavaSettings, ring: AudioRing, status: CaptureStatus) {
+    // A single read must fit the ring even when the DSP chunk setting is huge.
+    settings.frame_samples = settings
+        .frame_samples
+        .clamp(1, ring.cap / settings.channels);
     // Follow the active sink only when the user hasn't pinned an explicit source.
     let follow = settings.source.is_none() && settings.follow_active_sink;
 
@@ -575,7 +585,11 @@ fn feed_cava(
     // thread are pinned to the startup channel count, so an editor edit to
     // `CavaSettings.channels` must not change how we deinterleave (it would
     // desync the chunk from the plan and corrupt the analysis until restart).
-    let chunk = (settings.frame_samples.max(1) * state.plan.channels().max(1)).max(1);
+    let chunk = settings
+        .frame_samples
+        .max(1)
+        .min(state.plan.max_input_samples() / state.plan.channels())
+        * state.plan.channels();
 
     // Accumulate whatever was captured since the last frame.
     if let Ok(mut q) = ring.buf.lock() {
@@ -837,6 +851,27 @@ fn stop_on_exit(mut exit: MessageReader<AppExit>, ring: Option<Res<AudioRing>>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oversized_chunks_preserve_signal_after_the_first_fft_buffer() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(CavaSettings {
+            channels: 1,
+            frame_samples: 65_536,
+            ..default()
+        });
+        app.add_plugins(CavaPlugin { offline: true });
+        let capacity = app.world().non_send::<CavaState>().plan.max_input_samples();
+        let mut samples = vec![0.0; 65_536];
+        for (i, sample) in samples.iter_mut().enumerate().skip(capacity) {
+            *sample = (i as f64 * std::f64::consts::TAU * 440.0 / 44_100.0).sin() * 0.8;
+        }
+        app.world().resource::<AudioInjector>().push(&samples);
+        app.update();
+        assert!(app.world().resource::<Cava>().bars.iter().any(|&v| v > 0.0));
+        assert!(app.world().non_send::<CavaState>().accum.is_empty());
+    }
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]

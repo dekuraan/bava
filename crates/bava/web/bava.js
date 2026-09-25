@@ -69,6 +69,7 @@ let captureGeneration = 0;
 let player = null;
 /** Video id whose metadata we last pushed, so we only push on real changes. */
 let lastVideoId = null;
+let metadataSource = null;
 /** How to repeat the last start, for the Retry button. Null if unrepeatable. */
 let lastIntent = null;
 /** The <audio> element for file playback, rebuilt per file (see startFile). */
@@ -237,6 +238,8 @@ async function attachWorklet(context, sourceNode, { audible, onStop, label, gene
 
 async function stopCapture(invalidate = true) {
   if (invalidate) captureGeneration++;
+  metadataSource = null;
+  lastVideoId = null;
   const current = capture;
   capture = null;
   BTN_STOP.hidden = true;
@@ -363,12 +366,22 @@ async function startCapture(currentTab) {
     return false;
   }
 
-  return attachWorklet(context, context.createMediaStreamSource(stream), {
+  const ok = await attachWorklet(context, context.createMediaStreamSource(stream), {
     audible: false,
     generation,
     onStop: releaseStream,
     label: `Capturing ${audioTrack.label || "tab audio"}`,
   });
+  if (ok && generation === captureGeneration) {
+    metadataSource = currentTab ? "youtube" : null;
+    if (currentTab) pushNowPlaying();
+    else {
+      player?.pauseVideo();
+      wasm?.bava_set_now_playing(undefined, undefined, undefined);
+      wasm?.bava_set_album_art(new Uint8Array());
+    }
+  }
+  return ok;
 }
 
 // --- source 2: a local file -------------------------------------------------
@@ -381,6 +394,8 @@ async function startFile(file) {
   const generation = ++captureGeneration;
   await stopCapture(false);
   if (generation !== captureGeneration) return false;
+  metadataSource = "file";
+  player?.pauseVideo();
 
   // `createMediaElementSource` binds an element to one AudioContext for the
   // element's lifetime, and we close the context on every stop. Replacing the
@@ -480,7 +495,7 @@ async function startEverything() {
   // startCapture must be reached without an intervening await, or the gesture
   // is spent — cueVideoById above is synchronous, which is why it can precede.
   const ok = await startCapture(true);
-  if (ok) player?.playVideo();
+  if (ok && metadataSource === "youtube") player?.playVideo();
 }
 
 // --- wiring -----------------------------------------------------------------
@@ -599,7 +614,8 @@ if (!FILE_ONLY) {
  * the cover.
  */
 async function pushNowPlaying() {
-  if (!wasm || !player?.getVideoData) return;
+  if (metadataSource !== "youtube" || !wasm || !player?.getVideoData) return;
+  const generation = captureGeneration;
   const data = player.getVideoData();
   const videoId = data?.video_id;
   if (!videoId || videoId === lastVideoId) return;
@@ -619,7 +635,7 @@ async function pushNowPlaying() {
       if (!response.ok) continue;
       const bytes = new Uint8Array(await response.arrayBuffer());
       // Bail if another video was loaded while this fetch was in flight.
-      if (lastVideoId !== videoId) return;
+      if (generation !== captureGeneration || metadataSource !== "youtube" || lastVideoId !== videoId) return;
       wasm.bava_set_album_art(bytes);
       return;
     } catch {
@@ -627,7 +643,9 @@ async function pushNowPlaying() {
       // visualizer just keeps its configured colors.
     }
   }
-  if (lastVideoId === videoId) wasm.bava_set_album_art(new Uint8Array());
+  if (generation === captureGeneration && metadataSource === "youtube" && lastVideoId === videoId) {
+    wasm.bava_set_album_art(new Uint8Array());
+  }
 }
 
 // --- panel ------------------------------------------------------------------

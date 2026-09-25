@@ -45,6 +45,20 @@ fn rejects_zero_bars() {
 }
 
 #[test]
+fn rejects_bar_counts_above_signed_integer_range() {
+    for bars in [1 << 31, u32::MAX] {
+        assert!(
+            CavaConfig {
+                bars,
+                ..Default::default()
+            }
+            .build()
+            .is_err()
+        );
+    }
+}
+
+#[test]
 fn rejects_zero_rate() {
     let err = CavaConfig {
         rate: 0,
