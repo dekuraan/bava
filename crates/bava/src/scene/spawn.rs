@@ -9,9 +9,10 @@
 use std::collections::HashMap;
 use std::f32::consts::{FRAC_PI_2, TAU};
 
-use avian2d::prelude::{Collider, LinearVelocity, Restitution, RigidBody};
+use avian2d::prelude::{Collider, LinearVelocity, Restitution, RigidBody, Rotation};
 use bevy::animation::graph::{AnimationGraph, AnimationGraphHandle, AnimationNodeIndex};
 use bevy::animation::{AnimationClip, AnimationPlayer};
+use bevy::asset::UntypedAssetId;
 use bevy::camera::{ClearColorConfig, Hdr, RenderTarget, visibility::NoFrustumCulling};
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::gltf::GltfAssetLabel;
@@ -26,9 +27,12 @@ use super::animate::{
     BandRef, Binding, MaterialLink, Orbit, Property, Reactive, SceneCamera, SceneLight,
     SceneObject, Spin,
 };
-use super::def::{Anchor, BlendDef, Dimension, LightKind, MaterialDef, ObjectDef, SceneDef};
+use super::def::{
+    Anchor, BlendDef, ColliderDef, Dimension, LightKind, MaterialDef, ObjectDef, SceneDef,
+};
 use super::files::{self, SceneFiles};
 use super::material3d::FxMaterial3d;
+use super::ready::SceneLoads;
 use super::sound::{SceneSound, SceneSounds};
 use super::terrain::{MeshData, Terrain, atlas_cube};
 use super::{SceneCamera3d, SceneEntity, SceneRuntime, set_2d_hidden};
@@ -57,6 +61,10 @@ pub(crate) fn spawn_scene(
     ctx: &SpawnContext,
 ) -> Result<(), String> {
     let _ = &ctx.files;
+    // Whatever the previous scene was waiting on is gone with it.
+    if let Some(mut loads) = world.get_resource_mut::<SceneLoads>() {
+        loads.clear();
+    }
     let shaders = compile_shaders(world, ctx);
 
     world.insert_resource(super::animate::SceneLayout {
@@ -261,14 +269,14 @@ fn apply_blob_overrides(
 }
 
 fn load_image(
-    world: &World,
+    world: &mut World,
     ctx: &SpawnContext,
     rel: &str,
     pixelated: bool,
 ) -> Result<Handle<Image>, String> {
     let path = files::asset_path(&ctx.slot, rel)?;
     let server = world.resource::<AssetServer>();
-    Ok(if pixelated {
+    let handle: Handle<Image> = if pixelated {
         server
             .load_builder()
             .with_settings(|s: &mut ImageLoaderSettings| {
@@ -277,7 +285,17 @@ fn load_image(
             .load::<Image>(path)
     } else {
         server.load(path)
-    })
+    };
+    track(world, handle.id());
+    Ok(handle)
+}
+
+/// Have an offline render wait for `id` to load before its first frame (see
+/// [`super::ready`]).
+fn track(world: &mut World, id: impl Into<UntypedAssetId>) {
+    if let Some(mut loads) = world.get_resource_mut::<SceneLoads>() {
+        loads.track(id);
+    }
 }
 
 fn params(p: &[[f32; 4]]) -> [Vec4; 4] {
@@ -314,6 +332,26 @@ struct MeshCache {
     materials_3d: HashMap<String, (Mat3, MaterialLinkBase)>,
 }
 
+/// The entry under `key`, made on first use. A `private` one — a material an
+/// object's own reactions rewrite every frame — is made fresh and kept out of
+/// the cache, or every later object sharing its definition would pulse along.
+fn cached<T: Clone>(
+    cache: &mut HashMap<String, T>,
+    key: String,
+    private: bool,
+    make: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    if private {
+        return make();
+    }
+    if let Some(hit) = cache.get(&key) {
+        return Ok(hit.clone());
+    }
+    let made = make()?;
+    cache.insert(key, made.clone());
+    Ok(made)
+}
+
 #[derive(Clone)]
 enum Mat2 {
     Fx(Handle<FxMaterial>),
@@ -344,22 +382,18 @@ fn size(obj: &ObjectDef, i: usize, default: f32) -> f32 {
 
 fn build_mesh(obj: &ObjectDef, dim: Dimension, tile: Option<u32>) -> Result<Mesh, String> {
     let kind = obj.mesh.as_deref().unwrap_or("");
-    let mut height = 0.0;
     let mesh = match (dim, kind) {
         (Dimension::TwoD, "circle") => {
             let r = size(obj, 0, 50.0);
-            height = 2.0 * r;
             Circle::new(r).mesh().resolution(64).build()
         }
         (Dimension::TwoD, "rect") => {
             let (w, h) = (size(obj, 0, 100.0), size(obj, 1, size(obj, 0, 100.0)));
-            height = h;
             Rectangle::new(w, h).into()
         }
         (Dimension::TwoD, "ring") => {
             let r = size(obj, 0, 100.0);
             let w = size(obj, 1, 2.0);
-            height = 2.0 * r;
             Annulus::new((r - w * 0.5).max(0.0), r + w * 0.5)
                 .mesh()
                 .resolution(128)
@@ -367,14 +401,12 @@ fn build_mesh(obj: &ObjectDef, dim: Dimension, tile: Option<u32>) -> Result<Mesh
         }
         (Dimension::ThreeD, "sphere") => {
             let r = size(obj, 0, 1.0);
-            height = 2.0 * r;
             Sphere::new(r).mesh().uv(48, 24)
         }
         (Dimension::ThreeD, "cube") => {
             let x = size(obj, 0, 1.0);
             let y = size(obj, 1, x);
             let z = size(obj, 2, x);
-            height = y;
             match tile.or(obj.material.atlas_tile) {
                 Some(t) => atlas_cube(t, obj.material.atlas_columns, obj.material.atlas_rows)
                     .scaled_by(Vec3::new(x, y, z)),
@@ -389,7 +421,6 @@ fn build_mesh(obj: &ObjectDef, dim: Dimension, tile: Option<u32>) -> Result<Mesh
         (Dimension::ThreeD, "cylinder") => {
             let r = size(obj, 0, 0.5);
             let h = size(obj, 1, 1.0);
-            height = h;
             Cylinder::new(r, h).into()
         }
         (Dimension::ThreeD, "torus") => {
@@ -400,13 +431,11 @@ fn build_mesh(obj: &ObjectDef, dim: Dimension, tile: Option<u32>) -> Result<Mesh
         (Dimension::ThreeD, "capsule") => {
             let r = size(obj, 0, 0.5);
             let len = size(obj, 1, 1.0);
-            height = len + 2.0 * r;
             Capsule3d::new(r, len).into()
         }
         (Dimension::ThreeD, "cone") => {
             let r = size(obj, 0, 0.5);
             let h = size(obj, 1, 1.0);
-            height = h;
             Cone {
                 radius: r,
                 height: h,
@@ -415,10 +444,59 @@ fn build_mesh(obj: &ObjectDef, dim: Dimension, tile: Option<u32>) -> Result<Mesh
         }
         _ => return Err(format!("unknown mesh {kind:?}")),
     };
-    Ok(match obj.anchor {
-        Anchor::Center => mesh,
-        Anchor::Bottom => mesh.translated_by(Vec3::Y * height * 0.5),
+    let lift = anchor_lift(obj, dim);
+    Ok(if lift != 0.0 {
+        mesh.translated_by(Vec3::Y * lift)
+    } else {
+        mesh
     })
+}
+
+/// How far `anchor = "bottom"` raises a primitive: half its height, so its
+/// base sits on the origin (0 for a centered one). The mesh and its collider
+/// both move by exactly this.
+fn anchor_lift(obj: &ObjectDef, dim: Dimension) -> f32 {
+    if obj.anchor != Anchor::Bottom {
+        return 0.0;
+    }
+    let height = match (dim, obj.mesh.as_deref().unwrap_or("")) {
+        (Dimension::TwoD, "circle") => 2.0 * size(obj, 0, 50.0),
+        (Dimension::TwoD, "rect") => size(obj, 1, size(obj, 0, 100.0)),
+        (Dimension::TwoD, "ring") => 2.0 * size(obj, 0, 100.0),
+        (Dimension::ThreeD, "sphere") => 2.0 * size(obj, 0, 1.0),
+        (Dimension::ThreeD, "cube") => size(obj, 1, size(obj, 0, 1.0)),
+        (Dimension::ThreeD, "cylinder" | "cone") => size(obj, 1, 1.0),
+        (Dimension::ThreeD, "capsule") => size(obj, 1, 1.0) + 2.0 * size(obj, 0, 0.5),
+        _ => 0.0,
+    };
+    height * 0.5
+}
+
+/// Everything [`build_mesh`] reads, so objects share a mesh only when theirs
+/// would come out identical. Cubes bake their atlas tile into the UVs.
+fn mesh_key(obj: &ObjectDef, tile: Option<u32>) -> String {
+    let atlas = match obj.mesh.as_deref() {
+        Some("cube") => tile
+            .or(obj.material.atlas_tile)
+            .map(|t| (t, obj.material.atlas_columns, obj.material.atlas_rows)),
+        _ => None,
+    };
+    format!("{:?}/{:?}/{:?}/{atlas:?}", obj.mesh, obj.size, obj.anchor)
+}
+
+/// A 2D object's collider: the drawn shape, raised by the same anchor lift
+/// as its mesh, so balls bounce off what is on screen.
+fn collider_2d(obj: &ObjectDef, c: &ColliderDef) -> Collider {
+    let shape = match obj.mesh.as_deref() {
+        Some("rect") => Collider::rectangle(size(obj, 0, 100.0), size(obj, 1, size(obj, 0, 100.0))),
+        _ => Collider::circle(c.radius.unwrap_or_else(|| size(obj, 0, 50.0))),
+    };
+    let lift = anchor_lift(obj, Dimension::TwoD);
+    if lift != 0.0 {
+        Collider::compound(vec![(Vec2::Y * lift, Rotation::IDENTITY, shape)])
+    } else {
+        shape
+    }
 }
 
 fn material_key(m: &MaterialDef, tile: Option<u32>) -> String {
@@ -657,10 +735,12 @@ fn spawn_object(
         let path = files::asset_path(&ctx.slot, model)?;
         let server = world.resource::<AssetServer>().clone();
         let root = server.load(GltfAssetLabel::Scene(0).from_asset(path.clone()));
+        track(world, root.id());
         world.entity_mut(id).insert(WorldAssetRoot(root));
         if let Some(clip) = obj.animation {
             let clip: Handle<AnimationClip> =
                 server.load(GltfAssetLabel::Animation(clip).from_asset(path));
+            track(world, clip.id());
             let (graph, node) = AnimationGraph::from_clip(clip);
             let graph = world.resource_mut::<Assets<AnimationGraph>>().add(graph);
             world.entity_mut(id).insert(ModelAnimation { graph, node });
@@ -668,34 +748,24 @@ fn spawn_object(
         return Ok(id);
     }
 
-    let mesh_key = format!(
-        "{:?}/{:?}/{:?}/{:?}",
-        obj.mesh, obj.size, obj.anchor, instance.tile
-    );
-    let mesh = match cache.meshes.get(&mesh_key) {
-        Some(h) => h.clone(),
-        None => {
-            let h = world
-                .resource_mut::<Assets<Mesh>>()
-                .add(build_mesh(obj, dim, instance.tile)?);
-            cache.meshes.insert(mesh_key, h.clone());
-            h
-        }
-    };
+    let mesh = cached(
+        &mut cache.meshes,
+        mesh_key(obj, instance.tile),
+        false,
+        || {
+            let mesh = build_mesh(obj, dim, instance.tile)?;
+            Ok(world.resource_mut::<Assets<Mesh>>().add(mesh))
+        },
+    )?;
 
     // Instances whose own reactions write their material need their own copy;
     // everyone else shares.
     let mkey = material_key(&obj.material, instance.tile);
     match dim {
         Dimension::TwoD => {
-            let (mat, link) = match (drives_material, cache.materials_2d.get(&mkey)) {
-                (false, Some(hit)) => hit.clone(),
-                _ => {
-                    let made = material_2d(world, &obj.material, shaders, ctx)?;
-                    cache.materials_2d.insert(mkey, made.clone());
-                    made
-                }
-            };
+            let (mat, link) = cached(&mut cache.materials_2d, mkey, drives_material, || {
+                material_2d(world, &obj.material, shaders, ctx)
+            })?;
             let mut e = world.entity_mut(id);
             e.insert(Mesh2d(mesh));
             match mat {
@@ -720,29 +790,18 @@ fn spawn_object(
                 }
             }
             if let Some(c) = &obj.collider {
-                let collider = match obj.mesh.as_deref() {
-                    Some("rect") => {
-                        Collider::rectangle(size(obj, 0, 100.0), size(obj, 1, size(obj, 0, 100.0)))
-                    }
-                    _ => Collider::circle(c.radius.unwrap_or_else(|| size(obj, 0, 50.0))),
-                };
                 e.insert((
                     RigidBody::Kinematic,
-                    collider,
+                    collider_2d(obj, c),
                     Restitution::new(c.restitution),
                     LinearVelocity::ZERO,
                 ));
             }
         }
         Dimension::ThreeD => {
-            let (mat, link) = match (drives_material, cache.materials_3d.get(&mkey)) {
-                (false, Some(hit)) => hit.clone(),
-                _ => {
-                    let made = material_3d(world, &obj.material, shaders, ctx)?;
-                    cache.materials_3d.insert(mkey, made.clone());
-                    made
-                }
-            };
+            let (mat, link) = cached(&mut cache.materials_3d, mkey, drives_material, || {
+                material_3d(world, &obj.material, shaders, ctx)
+            })?;
             let mut e = world.entity_mut(id);
             e.insert(Mesh3d(mesh));
             match mat {
@@ -1169,5 +1228,141 @@ mod tests {
         assert!(bindings(&obj, None).is_err());
         let b = bindings(&obj, Some(0.25)).unwrap();
         assert_eq!(b[0].band, BandRef::Fraction(0.25));
+    }
+
+    fn cube(tile: Option<u32>) -> ObjectDef {
+        ObjectDef {
+            mesh: Some("cube".into()),
+            material: MaterialDef {
+                atlas_tile: tile,
+                ..MaterialDef::default()
+            },
+            ..ObjectDef::default()
+        }
+    }
+
+    #[test]
+    fn cubes_on_different_atlas_tiles_do_not_share_a_mesh() {
+        // The Minecraft scene's planks (11) and glowstone lamps (14).
+        assert_ne!(
+            mesh_key(&cube(Some(11)), None),
+            mesh_key(&cube(Some(14)), None)
+        );
+        assert_eq!(
+            mesh_key(&cube(Some(11)), None),
+            mesh_key(&cube(Some(11)), None)
+        );
+        // A ring's tile replaces the template's.
+        assert_eq!(
+            mesh_key(&cube(Some(11)), Some(14)),
+            mesh_key(&cube(Some(14)), None)
+        );
+        let mut grid = cube(Some(11));
+        grid.material.atlas_columns = 16;
+        assert_ne!(mesh_key(&grid, None), mesh_key(&cube(Some(11)), None));
+        // Only cubes read the atlas.
+        let sphere = |tile| ObjectDef {
+            mesh: Some("sphere".into()),
+            ..cube(tile)
+        };
+        assert_eq!(
+            mesh_key(&sphere(Some(11)), None),
+            mesh_key(&sphere(Some(14)), None)
+        );
+    }
+
+    fn attribute(mesh: &Mesh, id: bevy::mesh::MeshVertexAttribute) -> Vec<f32> {
+        use bevy::mesh::VertexAttributeValues as V;
+        match mesh.attribute(id) {
+            Some(V::Float32x2(v)) => v.iter().flatten().copied().collect(),
+            Some(V::Float32x3(v)) => v.iter().flatten().copied().collect(),
+            other => panic!("unexpected attribute {other:?}"),
+        }
+    }
+
+    /// The cache's promise, over every built-in scene: whatever shares a mesh
+    /// key builds the very same mesh.
+    #[test]
+    fn built_in_objects_sharing_a_mesh_key_build_the_same_mesh() {
+        for id in files::builtin_ids() {
+            let f = files::read(&files::SceneSource::Builtin(id)).unwrap();
+            let def = SceneDef::parse(f.scene_toml().unwrap()).unwrap();
+            let dim = def.scene.dimension;
+            let mut made: Vec<(&ObjectDef, Option<u32>)> = def
+                .objects
+                .iter()
+                .filter(|o| o.model.is_none())
+                .map(|o| (o, None))
+                .collect();
+            for ring in def.rings.iter().filter(|r| r.template.model.is_none()) {
+                made.push((&ring.template, None));
+                made.extend(ring.tiles.iter().map(|&t| (&ring.template, Some(t))));
+            }
+            let mut first: HashMap<String, Mesh> = HashMap::new();
+            for (obj, tile) in made {
+                let mesh = build_mesh(obj, dim, tile).unwrap();
+                match first.get(&mesh_key(obj, tile)) {
+                    Some(seen) => {
+                        for a in [Mesh::ATTRIBUTE_POSITION, Mesh::ATTRIBUTE_UV_0] {
+                            assert_eq!(
+                                attribute(seen, a),
+                                attribute(&mesh, a),
+                                "{id}: {:?} shares a mesh it does not match",
+                                obj.name
+                            );
+                        }
+                    }
+                    None => {
+                        first.insert(mesh_key(obj, tile), mesh);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn reacting_materials_stay_out_of_the_shared_cache() {
+        let mut cache = HashMap::new();
+        let key = || "white".to_string();
+        // An object whose reactions pulse its material gets its own…
+        assert_eq!(cached(&mut cache, key(), true, || Ok(1)), Ok(1));
+        // …and a plain one declared after it must not be handed that one.
+        assert_eq!(cached(&mut cache, key(), false, || Ok(2)), Ok(2));
+        assert_eq!(cached(&mut cache, key(), false, || Ok(3)), Ok(2));
+        assert_eq!(cached(&mut cache, key(), true, || Ok(4)), Ok(4));
+    }
+
+    /// `(min, max)` of a mesh's vertices in x/y.
+    fn bounds(mesh: &Mesh) -> (Vec2, Vec2) {
+        let points: Vec<Vec2> = attribute(mesh, Mesh::ATTRIBUTE_POSITION)
+            .chunks(3)
+            .map(|p| Vec2::new(p[0], p[1]))
+            .collect();
+        let min = points.iter().copied().fold(Vec2::INFINITY, Vec2::min);
+        let max = points.iter().copied().fold(Vec2::NEG_INFINITY, Vec2::max);
+        (min, max)
+    }
+
+    #[test]
+    fn colliders_cover_the_drawn_mesh_whatever_the_anchor() {
+        use avian2d::prelude::SimpleCollider;
+        for (kind, size) in [("rect", vec![20.0, 200.0]), ("circle", vec![30.0])] {
+            for anchor in [Anchor::Center, Anchor::Bottom] {
+                let obj = ObjectDef {
+                    mesh: Some(kind.into()),
+                    size: size.clone(),
+                    anchor,
+                    ..ObjectDef::default()
+                };
+                let (lo, hi) = bounds(&build_mesh(&obj, Dimension::TwoD, None).unwrap());
+                let aabb = collider_2d(&obj, &ColliderDef::default()).aabb(Vec2::ZERO, 0.0);
+                assert!(
+                    (aabb.min - lo).length() < 1e-3 && (aabb.max - hi).length() < 1e-3,
+                    "{kind} {anchor:?}: collider {:?}..{:?}, mesh {lo}..{hi}",
+                    aabb.min,
+                    aabb.max
+                );
+            }
+        }
     }
 }

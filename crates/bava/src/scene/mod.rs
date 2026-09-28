@@ -21,6 +21,7 @@ pub mod animate;
 pub mod def;
 pub mod files;
 pub mod material3d;
+pub mod ready;
 pub mod sound;
 mod spawn;
 pub mod terrain;
@@ -187,6 +188,7 @@ impl Plugin for ScenePlugin {
                 offline: self.offline,
             })
             .add_plugins(material3d::FxMaterial3dPlugin)
+            .add_plugins(ready::SceneReadyPlugin)
             .add_observer(spawn::start_model_animation)
             .add_systems(
                 Update,

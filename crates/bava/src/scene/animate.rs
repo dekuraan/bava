@@ -269,7 +269,7 @@ pub fn animate_objects(
         Option<&mut Spin>,
         Option<&mut Reactive>,
         Option<&MaterialLink>,
-        Option<(&RigidBody, &Position, &mut LinearVelocity)>,
+        Option<(Ref<RigidBody>, &mut Position, &mut LinearVelocity)>,
     )>,
     mut fx2d: ResMut<Assets<FxMaterial>>,
     mut fx3d: ResMut<Assets<FxMaterial3d>>,
@@ -307,9 +307,20 @@ pub fn animate_objects(
                 .map(|b| 1.0 + orbit.speed_react * b.level(&features, &bars))
                 .unwrap_or(1.0);
             orbit.angle = (orbit.angle + orbit.angular * boost * dt).rem_euclid(TAU);
+            // A 2D satellite circles its parent's x/y but keeps its own z as
+            // the draw layer (Saturn's rings sit at 1.9 and 2.2 around
+            // Saturn's 2.0), rather than stacking on the parent's. In 3D, z is
+            // depth and the whole position follows.
             let center = orbit
                 .parent
                 .and_then(|p| placed.get(&p).copied())
+                .map(|p| {
+                    if orbit.three_d {
+                        p
+                    } else {
+                        p.truncate().extend(0.0)
+                    }
+                })
                 .unwrap_or(orbit.center);
             let offset = orbit.offset();
             pose.translation = center + offset + object.base.translation;
@@ -382,13 +393,29 @@ pub fn animate_objects(
         }
 
         // Kinematic colliders are *driven* to their pose, so the solver sees a
-        // moving body and balls get a proper push instead of a teleport.
+        // moving body and balls get a proper push instead of a teleport. Avian
+        // owns only x/y; the draw layer (z) is ours to write.
+        //
+        // A body added this frame is placed instead: it spawned at its raw
+        // rest position (no orbit, no canvas scale), and driving it from there
+        // would sweep it across the screen at distance / dt, flinging balls.
         match body {
-            Some((RigidBody::Kinematic, position, mut velocity)) if dt > 0.0 => {
+            Some((rigid_body, mut position, mut velocity))
+                if *rigid_body == RigidBody::Kinematic =>
+            {
                 let target = pose.translation.truncate();
-                velocity.0 = (target - position.0) / dt;
-                transform.rotation = pose.rotation;
-                transform.scale = pose.scale;
+                if dt > 0.0 && !rigid_body.is_added() {
+                    velocity.0 = (target - position.0) / dt;
+                    transform.translation.z = pose.translation.z;
+                    transform.rotation = pose.rotation;
+                    transform.scale = pose.scale;
+                } else {
+                    position.0 = target;
+                    velocity.0 = Vec2::ZERO;
+                    if *transform != pose {
+                        *transform = pose;
+                    }
+                }
             }
             _ => {
                 if *transform != pose {
@@ -529,6 +556,8 @@ pub fn animate_camera(
 
 #[cfg(test)]
 mod tests {
+    use std::f32::consts::FRAC_PI_2;
+
     use super::*;
 
     #[test]
@@ -601,5 +630,184 @@ mod tests {
         assert!((o.offset() - Vec3::new(0.0, 5.0, 0.0)).length() < 1e-4);
         o.three_d = true;
         assert!((o.offset() - Vec3::new(0.0, 0.0, 5.0)).length() < 1e-4);
+    }
+
+    /// A still (non-turning) 2D orbit at `angle`.
+    fn orbit(axes: Vec2, angle: f32) -> Orbit {
+        Orbit {
+            parent: None,
+            center: Vec3::ZERO,
+            axes,
+            angular: 0.0,
+            angle,
+            plane: Quat::IDENTITY,
+            three_d: false,
+            speed_band: None,
+            speed_react: 0.0,
+            face_out: false,
+            behind_z: None,
+            perspective: 0.0,
+        }
+    }
+
+    /// `animate_objects` alone over a bare app (no avian step): 60 fps manual
+    /// time, a 1280×720 window, canvas in pixels. Already past Bevy's first
+    /// update (whose dt is 0), so the next one steps.
+    fn animate_app() -> App {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+            std::time::Duration::from_secs_f32(1.0 / 60.0),
+        ));
+        app.init_resource::<AudioFeatures>();
+        app.init_resource::<Cava>();
+        app.init_resource::<SceneLayout>();
+        app.insert_resource(Assets::<FxMaterial>::default());
+        app.insert_resource(Assets::<FxMaterial3d>::default());
+        app.insert_resource(Assets::<StandardMaterial>::default());
+        app.insert_resource(Assets::<ColorMaterial>::default());
+        app.world_mut().spawn(Window::default());
+        app.add_systems(Update, animate_objects);
+        app.update();
+        app
+    }
+
+    fn translation(app: &App, e: Entity) -> Vec3 {
+        app.world().get::<Transform>(e).unwrap().translation
+    }
+
+    #[test]
+    fn a_new_kinematic_body_is_placed_not_swept_across_the_screen() {
+        let mut app = animate_app();
+        // Declared at the orbit's center, as solar_system's planets are; its
+        // pose is 200 px out.
+        let base = Transform::from_xyz(0.0, 0.0, 2.0);
+        let mut o = orbit(Vec2::splat(200.0), 0.0);
+        o.angular = 1.0;
+        let planet = app
+            .world_mut()
+            .spawn((
+                SceneObject { index: 0, base },
+                base,
+                o,
+                RigidBody::Kinematic,
+            ))
+            .id();
+
+        app.update();
+        let position = app.world().get::<Position>(planet).unwrap().0;
+        let velocity = app.world().get::<LinearVelocity>(planet).unwrap().0;
+        assert!((position.length() - 200.0).abs() < 1e-3, "{position}");
+        assert_eq!(velocity, Vec2::ZERO, "no sweep from the spawn point");
+        assert!((translation(&app, planet).truncate() - position).length() < 1e-3);
+
+        // From then on it is driven, at the orbit's own speed (r·ω).
+        app.update();
+        let speed = app
+            .world()
+            .get::<LinearVelocity>(planet)
+            .unwrap()
+            .0
+            .length();
+        assert!((speed - 200.0).abs() < 2.0, "{speed}");
+    }
+
+    #[test]
+    fn a_driven_collider_takes_its_layer_from_the_pose() {
+        let mut app = animate_app();
+        let base = Transform::from_xyz(0.0, 0.0, 2.0);
+        let mut o = orbit(Vec2::new(200.0, 80.0), -FRAC_PI_2); // near side
+        o.behind_z = Some(-7.5);
+        let planet = app
+            .world_mut()
+            .spawn((
+                SceneObject { index: 0, base },
+                base,
+                o,
+                RigidBody::Kinematic,
+            ))
+            .id();
+        app.update();
+        app.update();
+        assert_eq!(translation(&app, planet).z, 2.0);
+
+        // Round the far side of its orbit it passes behind the sun.
+        app.world_mut().get_mut::<Orbit>(planet).unwrap().angle = FRAC_PI_2;
+        app.update();
+        assert_eq!(translation(&app, planet).z, -7.5);
+    }
+
+    #[test]
+    fn a_2d_satellite_keeps_its_own_layer() {
+        let mut app = animate_app();
+        let saturn_base = Transform::from_xyz(0.0, 0.0, 2.0);
+        let saturn = app
+            .world_mut()
+            .spawn((
+                SceneObject {
+                    index: 0,
+                    base: saturn_base,
+                },
+                saturn_base,
+                orbit(Vec2::new(300.0, 120.0), -FRAC_PI_2),
+            ))
+            .id();
+        // The near half of Saturn's rings: in front of the planet at 2.2.
+        let ring_base = Transform::from_xyz(0.0, 0.0, 2.2);
+        let mut ring_orbit = orbit(Vec2::ZERO, 0.0);
+        ring_orbit.parent = Some(saturn);
+        let ring = app
+            .world_mut()
+            .spawn((
+                SceneObject {
+                    index: 1,
+                    base: ring_base,
+                },
+                ring_base,
+                ring_orbit,
+            ))
+            .id();
+        app.update();
+        let (s, r) = (translation(&app, saturn), translation(&app, ring));
+        assert!((s.truncate() - r.truncate()).length() < 1e-3, "{s} vs {r}");
+        assert_eq!(s.z, 2.0);
+        assert_eq!(r.z, 2.2, "the layer is absolute, not the parent's + 2.2");
+    }
+
+    #[test]
+    fn a_3d_satellite_follows_its_parent_in_depth_too() {
+        let mut app = animate_app();
+        let parent_base = Transform::from_xyz(0.0, 0.0, 5.0);
+        let mut parent_orbit = orbit(Vec2::splat(10.0), 0.0);
+        parent_orbit.three_d = true;
+        let parent = app
+            .world_mut()
+            .spawn((
+                SceneObject {
+                    index: 0,
+                    base: parent_base,
+                },
+                parent_base,
+                parent_orbit,
+            ))
+            .id();
+        let child_base = Transform::from_xyz(0.0, 1.0, 0.0);
+        let mut child_orbit = orbit(Vec2::ZERO, 0.0);
+        child_orbit.parent = Some(parent);
+        child_orbit.three_d = true;
+        let child = app
+            .world_mut()
+            .spawn((
+                SceneObject {
+                    index: 1,
+                    base: child_base,
+                },
+                child_base,
+                child_orbit,
+            ))
+            .id();
+        app.update();
+        assert!((translation(&app, parent) - Vec3::new(10.0, 0.0, 5.0)).length() < 1e-4);
+        assert!((translation(&app, child) - Vec3::new(10.0, 1.0, 5.0)).length() < 1e-4);
     }
 }
