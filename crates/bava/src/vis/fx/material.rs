@@ -452,13 +452,16 @@ mod tests {
             .init_resource::<Modified>()
             .add_systems(Update, sync_fx_materials)
             .add_systems(Last, collect_modified);
-        let (live, quiet) = {
+        // Hold the strong handles: dropping them would free both materials
+        // before the first sync runs.
+        let (live_handle, quiet_handle) = {
             let mut assets = app.world_mut().resource_mut::<Assets<FxMaterial>>();
-            let live = assets.add(FxMaterial::new(BLOB_SHADER)).id();
+            let live = assets.add(FxMaterial::new(BLOB_SHADER));
             let mut quiet = FxMaterial::new(ADDITIVE_SHADER);
             quiet.live = false;
-            (live, assets.add(quiet).id())
+            (live, assets.add(quiet))
         };
+        let (live, quiet) = (live_handle.id(), quiet_handle.id());
 
         // The first sync stamps the live fields in; the opted-out material
         // must not even be flagged (a flag alone re-uploads it and
