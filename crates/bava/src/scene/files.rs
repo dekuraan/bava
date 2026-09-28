@@ -299,16 +299,20 @@ pub fn asset_path(slot: &str, rel: &str) -> Result<String, String> {
     Ok(format!("embedded://{}/{}", slot_dir(slot), normalize(rel)?))
 }
 
-/// Serve a scene's files through the embedded asset source.
-pub fn register(registry: &EmbeddedAssetRegistry, slot: &str, files: &SceneFiles) {
+/// Serve a scene's files through the embedded asset source. Returns the
+/// registry paths, for [`EmbeddedAssetRegistry::remove_asset`] on unload.
+pub fn register(registry: &EmbeddedAssetRegistry, slot: &str, files: &SceneFiles) -> Vec<PathBuf> {
     let dir = slot_dir(slot);
+    let mut paths = Vec::with_capacity(files.files.len());
     for (rel, bytes) in &files.files {
         let asset_path = PathBuf::from(format!("{dir}/{rel}"));
         match bytes {
             Cow::Borrowed(b) => registry.insert_asset(asset_path.clone(), &asset_path, *b),
             Cow::Owned(b) => registry.insert_asset(asset_path.clone(), &asset_path, b.clone()),
         }
+        paths.push(asset_path);
     }
+    paths
 }
 
 #[cfg(test)]

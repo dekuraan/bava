@@ -38,8 +38,10 @@ bava --input song.flac --out out.mp4 --scene minecraft   # render one to video
   parse leaves the scene unloaded, with the error shown in the editor.
 
 While a scene is active, its `[config]` overrides sit on top of your settings.
-Switching the scene off restores what you had. Saving from the editor stores
-your own settings plus the scene's name, never the scene's overrides.
+Switching the scene off puts back the values it overrode. Anything you change
+while it runs is yours and stays, including a key the scene had set. Saving
+from the editor stores your own settings plus the scene's name, never the
+scene's overrides.
 
 ## File layout
 

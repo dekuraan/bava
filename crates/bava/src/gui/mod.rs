@@ -202,23 +202,16 @@ struct Live<'a> {
 }
 
 impl Live<'_> {
-    /// The config to save. While a scene is loaded, that is the user's own
-    /// settings *underneath* the scene's overrides, plus the scene's name —
-    /// so the scene is restored next launch without its look being baked in.
+    /// The config to save. While a scene is loaded, that is the live settings
+    /// minus the scene's own overrides, plus the scene's name — so the scene
+    /// is restored next launch without its look being baked in.
     fn to_config(&self, status: &SceneStatus, key: KeyCode) -> Config {
-        let mut cfg = match &status.base {
-            Some(base) => {
-                let mut c = Config::from_settings(&base.cava, &base.vis, base.mode, &base.physics);
-                c.fx = base.fx.clone();
-                c
-            }
-            None => {
-                let mut c = Config::from_settings(self.cava, self.vis, *self.mode, self.physics);
-                c.fx = self.fx.clone();
-                c
-            }
-        };
-        cfg.scene.name = self.scene.name.clone();
+        let mut cfg = Config::from_settings(self.cava, self.vis, *self.mode, self.physics);
+        cfg.fx = self.fx.clone();
+        if let Some(base) = &status.base {
+            cfg = base.user_config(&cfg);
+        }
+        cfg.scene.name = crate::scene::persistent_name(&self.scene.name);
         cfg.set_gui_toggle_key(key);
         cfg
     }
@@ -227,7 +220,12 @@ impl Live<'_> {
     /// rebuild so the DSP params take hold, and have an active scene re-apply
     /// its overrides on top of the new settings.
     fn apply(&mut self, cfg: &Config) {
-        *self.vis = cfg.to_vis_settings();
+        // The album palette is live state, not a setting.
+        let dynamic = self.vis.dynamic_fg.take();
+        *self.vis = VisSettings {
+            dynamic_fg: dynamic,
+            ..cfg.to_vis_settings()
+        };
         *self.mode = cfg.vis_mode();
         let debug = self.cava.debug;
         *self.cava = cfg.to_cava_settings(debug);
@@ -493,7 +491,7 @@ fn geometry_section(ui: &mut egui::Ui, vis: &mut VisSettings) {
     ui.add(
         egui::Slider::new(&mut vis.rotation, 0.0..=std::f32::consts::TAU).text("rotation (circle)"),
     );
-    ui.add(egui::Slider::new(&mut vis.circle_scale, 0.2..=2.0).text("size (circle)"));
+    ui.add(egui::Slider::new(&mut vis.circle_scale, 0.1..=3.0).text("size (circle)"));
     ui.add(egui::Slider::new(&mut vis.area_margin, 0.0..=200.0).text("area margin (px)"));
     ui.horizontal(|ui| {
         ui.label("area offset");

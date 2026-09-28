@@ -75,9 +75,9 @@ pub struct SceneStatus {
     pub description: String,
     /// Last load result or error.
     pub message: String,
-    /// The user's own settings underneath the active scene's `[config]`
-    /// overrides — what the editor saves while a scene is loaded, so a scene's
-    /// look is never baked into `config.toml`.
+    /// What the active scene's `[config]` overrode — the editor saves through
+    /// it while a scene is loaded, so a scene's look is never baked into
+    /// `config.toml`.
     pub base: Option<SceneBase>,
 }
 
@@ -89,26 +89,60 @@ pub struct SceneEntity;
 #[derive(Component, Clone, Copy, Debug)]
 pub struct SceneCamera3d;
 
-/// Settings a scene may override, captured before it did, restored after.
+/// The settings underneath an active scene, and which of them it owns.
+///
+/// A scene owns the keys its `[config]` sets, and only while they still hold
+/// the value it gave them. Everything else is the user's: a key the scene never
+/// touched, and one the user has edited since (in the editor, or with Space).
+/// Switching the scene off puts the owned keys back to their pre-scene values
+/// and leaves the rest live; the editor's Save writes that same view.
 #[derive(Clone, Debug)]
 pub struct SceneBase {
-    pub vis: VisSettings,
-    pub mode: DrawingMode,
-    pub physics: PhysicsSettings,
-    pub fx: FxSettings,
-    pub cava: CavaSettings,
-    pub clear: ClearColor,
+    /// Every setting before the overrides, as a `config.toml` table.
+    before: toml::Table,
+    /// The same right after them (sanitized, as the resources hold them).
+    after: toml::Table,
+    /// The scene's `[config]` table: the keys it owns.
+    owned: toml::Table,
+    /// The background before the scene's `clear_color`.
+    clear: ClearColor,
 }
 
 impl SceneBase {
-    fn capture(world: &World) -> Self {
-        Self {
-            vis: world.resource::<VisSettings>().clone(),
-            mode: *world.resource::<DrawingMode>(),
-            physics: world.resource::<PhysicsSettings>().clone(),
-            fx: world.resource::<FxSettings>().clone(),
-            cava: world.resource::<CavaSettings>().clone(),
-            clear: world.resource::<ClearColor>().clone(),
+    /// `live` with every key the scene still owns put back to its pre-scene
+    /// value.
+    pub fn user_table(&self, live: &toml::Table) -> toml::Table {
+        let mut out = live.clone();
+        restore_owned(&mut out, &self.before, &self.after, &self.owned);
+        out
+    }
+
+    /// The config to save while the scene is active: the live settings, minus
+    /// the scene's own overrides.
+    pub fn user_config(&self, live: &Config) -> Config {
+        toml::Table::try_from(live)
+            .ok()
+            .and_then(|t| self.user_table(&t).try_into().ok())
+            .unwrap_or_else(|| live.clone())
+    }
+}
+
+/// Put each `owned` key of `out` back to its `before` value, unless it no
+/// longer matches `after` (it was edited while the scene was active).
+fn restore_owned(
+    out: &mut toml::Table,
+    before: &toml::Table,
+    after: &toml::Table,
+    owned: &toml::Table,
+) {
+    use toml::Value::Table;
+    for (k, o) in owned {
+        match (o, out.get_mut(k), before.get(k), after.get(k)) {
+            (Table(o), Some(Table(out)), Some(Table(b)), Some(Table(a))) => {
+                restore_owned(out, b, a, o)
+            }
+            (_, Some(live), Some(b), Some(a)) if live == a => *live = b.clone(),
+            _ => {}
         }
     }
 }
@@ -116,9 +150,12 @@ impl SceneBase {
 /// The scene currently built into the world.
 struct LoadedScene {
     entry: SceneEntry,
-    snapshot: SceneBase,
+    base: SceneBase,
     stamp: Option<u64>,
     requested: SceneSettings,
+    /// The embedded-registry paths its files were served under, removed on
+    /// unload so reloads don't accumulate copies.
+    registered: Vec<std::path::PathBuf>,
 }
 
 /// Internal lifecycle state.
@@ -213,9 +250,14 @@ fn apply_scene(world: &mut World) {
     let rebase = world.resource::<SceneSettings>().rebase;
     if rebase {
         world.resource_mut::<SceneSettings>().rebase = false;
-        let base = SceneBase::capture(world);
-        if let Some(loaded) = world.resource_mut::<SceneState>().loaded.as_mut() {
-            loaded.snapshot = base;
+        // Nothing to put back: the new settings replace the old base
+        // outright. The background is the scene's own, so it keeps the one
+        // from before the scene.
+        if let Ok(live) = settings_table(world)
+            && let Some(loaded) = world.resource_mut::<SceneState>().loaded.as_mut()
+        {
+            loaded.base.before = live.clone();
+            loaded.base.after = live;
         }
     }
     let wanted = world.resource::<SceneSettings>().clone();
@@ -271,7 +313,19 @@ fn apply_scene(world: &mut World) {
         status.message = "No scene".into();
         return;
     }
-    match load(world, &wanted) {
+    let Some(entry) = files::resolve(&wanted.name) else {
+        let ids: Vec<String> = files::discover().into_iter().map(|e| e.id).collect();
+        let e = format!("not found (available: {})", ids.join(", "));
+        error!("bava: scene '{}': {e}", wanted.name);
+        let mut status = world.resource_mut::<SceneStatus>();
+        status.active = None;
+        status.message = format!("Scene '{}' failed: {e}", wanted.name);
+        return;
+    };
+    // Stamped before reading, so an edit that lands mid-load is still seen
+    // as a change by the next poll.
+    let stamp = files::stamp(&entry.source);
+    match load(world, &wanted, entry.clone(), stamp) {
         Ok((name, warnings)) => {
             info!("bava: scene '{name}' loaded");
             let mut message = format!(
@@ -285,10 +339,7 @@ fn apply_scene(world: &mut World) {
             world.resource_mut::<SceneStatus>().message = message;
         }
         Err(e) => {
-            if let Some(entry) = files::resolve(&wanted.name) {
-                let stamp = files::stamp(&entry.source);
-                world.resource_mut::<SceneState>().failed = Some((entry.source, stamp));
-            }
+            world.resource_mut::<SceneState>().failed = Some((entry.source, stamp));
             error!("bava: scene '{}': {e}", wanted.name);
             let mut status = world.resource_mut::<SceneStatus>();
             status.active = None;
@@ -315,31 +366,33 @@ fn unload(world: &mut World) {
     *world.resource_mut::<animate::SceneLayout>() = animate::SceneLayout::default();
     spawn::restore_builtin_layers(world);
 
+    if let Some(registry) = world.get_resource::<EmbeddedAssetRegistry>() {
+        for path in &loaded.registered {
+            registry.remove_asset(path);
+        }
+    }
+
     world.resource_mut::<SceneStatus>().base = None;
-    let s = loaded.snapshot;
-    let cava_changed = *world.resource::<CavaSettings>() != s.cava;
-    // Keep the live dynamic album palette: the snapshot's copy is stale.
-    let dynamic = world.resource::<VisSettings>().dynamic_fg.clone();
-    *world.resource_mut::<VisSettings>() = VisSettings {
-        dynamic_fg: dynamic,
-        ..s.vis
-    };
-    *world.resource_mut::<DrawingMode>() = s.mode;
-    *world.resource_mut::<PhysicsSettings>() = s.physics;
-    *world.resource_mut::<FxSettings>() = s.fx;
-    *world.resource_mut::<ClearColor>() = s.clear;
-    if cava_changed {
-        *world.resource_mut::<CavaSettings>() = s.cava;
-        world.resource_mut::<CavaRebuild>().0 = true;
+    *world.resource_mut::<ClearColor>() = loaded.base.clear.clone();
+    match settings_table(world) {
+        Ok(live) => {
+            let user = loaded.base.user_table(&live);
+            if let Err(e) = write_settings(world, &live, &user) {
+                error!("bava: restoring settings after the scene: {e}");
+            }
+        }
+        Err(e) => error!("bava: restoring settings after the scene: {e}"),
     }
 }
 
-/// Build the scene `wanted` names. Returns its display name and any warnings.
-fn load(world: &mut World, wanted: &SceneSettings) -> Result<(String, Vec<String>), String> {
-    let entry = files::resolve(&wanted.name).ok_or_else(|| {
-        let ids: Vec<String> = files::discover().into_iter().map(|e| e.id).collect();
-        format!("not found (available: {})", ids.join(", "))
-    })?;
+/// Build the scene `wanted` names from `entry`, whose files were stamped
+/// `stamp` before being read. Returns its display name and any warnings.
+fn load(
+    world: &mut World,
+    wanted: &SceneSettings,
+    entry: SceneEntry,
+    stamp: Option<u64>,
+) -> Result<(String, Vec<String>), String> {
     let scene_files = files::read(&entry.source)?;
     let def = SceneDef::parse(scene_files.scene_toml()?)?;
     for path in referenced_files(&def) {
@@ -357,19 +410,15 @@ fn load(world: &mut World, wanted: &SceneSettings) -> Result<(String, Vec<String
         );
     }
 
+    world.resource_mut::<SceneState>().since_poll = 0.0;
+    let (base, warnings) = apply_overrides(world, def.config.as_ref())?;
     // A unique slot per load: re-registering the same paths would hand back
     // the asset server's cached copies after a hot reload.
-    world.resource_mut::<SceneState>().since_poll = 0.0;
     let slot = format!("{}-{}", sanitize(&entry.id), next_slot());
-    if let Some(registry) = world.get_resource::<EmbeddedAssetRegistry>() {
-        files::register(registry, &slot, &scene_files);
-    }
-
-    let snapshot = SceneBase::capture(world);
-    let mut warnings = Vec::new();
-    if let Some(overrides) = &def.config {
-        warnings = apply_overrides(world, overrides)?;
-    }
+    let registered = world
+        .get_resource::<EmbeddedAssetRegistry>()
+        .map(|registry| files::register(registry, &slot, &scene_files))
+        .unwrap_or_default();
 
     let name = if def.scene.name.is_empty() {
         entry.id.clone()
@@ -381,35 +430,24 @@ fn load(world: &mut World, wanted: &SceneSettings) -> Result<(String, Vec<String
         shader_sources,
         files: scene_files,
     };
-    if let Err(e) = spawn::spawn_scene(world, &def, &ctx) {
-        // Roll back whatever was spawned and overridden.
-        world.resource_mut::<SceneState>().loaded = Some(LoadedScene {
-            entry: entry.clone(),
-            snapshot,
-            stamp: None,
-            requested: wanted.clone(),
-        });
+    let spawned = spawn::spawn_scene(world, &def, &ctx);
+    world.resource_mut::<SceneState>().loaded = Some(LoadedScene {
+        entry,
+        base: base.clone(),
+        stamp,
+        requested: wanted.clone(),
+        registered,
+    });
+    if let Err(e) = spawned {
+        // Roll back whatever was spawned, registered and overridden.
         unload(world);
         return Err(e);
     }
 
-    let stamp = files::stamp(&entry.source);
-    let mut state = world.resource_mut::<SceneState>();
-    state.loaded = Some(LoadedScene {
-        entry,
-        snapshot,
-        stamp,
-        requested: wanted.clone(),
-    });
-    let base = world
-        .resource::<SceneState>()
-        .loaded
-        .as_ref()
-        .map(|l| l.snapshot.clone());
     let mut status = world.resource_mut::<SceneStatus>();
     status.active = Some(name.clone());
     status.description = def.scene.description.clone();
-    status.base = base;
+    status.base = Some(base);
     for w in &warnings {
         warn!("bava: scene '{name}': {w}");
     }
@@ -458,55 +496,95 @@ pub fn referenced_files(def: &SceneDef) -> Vec<String> {
     out
 }
 
-/// Merge a scene's `[config]` table over the live settings. Returns warnings
-/// for keys that don't exist (a typo would otherwise be silently ignored).
-fn apply_overrides(world: &mut World, overrides: &toml::Table) -> Result<Vec<String>, String> {
-    let mut base = Config::from_settings(
+/// Merge a scene's `[config]` table over the live settings. Returns what it
+/// overrode, and warnings for keys that don't exist (a typo would otherwise be
+/// silently ignored).
+fn apply_overrides(
+    world: &mut World,
+    overrides: Option<&toml::Table>,
+) -> Result<(SceneBase, Vec<String>), String> {
+    let before = settings_table(world)?;
+    let mut warnings = Vec::new();
+    let mut owned = overrides.cloned().unwrap_or_default();
+    for skip in ["scene", "gui", "audio"] {
+        if owned.remove(skip).is_some() {
+            warnings.push(format!("[config.{skip}] can't be set by a scene"));
+        }
+    }
+    unknown_keys(&owned, &before, "config", &mut warnings);
+    let mut table = before.clone();
+    merge(&mut table, &owned);
+    write_settings(world, &before, &table)?;
+    let base = SceneBase {
+        after: settings_table(world)?,
+        before,
+        owned,
+        clear: world.resource::<ClearColor>().clone(),
+    };
+    Ok((base, warnings))
+}
+
+/// The live settings as a `config.toml` table.
+fn settings_table(world: &World) -> Result<toml::Table, String> {
+    let mut cfg = Config::from_settings(
         world.resource::<CavaSettings>(),
         world.resource::<VisSettings>(),
         *world.resource::<DrawingMode>(),
         world.resource::<PhysicsSettings>(),
     );
-    base.fx = world.resource::<FxSettings>().clone();
-    let mut table = toml::Table::try_from(&base).map_err(|e| e.to_string())?;
-    let mut warnings = Vec::new();
-    let mut overrides = overrides.clone();
-    for skip in ["scene", "gui", "audio"] {
-        if overrides.remove(skip).is_some() {
-            warnings.push(format!("[config.{skip}] can't be set by a scene"));
-        }
-    }
-    unknown_keys(&overrides, &table, "config", &mut warnings);
-    merge(&mut table, &overrides);
-    let merged: Config = table
+    cfg.fx = world.resource::<FxSettings>().clone();
+    toml::Table::try_from(&cfg).map_err(|e| e.to_string())
+}
+
+/// Write the settings `table` describes into the live resources, touching
+/// only the sections that differ from `live` (the table of what they hold
+/// now). Fails without writing anything if `table` doesn't deserialize.
+fn write_settings(
+    world: &mut World,
+    live: &toml::Table,
+    table: &toml::Table,
+) -> Result<(), String> {
+    let cfg: Config = table
+        .clone()
         .try_into()
         .map_err(|e: toml::de::Error| format!("[config]: {e}"))?;
-
-    let cava_before = world.resource::<CavaSettings>().clone();
-    let debug = cava_before.debug;
-    let cava = merged.to_cava_settings(debug);
-    // Capture-thread parameters stay pinned (see the editor's Apply).
-    let cava = CavaSettings {
-        rate: cava_before.rate,
-        channels: cava_before.channels,
-        frame_samples: cava_before.frame_samples,
-        source: cava_before.source.clone(),
-        follow_active_sink: cava_before.follow_active_sink,
-        ..cava
-    };
-    if cava != cava_before {
-        *world.resource_mut::<CavaSettings>() = cava;
-        world.resource_mut::<CavaRebuild>().0 = true;
+    let changed = |section: &str| live.get(section) != table.get(section);
+    if changed("cava") {
+        let before = world.resource::<CavaSettings>().clone();
+        // Capture-thread parameters stay pinned (see the editor's Apply).
+        let cava = CavaSettings {
+            rate: before.rate,
+            channels: before.channels,
+            frame_samples: before.frame_samples,
+            source: before.source.clone(),
+            follow_active_sink: before.follow_active_sink,
+            ..cfg.to_cava_settings(before.debug)
+        };
+        if cava != before {
+            *world.resource_mut::<CavaSettings>() = cava;
+            world.resource_mut::<CavaRebuild>().0 = true;
+        }
     }
-    let dynamic = world.resource::<VisSettings>().dynamic_fg.clone();
-    *world.resource_mut::<VisSettings>() = VisSettings {
-        dynamic_fg: dynamic,
-        ..merged.to_vis_settings()
-    };
-    *world.resource_mut::<DrawingMode>() = merged.vis_mode();
-    *world.resource_mut::<PhysicsSettings>() = merged.to_physics_settings();
-    *world.resource_mut::<FxSettings>() = merged.to_fx_settings();
-    Ok(warnings)
+    if changed("vis") {
+        // Keep the live dynamic album palette: it isn't a setting.
+        let dynamic = world.resource::<VisSettings>().dynamic_fg.clone();
+        *world.resource_mut::<VisSettings>() = VisSettings {
+            dynamic_fg: dynamic,
+            ..cfg.to_vis_settings()
+        };
+        world
+            .resource_mut::<DrawingMode>()
+            .set_if_neq(cfg.vis_mode());
+    }
+    if changed("physics") {
+        *world.resource_mut::<PhysicsSettings>() = cfg.to_physics_settings();
+    }
+    if changed("fx") {
+        world
+            .resource_mut::<FxSettings>()
+            .set_if_neq(cfg.to_fx_settings());
+    }
+    Ok(())
 }
 
 /// Deep-merge `over` into `base`: tables merge key by key, anything else
@@ -570,6 +648,19 @@ pub fn describe(entry: &SceneEntry) -> Option<String> {
     })
 }
 
+/// How to write a scene name to `config.toml`: ids as they are, and a
+/// directory named by a relative path as its absolute path, so the saved config
+/// still finds it from another working directory.
+pub fn persistent_name(name: &str) -> String {
+    match files::resolve(name) {
+        Some(SceneEntry {
+            id,
+            source: files::SceneSource::Dir(dir),
+        }) if id != name.trim() && dir.is_absolute() => dir.display().to_string(),
+        _ => name.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -598,6 +689,169 @@ mod tests {
         assert_eq!(warnings.len(), 2, "{warnings:?}");
         assert!(warnings.iter().any(|w| w.contains("zz")));
         assert!(warnings.iter().any(|w| w.contains("nope")));
+    }
+
+    fn settings_world() -> World {
+        let mut world = World::new();
+        world.insert_resource(CavaSettings::default());
+        world.insert_resource(VisSettings::default());
+        world.insert_resource(DrawingMode::default());
+        world.insert_resource(PhysicsSettings::default());
+        world.insert_resource(FxSettings::default());
+        world.insert_resource(CavaRebuild::default());
+        world.insert_resource(ClearColor::default());
+        world
+    }
+
+    /// Switch the scene off the way `unload` does, minus the despawning.
+    fn restore(world: &mut World, base: &SceneBase) {
+        *world.resource_mut::<ClearColor>() = base.clear.clone();
+        let live = settings_table(world).unwrap();
+        write_settings(world, &live, &base.user_table(&live)).unwrap();
+    }
+
+    #[test]
+    fn unload_restores_only_the_keys_the_scene_still_owns() {
+        let mut world = settings_world();
+        let defaults = VisSettings::default();
+        let over: toml::Table = toml::from_str(
+            "[vis]\ncircle_scale = 0.62\nglow_gain = 1.4\n[physics]\ngravity = 123.0\n",
+        )
+        .unwrap();
+        let (base, warnings) = apply_overrides(&mut world, Some(&over)).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(world.resource::<VisSettings>().circle_scale, 0.62);
+        assert_eq!(world.resource::<PhysicsSettings>().gravity, 123.0);
+
+        // While the scene runs the user edits a key it never set, and one it
+        // did; the scene also paints the background.
+        world.resource_mut::<VisSettings>().inner_radius = 0.3;
+        world.resource_mut::<PhysicsSettings>().debug_draw = true;
+        world.resource_mut::<VisSettings>().glow_gain = 2.5;
+        world.resource_mut::<ClearColor>().0 = Color::srgb(0.5, 0.7, 1.0);
+
+        // Save sees the same view unload restores.
+        let mut live = Config::from_settings(
+            world.resource::<CavaSettings>(),
+            world.resource::<VisSettings>(),
+            *world.resource::<DrawingMode>(),
+            world.resource::<PhysicsSettings>(),
+        );
+        live.fx = world.resource::<FxSettings>().clone();
+        let saved = base.user_config(&live);
+        assert_eq!(saved.vis.circle_scale, defaults.circle_scale);
+        assert_eq!(saved.vis.inner_radius, 0.3);
+        assert_eq!(saved.vis.glow_gain, 2.5);
+
+        restore(&mut world, &base);
+        let vis = world.resource::<VisSettings>();
+        assert_eq!(
+            vis.circle_scale, defaults.circle_scale,
+            "owned key restored"
+        );
+        assert_eq!(vis.inner_radius, 0.3, "user edit kept");
+        assert_eq!(vis.glow_gain, 2.5, "edited owned key is the user's now");
+        let physics = world.resource::<PhysicsSettings>();
+        assert_eq!(physics.gravity, PhysicsSettings::default().gravity);
+        assert!(physics.debug_draw, "runtime toggle kept");
+        assert_eq!(world.resource::<ClearColor>().0, ClearColor::default().0);
+    }
+
+    #[test]
+    fn rebased_scene_keeps_the_new_settings_and_the_old_background() {
+        let mut world = settings_world();
+        let over: toml::Table = toml::from_str("[vis]\ncircle_scale = 0.62\n").unwrap();
+        let (mut base, _) = apply_overrides(&mut world, Some(&over)).unwrap();
+        world.resource_mut::<ClearColor>().0 = Color::srgb(0.5, 0.7, 1.0);
+
+        // The editor loads a profile: every setting replaced wholesale, then
+        // `apply_scene` rebases before tearing the scene down.
+        world.resource_mut::<VisSettings>().circle_scale = 1.7;
+        let live = settings_table(&world).unwrap();
+        base.before = live.clone();
+        base.after = live;
+        restore(&mut world, &base);
+        assert_eq!(world.resource::<VisSettings>().circle_scale, 1.7);
+        assert_eq!(world.resource::<ClearColor>().0, ClearColor::default().0);
+    }
+
+    #[test]
+    fn unchanged_sections_are_not_rewritten() {
+        let mut world = settings_world();
+        let over: toml::Table = toml::from_str("[fx]\nhalo = 2.0\n").unwrap();
+        let (base, _) = apply_overrides(&mut world, Some(&over)).unwrap();
+        world.resource_mut::<PhysicsSettings>().debug_draw = true;
+        let tick = world.change_tick();
+        world.increment_change_tick();
+        restore(&mut world, &base);
+        assert!(
+            !world
+                .resource_ref::<VisSettings>()
+                .last_changed()
+                .is_newer_than(tick, world.change_tick()),
+            "vis untouched"
+        );
+        assert!(
+            !world.resource::<CavaRebuild>().0,
+            "no needless cava rebuild"
+        );
+        assert_eq!(
+            world.resource::<FxSettings>().halo,
+            FxSettings::default().halo
+        );
+    }
+
+    #[test]
+    fn unload_releases_the_registered_files() {
+        let mut world = settings_world();
+        world.init_resource::<SceneState>();
+        world.init_resource::<SceneStatus>();
+        world.init_resource::<sound::SceneSounds>();
+        world.init_resource::<animate::SceneLayout>();
+        world.init_resource::<EmbeddedAssetRegistry>();
+        let mut scene_files = SceneFiles::default();
+        scene_files
+            .files
+            .insert("scene.toml".into(), b"[scene]\n".to_vec().into());
+        let registered = files::register(
+            world.resource::<EmbeddedAssetRegistry>(),
+            "t-0",
+            &scene_files,
+        );
+        assert_eq!(registered.len(), 1);
+        let (base, _) = apply_overrides(&mut world, None).unwrap();
+        world.resource_mut::<SceneState>().loaded = Some(LoadedScene {
+            entry: SceneEntry {
+                id: "t".into(),
+                source: files::SceneSource::Builtin("t"),
+            },
+            base,
+            stamp: None,
+            requested: SceneSettings::default(),
+            registered: registered.clone(),
+        });
+        unload(&mut world);
+        let registry = world.resource::<EmbeddedAssetRegistry>();
+        for path in &registered {
+            assert!(registry.remove_asset(path).is_none(), "{path:?} leaked");
+        }
+    }
+
+    #[test]
+    fn saved_scene_names_survive_a_change_of_directory() {
+        assert_eq!(persistent_name("solar_system"), "solar_system");
+        assert_eq!(persistent_name(""), "");
+        assert_eq!(persistent_name("no-such-scene"), "no-such-scene");
+
+        let dir = tempfile::tempdir().unwrap();
+        let scene = dir.path().join("mine");
+        std::fs::create_dir_all(&scene).unwrap();
+        std::fs::write(scene.join("scene.toml"), "[scene]\nname = \"Mine\"\n").unwrap();
+        let canonical = scene.canonicalize().unwrap().display().to_string();
+        // A roundabout spelling (as a relative path would be) is written as
+        // the directory itself.
+        let roundabout = dir.path().join("mine/../mine/scene.toml");
+        assert_eq!(persistent_name(roundabout.to_str().unwrap()), canonical);
     }
 
     #[test]
