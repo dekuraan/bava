@@ -174,8 +174,6 @@ impl Encoder for FfmpegEncoder {
     }
 }
 
-/// `true` if an `ffmpeg` binary is runnable — checked before the slow GPU init
-/// so a missing encoder fails in milliseconds with a clear message.
 /// The first `width × height` RGBA pixels of a captured frame.
 ///
 /// `bevy_capture` 0.6 sizes its readback buffer as `align(width) × 4` bytes
@@ -196,6 +194,8 @@ fn frame_bytes(data: &[u8], width: u32, height: u32) -> Result<&[u8]> {
     })
 }
 
+/// `true` if an `ffmpeg` binary is runnable — checked before the slow GPU init
+/// so a missing encoder fails in milliseconds with a clear message.
 pub fn ffmpeg_available() -> bool {
     Command::new("ffmpeg")
         .arg("-version")
