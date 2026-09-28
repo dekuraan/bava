@@ -155,6 +155,9 @@ struct BeatDetector {
     armed: bool,
     /// Seconds since the last beat.
     since: f32,
+    /// Seconds of stale frames since the last fresh one, still owed to the
+    /// floor's creep.
+    pending: f32,
     /// Whether `floor` has been seeded yet.
     primed: bool,
 }
@@ -165,6 +168,7 @@ impl Default for BeatDetector {
             floor: SILENCE_DB,
             armed: true,
             since: REFRACTORY,
+            pending: 0.0,
             primed: false,
         }
     }
@@ -176,8 +180,15 @@ impl BeatDetector {
     fn step(&mut self, levels: AudioLevels, dt: f32) -> bool {
         self.since += dt;
         if !levels.fresh {
+            self.pending += dt;
             return false;
         }
+        // The floor creeps over all the time since the last fresh level, not
+        // just this frame's `dt`: when audio arrives in bursts longer than a
+        // frame (a 1024-sample PipeWire quantum is ~3 frames at 144 Hz), it
+        // would otherwise creep only on the fresh frames and `FLOOR_TAU`
+        // would stretch by the burst ratio.
+        let elapsed = std::mem::take(&mut self.pending) + dt;
         let db = 10.0 * levels.low.max(1e-12).log10();
         if !self.primed {
             self.primed = true;
@@ -197,8 +208,8 @@ impl BeatDetector {
         // up toward the current level slowly.
         if db < self.floor {
             self.floor = db;
-        } else if dt > 0.0 {
-            let k = 1.0 - (-dt / FLOOR_TAU).exp();
+        } else if elapsed > 0.0 {
+            let k = 1.0 - (-elapsed / FLOOR_TAU).exp();
             self.floor += (db - self.floor) * k;
         }
         fired
@@ -342,6 +353,38 @@ mod tests {
         // A loud value that isn't fresh must not fire.
         assert_eq!(run(&mut f, &[stale; 10]), 0);
         assert_eq!(run(&mut f, &[level(1.0)]), 1, "the fresh loud frame does");
+    }
+
+    #[test]
+    fn floor_creeps_in_real_time_when_audio_arrives_in_bursts() {
+        // A slow 30 dB swell (5 dB/s) is not an onset, whether every frame
+        // brings audio or only every third one does (as with a 1024-sample
+        // PipeWire quantum at 144 Hz). The floor must also creep over the stale
+        // frames' time, or its time constant triples and the swell outruns it
+        // by > 3 dB.
+        let swell = |t: f32| AudioLevels {
+            low: 10f32.powf((-30.0 + 5.0 * t) / 10.0),
+            full: 0.0,
+            fresh: true,
+        };
+        let bars = [0.5; 8];
+        let mut every = AudioFeatures::default();
+        let mut bursty = AudioFeatures::default();
+        for frame in 0..6 * 60 {
+            let level = swell(frame as f32 * DT);
+            every.update(&bars, level, DT);
+            for sub in 0..3 {
+                let level = AudioLevels {
+                    fresh: sub == 0,
+                    ..level
+                };
+                bursty.update(&bars, level, DT / 3.0);
+            }
+        }
+        assert_eq!(every.beats, 0, "a swell is not a beat");
+        assert_eq!(bursty.beats, 0, "nor when audio arrives in bursts");
+        let (a, b) = (every.detector.floor, bursty.detector.floor);
+        assert!((a - b).abs() < 1e-3, "floors {a} vs {b} dB");
     }
 
     #[test]
