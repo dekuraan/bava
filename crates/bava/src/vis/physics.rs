@@ -36,7 +36,7 @@ use avian2d::prelude::*;
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::prelude::*;
 
-use crate::cava::Cava;
+use crate::cava::{Cava, CavaAnalysisSet};
 use crate::gui::EditorState;
 use crate::vis::bars::{LEVEL_STEPS, Layout, MAX_HEIGHT_FRAC, column_geom, mirror_values};
 use crate::vis::circle::blob_ring;
@@ -272,13 +272,21 @@ impl Plugin for PhysicsPlugin {
                     // only after `on_mode_change` has zeroed the caches on a
                     // switch frame — otherwise a reader could see a stale rate
                     // delta and fling balls (the documented invariant above).
-                    (update_surface, push_balls).chain().after(on_mode_change),
+                    // After `CavaAnalysisSet` too, so every collider is built
+                    // from this frame's bars — the analysis the renderers
+                    // (`update_blob_shape` / `update_ring`) draw from.
+                    (update_surface, push_balls)
+                        .chain()
+                        .after(on_mode_change)
+                        .after(CavaAnalysisSet),
                     (reconcile_columns, update_columns, push_columns)
                         .chain()
-                        .after(on_mode_change),
+                        .after(on_mode_change)
+                        .after(CavaAnalysisSet),
                     (update_planet, planet_forces, planet_gravity)
                         .chain()
-                        .after(on_mode_change),
+                        .after(on_mode_change)
+                        .after(CavaAnalysisSet),
                     reconcile_trails,
                     reconcile_ccd,
                     toggle_physics_debug,
@@ -292,13 +300,22 @@ impl Plugin for PhysicsPlugin {
             // would render every ball and trail head one frame stale.
             .add_systems(
                 PostUpdate,
-                (recover_planet_penetration, update_trails)
+                (
+                    recover_planet_penetration.in_set(PlanetRecoverySet),
+                    update_trails,
+                )
                     .chain()
                     .after(PhysicsSystems::Writeback)
                     .before(bevy::transform::TransformSystems::Propagate),
             );
     }
 }
+
+/// [`recover_planet_penetration`], the last writer of ball transforms and
+/// velocities each frame. Systems that read those to react to the physics
+/// (the fx impact sparks) order themselves after it.
+#[derive(bevy::ecs::schedule::SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct PlanetRecoverySet;
 
 /// Drop `[physics] spawn_on_launch` (or `--spawn-balls N`) balls in a grid
 /// across the drawing area, once, so bava can start with the playground already

@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //
-// A physics ball: a glossy, lit sphere with a rim light that glows harder on
-// the beat. Drawn on Bevy's `Circle` mesh, whose UVs span the unit square, so
+// A physics ball: a glossy, lit sphere with a specular highlight and a fresnel
+// rim light. Drawn on Bevy's `Circle` mesh, whose UVs span the unit square, so
 // the circle itself (and its antialiased edge) is resolved here.
+//
+// Reads only `color` and `params`: the ball buckets are not refreshed per frame
+// (see `BallLooks` in `vis/fx/mod.rs`), so audio/clock fields would be stale.
 //
 // color     the ball's palette color (HDR)
 // params[0] = (style, _, _, _) — style 0 is a flat disc like the old look.
@@ -24,7 +27,9 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         return vec4<f32>(base, fx.color.a * mask);
     }
 
-    let pulse = fx.clock.x;
+    // `r` can exceed 1 on MSAA edge samples (the UV is extrapolated past the
+    // mesh), so every `pow` base below is kept non-negative: a negative base
+    // is undefined in WGSL and NaN on most backends.
     let z = sqrt(max(1.0 - r2 / (edge * edge), 0.0));
     let n = normalize(vec3<f32>(p / edge, z));
     let light = normalize(vec3<f32>(-0.45, 0.6, 0.66));
@@ -34,7 +39,6 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
 
     var rgb = base * (0.18 + 0.9 * diffuse);
     rgb += vec3<f32>(1.0) * spec * 1.4;
-    rgb += base * fresnel * (1.1 + 2.4 * pulse);
-    rgb += base * pow(1.0 - r, 2.0) * pulse * 0.8;
+    rgb += base * fresnel * 1.5;
     return vec4<f32>(rgb, fx.color.a * mask);
 }

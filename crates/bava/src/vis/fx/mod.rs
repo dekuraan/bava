@@ -12,9 +12,9 @@
 //!   blob's actual rim shape, throwing noisy streaks outward.
 //! - **Backdrop** (`shaders/backdrop.wgsl`): parallax starfield + a faint nebula
 //!   blended additively over the album art.
-//! - **Glossy balls** (`shaders/ball.wgsl`): lit spheres with a beat-driven rim
-//!   light. Balls share a small bank of palette-bucketed materials
-//!   ([`BallLooks`]) instead of one material each.
+//! - **Glossy balls** (`shaders/ball.wgsl`): lit spheres with a specular
+//!   highlight and a fresnel rim light. Balls share a small bank of
+//!   palette-bucketed materials ([`BallLooks`]) instead of one material each.
 //! - **Particles** ([`particles`]): plasma flares shed from the loudest parts of
 //!   the rim, sparks where a ball is struck hard, and a shockwave ring off the
 //!   blob on every detected beat — all accumulated into one additive mesh.
@@ -140,8 +140,15 @@ pub(crate) const BALL_BUCKETS: usize = 16;
 /// palette moved. A ball's *mesh* stays its own (it is rigid, so it is never
 /// re-uploaded — see the batching note in AGENTS.md), but its look only depends
 /// on where it sits in the palette, so sixteen materials cover every ball:
-/// a palette fade or beat pulse rewrites 16 small uniforms rather than one per
-/// ball, and balls in the same bucket can share a bind group.
+/// a palette fade rewrites 16 small uniforms rather than one per ball, and
+/// balls in the same bucket can share a bind group.
+///
+/// The buckets are deliberately **not live** ([`ball_material`]): a modified
+/// material re-specializes and re-queues every mesh drawn with it, so a
+/// per-frame audio refresh would cost O(balls) render work every frame even
+/// with nothing changing on screen. `ball.wgsl` therefore reads only the
+/// bucket's color and style, and [`update_ball_looks`] writes a bucket only
+/// when its look actually changes.
 #[derive(Resource, Clone)]
 pub(crate) struct BallLooks {
     handles: Vec<Handle<FxMaterial>>,
@@ -152,6 +159,14 @@ impl BallLooks {
     pub(crate) fn material(&self, tint: f32) -> Handle<FxMaterial> {
         self.handles[bucket(tint)].clone()
     }
+}
+
+/// A ball bucket's material: the glossy shader, opted out of the per-frame
+/// sync (see [`BallLooks`]).
+fn ball_material() -> FxMaterial {
+    let mut material = FxMaterial::new(BALL_SHADER);
+    material.live = false;
+    material
 }
 
 /// Palette bucket index for `tint`.
@@ -204,7 +219,7 @@ impl Plugin for FxPlugin {
         let handles = {
             let mut materials = app.world_mut().resource_mut::<Assets<FxMaterial>>();
             (0..BALL_BUCKETS)
-                .map(|_| materials.add(FxMaterial::new(BALL_SHADER)))
+                .map(|_| materials.add(ball_material()))
                 .collect()
         };
         app.insert_resource(BallLooks { handles })
@@ -316,7 +331,9 @@ fn update_backdrop(
 }
 
 /// Recolor the ball buckets when the palette or glow changes, and flip them
-/// between the glossy and flat looks.
+/// between the glossy and flat looks. Only buckets whose look really moved are
+/// written: `VisSettings` changes for plenty of unrelated edits, and every
+/// modified bucket re-specializes every ball drawn with it.
 fn update_ball_looks(
     fx: Res<FxSettings>,
     vis: Res<VisSettings>,
@@ -335,9 +352,14 @@ fn update_ball_looks(
         0.0
     };
     for (i, handle) in looks.handles.iter().enumerate() {
-        if let Some(mut m) = materials.get_mut(handle) {
-            let color = sample_gradient(&stops, bucket_tint(i), vis.glow_gain);
-            m.uniform.color = color.to_linear().to_vec4();
+        let color = sample_gradient(&stops, bucket_tint(i), vis.glow_gain)
+            .to_linear()
+            .to_vec4();
+        // Compared through `Deref`; only the write below flags the asset.
+        if let Some(mut m) = materials.get_mut(handle)
+            && (m.uniform.color != color || m.uniform.params[0].x != style)
+        {
+            m.uniform.color = color;
             m.uniform.params[0].x = style;
         }
     }
@@ -356,6 +378,73 @@ mod tests {
         for i in 0..BALL_BUCKETS {
             assert_eq!(bucket(bucket_tint(i)), i, "bucket {i} round-trips");
         }
+    }
+
+    #[test]
+    fn ball_buckets_read_no_per_frame_uniform_fields() {
+        // The buckets never get the per-frame refresh, so the shader must not
+        // read anything only that refresh keeps current, or balls freeze.
+        assert!(!ball_material().live);
+        let src = include_str!("shaders/ball.wgsl");
+        for field in ["fx.clock", "fx.audio", "fx.palette", "fx.info", "palette("] {
+            assert!(!src.contains(field), "ball.wgsl reads per-frame `{field}`");
+        }
+    }
+
+    /// `AssetEvent::Modified`s seen since the last drain.
+    #[derive(Resource, Default)]
+    struct Modified(usize);
+
+    fn count_modified(
+        mut events: MessageReader<AssetEvent<FxMaterial>>,
+        mut out: ResMut<Modified>,
+    ) {
+        out.0 += events
+            .read()
+            .filter(|e| matches!(e, AssetEvent::Modified { .. }))
+            .count();
+    }
+
+    fn drain_modified(app: &mut App) -> usize {
+        std::mem::take(&mut app.world_mut().resource_mut::<Modified>().0)
+    }
+
+    #[test]
+    fn ball_looks_write_only_buckets_whose_look_changed() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()))
+            .init_asset::<FxMaterial>()
+            .init_resource::<FxSettings>()
+            .init_resource::<VisSettings>()
+            .init_resource::<Modified>()
+            .add_systems(Update, update_ball_looks)
+            .add_systems(Last, count_modified);
+        let handles = {
+            let mut materials = app.world_mut().resource_mut::<Assets<FxMaterial>>();
+            (0..BALL_BUCKETS)
+                .map(|_| materials.add(ball_material()))
+                .collect()
+        };
+        app.insert_resource(BallLooks { handles });
+
+        app.update();
+        assert_eq!(
+            drain_modified(&mut app),
+            BALL_BUCKETS,
+            "first pass colors all"
+        );
+        app.update();
+        assert_eq!(drain_modified(&mut app), 0);
+
+        // An edit that doesn't move the palette touches nothing.
+        app.world_mut().resource_mut::<VisSettings>().set_changed();
+        app.update();
+        assert_eq!(drain_modified(&mut app), 0, "unchanged buckets rewritten");
+
+        // Flipping to the flat look changes every bucket.
+        app.world_mut().resource_mut::<FxSettings>().glossy_balls = false;
+        app.update();
+        assert_eq!(drain_modified(&mut app), BALL_BUCKETS);
     }
 
     #[test]

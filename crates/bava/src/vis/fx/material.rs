@@ -204,8 +204,9 @@ impl From<&FxMaterial> for FxMaterialKey {
     }
 }
 
-/// `src.rgb + dst.rgb`, leaving the destination alpha alone.
-const ADDITIVE_BLEND: BlendState = BlendState {
+/// `src.rgb + dst.rgb`, leaving the destination alpha alone. Shared with the
+/// 3D twin, whose `AlphaMode::Add` would otherwise be premultiplied-over.
+pub(crate) const ADDITIVE_BLEND: BlendState = BlendState {
     color: BlendComponent {
         src_factor: BlendFactor::One,
         dst_factor: BlendFactor::One,
@@ -292,31 +293,73 @@ pub fn audio_uniform(features: &AudioFeatures, palette_count: f32) -> (Vec4, Vec
     )
 }
 
+/// This frame's shared uniform fields — palette, audio, clock and viewport —
+/// packed once and stamped onto every live material.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct LiveInputs {
+    palette: [Vec4; 4],
+    audio: Vec4,
+    clock: Vec4,
+    viewport: Vec2,
+}
+
+impl LiveInputs {
+    pub(crate) fn new(
+        features: &AudioFeatures,
+        vis: &VisSettings,
+        windows: &Query<&Window>,
+    ) -> Self {
+        let (palette, count) = palette_uniform(&vis.fg_stops());
+        let (audio, clock) = audio_uniform(features, count);
+        let viewport = windows.iter().next().map_or(Vec2::new(1280.0, 720.0), |w| {
+            Vec2::new(w.width(), w.height())
+        });
+        Self {
+            palette,
+            audio,
+            clock,
+            viewport,
+        }
+    }
+
+    /// `u` with this frame's live fields written in.
+    pub(crate) fn applied(&self, mut u: FxUniform) -> FxUniform {
+        u.palette = self.palette;
+        u.audio = self.audio;
+        u.clock = self.clock;
+        u.info.x = self.viewport.x;
+        u.info.y = self.viewport.y;
+        u
+    }
+}
+
 /// Refresh every live [`FxMaterial`] with this frame's audio features, palette
 /// and viewport size.
+///
+/// Only materials whose uniform actually changes are borrowed mutably:
+/// `Assets::iter_mut` queues `AssetEvent::Modified` for *every* asset it
+/// yields, and a modified material is re-uploaded and every mesh drawn with it
+/// re-specialized — so iterating mutably would churn the non-live ones (the
+/// particle batch, the ball buckets) and all their entities each frame.
 pub fn sync_fx_materials(
     features: Res<AudioFeatures>,
     vis: Res<VisSettings>,
     windows: Query<&Window>,
     mut materials: ResMut<Assets<FxMaterial>>,
+    mut stale: Local<Vec<AssetId<FxMaterial>>>,
 ) {
-    let (palette, count) = palette_uniform(&vis.fg_stops());
-    let (audio, clock) = audio_uniform(&features, count);
-    let (w, h) = windows
-        .iter()
-        .next()
-        .map(|w| (w.width(), w.height()))
-        .unwrap_or((1280.0, 720.0));
-    for (_, material) in materials.iter_mut() {
-        if !material.live {
-            continue;
+    let live = LiveInputs::new(&features, &vis, &windows);
+    stale.clear();
+    stale.extend(
+        materials
+            .iter()
+            .filter(|(_, m)| m.live && live.applied(m.uniform) != m.uniform)
+            .map(|(id, _)| id),
+    );
+    for id in stale.drain(..) {
+        if let Some(mut m) = materials.get_mut(id) {
+            m.uniform = live.applied(m.uniform);
         }
-        let u = &mut material.uniform;
-        u.palette = palette;
-        u.audio = audio;
-        u.clock = clock;
-        u.info.x = w;
-        u.info.y = h;
     }
 }
 
@@ -378,6 +421,64 @@ mod tests {
         u.set_shape(&radii);
         assert_eq!(u.shape[0], Vec4::new(0.0, 1.0, 2.0, 3.0));
         assert_eq!(u.shape[15], Vec4::new(60.0, 61.0, 62.0, 63.0));
+    }
+
+    /// Every `AssetEvent::Modified` id seen since the last drain.
+    #[derive(Resource, Default)]
+    struct Modified(Vec<AssetId<FxMaterial>>);
+
+    fn collect_modified(
+        mut events: MessageReader<AssetEvent<FxMaterial>>,
+        mut out: ResMut<Modified>,
+    ) {
+        for event in events.read() {
+            if let AssetEvent::Modified { id } = event {
+                out.0.push(*id);
+            }
+        }
+    }
+
+    fn drain_modified(app: &mut App) -> Vec<AssetId<FxMaterial>> {
+        std::mem::take(&mut app.world_mut().resource_mut::<Modified>().0)
+    }
+
+    #[test]
+    fn sync_modifies_only_live_materials_whose_uniform_changed() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()))
+            .init_asset::<FxMaterial>()
+            .init_resource::<AudioFeatures>()
+            .init_resource::<VisSettings>()
+            .init_resource::<Modified>()
+            .add_systems(Update, sync_fx_materials)
+            .add_systems(Last, collect_modified);
+        let (live, quiet) = {
+            let mut assets = app.world_mut().resource_mut::<Assets<FxMaterial>>();
+            let live = assets.add(FxMaterial::new(BLOB_SHADER)).id();
+            let mut quiet = FxMaterial::new(ADDITIVE_SHADER);
+            quiet.live = false;
+            (live, assets.add(quiet).id())
+        };
+
+        // The first sync stamps the live fields in; the opted-out material
+        // must not even be flagged (a flag alone re-uploads it and
+        // re-specializes every mesh drawn with it).
+        app.update();
+        let modified = drain_modified(&mut app);
+        assert!(modified.contains(&live));
+        assert!(!modified.contains(&quiet), "non-live material was modified");
+
+        // Nothing moved: nothing is touched.
+        app.update();
+        assert!(drain_modified(&mut app).is_empty());
+
+        // The music moves: only the live material follows it.
+        app.world_mut().resource_mut::<AudioFeatures>().bass = 0.5;
+        app.update();
+        assert_eq!(drain_modified(&mut app), vec![live]);
+        let assets = app.world().resource::<Assets<FxMaterial>>();
+        assert_eq!(assets.get(live).unwrap().uniform.audio.x, 0.5);
+        assert_eq!(assets.get(quiet).unwrap().uniform.audio.x, 0.0);
     }
 
     #[test]

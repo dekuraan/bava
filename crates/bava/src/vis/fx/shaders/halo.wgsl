@@ -32,10 +32,15 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     glow *= smoothstep(-base * 0.12, 0.0, d);
 
     // Corona: noise sampled along each ray, radius-stretched so it reads as
-    // streaks; the flow clock drags the pattern outward.
-    let rr = 11.0 + (max(d, 0.0) / base) * 1.4 - flow * 0.55;
-    let streak = fbm(dir * rr + vec2<f32>(3.1, 7.7));
-    let streak2 = fbm(dir * (rr * 0.5) + vec2<f32>(-flow * 0.2, 1.3));
+    // streaks. `rr` is the radius of the circle traced in noise space around
+    // the rim, so it sets how many streaks fit around it; it must stay bounded
+    // (a function of `d` only). The flow clock animates the pattern by sliding
+    // it through noise space instead — scaling `rr` with the clock would shrink
+    // the corona to one flat ring and then pack ever more streaks around the
+    // rim until they alias into per-pixel noise.
+    let rr = 11.0 + (max(d, 0.0) / base) * 1.4;
+    let streak = fbm(dir * rr + vec2<f32>(3.1 + flow * 0.2, 7.7 - flow * 0.15));
+    let streak2 = fbm(dir * (rr * 0.5) + vec2<f32>(-flow * 0.2, 1.3 + flow * 0.1));
     let corona = pow(max(streak * 0.65 + streak2 * 0.55 - 0.35, 0.0), 1.6)
         * exp(-max(d, 0.0) / (base * (0.35 + 0.6 * bass + 0.4 * pulse)))
         * smoothstep(-base * 0.05, base * 0.05, d);

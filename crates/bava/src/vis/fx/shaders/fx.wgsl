@@ -32,15 +32,36 @@ struct FxUniform {
 const PI: f32 = 3.14159265358979;
 const TAU: f32 = 6.28318530717959;
 
-fn hash21(p: vec2<f32>) -> f32 {
-    var q = fract(p * vec2<f32>(123.34, 456.21));
-    q += dot(q, q + 45.32);
-    return fract(q.x * q.y);
+// PCG-style 2D integer hash (Jarzynski & Olano, "Hash Functions for GPU
+// Rendering", JCGT 2020). Integer arithmetic wraps, so it stays exact at any
+// cell coordinate — the old `fract(p * 456.21)` float hash ran out of
+// fractional bits a few thousand cells out, and the effect shaders offset
+// their noise by the ever-growing flow clock.
+fn pcg2d(seed: vec2<u32>) -> vec2<u32> {
+    var v = seed * 1664525u + 1013904223u;
+    v.x += v.y * 1664525u;
+    v.y += v.x * 1664525u;
+    v = v ^ (v >> vec2<u32>(16u));
+    v.x += v.y * 1664525u;
+    v.y += v.x * 1664525u;
+    v = v ^ (v >> vec2<u32>(16u));
+    return v;
 }
 
+// Two independent uniform values in [0, 1) for the point `p`. Its integer
+// cell is hashed exactly (to ±2^31); a fractional part (non-integer seeds such
+// as `cell + 1.37`) is quantized to 1/65536 and mixed in, so it still hashes
+// apart from the plain cell.
 fn hash22(p: vec2<f32>) -> vec2<f32> {
-    let n = hash21(p);
-    return vec2<f32>(n, hash21(p + n + 17.17));
+    let cell = floor(p);
+    let frac_bits = vec2<u32>((p - cell) * 65536.0);
+    let seed = bitcast<vec2<u32>>(vec2<i32>(cell)) ^ (frac_bits * 2654435769u);
+    // The top 24 bits convert to f32 exactly, so the result never rounds up to 1.
+    return vec2<f32>(pcg2d(seed) >> vec2<u32>(8u)) * (1.0 / 16777216.0);
+}
+
+fn hash21(p: vec2<f32>) -> f32 {
+    return hash22(p).x;
 }
 
 // Smooth value noise in 0..1.

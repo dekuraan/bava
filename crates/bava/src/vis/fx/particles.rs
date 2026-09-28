@@ -20,7 +20,7 @@ use super::FxSettings;
 use super::material::{ADDITIVE_SHADER, FxBlend, FxMaterial};
 use crate::vis::circle::{BlobShape, SHAPE_SAMPLES};
 use crate::vis::features::AudioFeatures;
-use crate::vis::physics::Ball;
+use crate::vis::physics::{Ball, PlanetRecoverySet};
 use crate::vis::stroke::{MeshBatch, empty_stroke_mesh};
 use crate::vis::{DrawingMode, VisFamily, VisSettings, VisShape, gradient_color, sample_gradient};
 
@@ -133,12 +133,17 @@ impl Plugin for ParticlesPlugin {
             .add_systems(Startup, setup_particles)
             // After avian has written back this frame's velocities (impacts are
             // read from them) and after every Update system that shapes the
-            // blob, so emission and drawing see final values.
+            // blob, so emission and drawing see final values. After the orb's
+            // penetration recovery too: it moves swallowed balls and strips
+            // their inward velocity, and seeing that before or after it (the
+            // executor's choice otherwise) changes which frame an impact lands
+            // on, where its sparks spawn and every later seeded RNG draw.
             .add_systems(
                 PostUpdate,
                 (emit_and_step, draw_particles)
                     .chain()
-                    .after(PhysicsSystems::Writeback),
+                    .after(PhysicsSystems::Writeback)
+                    .after(PlanetRecoverySet),
             );
     }
 }
