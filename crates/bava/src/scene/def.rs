@@ -91,7 +91,7 @@ pub enum Dimension {
 #[serde(default, deny_unknown_fields)]
 pub struct SoundDef {
     pub path: String,
-    /// Linear volume, 0..1.
+    /// Linear volume, clamped to 0..2.
     pub volume: f32,
     pub trigger: SoundTrigger,
     /// For `trigger = "beat"`: play on every Nth beat.
@@ -100,8 +100,8 @@ pub struct SoundDef {
     pub key: Option<String>,
     /// Minimum seconds between two plays.
     pub min_interval: f32,
-    /// Random playback-speed variation (± fraction), so repeats don't sound
-    /// mechanical.
+    /// Random playback-speed variation (± fraction, clamped to 0..0.9), so
+    /// repeats don't sound mechanical.
     pub jitter: f32,
 }
 
@@ -582,7 +582,8 @@ impl Default for RingDef {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TerrainDef {
-    /// Texture atlas image.
+    /// Texture atlas image, a grid of `atlas_columns × atlas_rows` tiles
+    /// (each 1..=[`MAX_ATLAS_GRID`]).
     pub atlas: String,
     pub atlas_columns: u32,
     pub atlas_rows: u32,
@@ -590,7 +591,7 @@ pub struct TerrainDef {
     pub tiles: BTreeMap<String, u32>,
     /// Columns per side.
     pub size: u32,
-    /// World size of one block.
+    /// World size of one block (positive).
     pub block: f32,
     /// Resting height in blocks.
     pub base_height: u32,
@@ -616,10 +617,11 @@ pub struct TerrainDef {
     /// Above this height (blocks) the top block becomes `peak`.
     pub peak_height: u32,
     pub peak: String,
-    /// Blocks at or below this height get `shore` tops, and a water plane is
-    /// drawn at this level (0 = none).
+    /// Blocks at or below this height get `shore` tops (0 = none). No water
+    /// is drawn: add a `plane` object at `water_level × block` for that.
     pub water_level: u32,
     pub shore: String,
+    /// Unused; still accepted so older scenes that set it keep parsing.
     pub water: String,
     /// Chance a deep block is an ore, and which glowing tiles ores use.
     pub ore_chance: f32,
@@ -675,6 +677,27 @@ pub enum TerrainMapping {
     Waterfall,
 }
 
+/// Largest `[terrain] atlas_columns` / `atlas_rows`.
+pub const MAX_ATLAS_GRID: u32 = 1024;
+
+/// The named keys `[sounds.x] key` accepts besides letters, digits and F-keys
+/// (a subset of `config::parse_key`'s names, listed in the error for a typo).
+const NAMED_KEYS: &[&str] = &[
+    "space",
+    "tab",
+    "enter",
+    "escape",
+    "insert",
+    "backquote",
+    "backslash",
+    "minus",
+    "equal",
+    "comma",
+    "period",
+    "slash",
+    "semicolon",
+];
+
 impl SceneDef {
     /// Parse a `scene.toml`.
     pub fn parse(text: &str) -> Result<Self, String> {
@@ -685,7 +708,8 @@ impl SceneDef {
 
     /// Check the cross-references serde can't: every shader / sound / parent
     /// name used exists, parents are declared before children, rings aren't
-    /// empty, and terrain tiles resolve.
+    /// empty, terrain tiles resolve, key names are known, and every file path
+    /// is one the asset server can load.
     pub fn validate(&self) -> Result<(), String> {
         let shader = |name: &Option<String>, what: &str| -> Result<(), String> {
             match name {
@@ -718,10 +742,21 @@ impl SceneDef {
             if sound.path.trim().is_empty() {
                 return Err(format!("[sounds.{name}]: missing path"));
             }
-            if sound.trigger == SoundTrigger::Key && sound.key.is_none() {
-                return Err(format!(
-                    "[sounds.{name}]: trigger = \"key\" needs key = \"...\""
-                ));
+            if sound.trigger == SoundTrigger::Key {
+                match sound.key.as_deref() {
+                    None => {
+                        return Err(format!(
+                            "[sounds.{name}]: trigger = \"key\" needs key = \"...\""
+                        ));
+                    }
+                    Some(key) if crate::config::parse_key(key).is_none() => {
+                        return Err(format!(
+                            "[sounds.{name}]: unknown key {key:?} (use a-z, 0-9, f1-f12, {})",
+                            NAMED_KEYS.join(", ")
+                        ));
+                    }
+                    Some(_) => {}
+                }
             }
         }
 
@@ -772,6 +807,21 @@ impl SceneDef {
                     t.max_height
                 ));
             }
+            // Negative mirrors the field inside out; zero or NaN draws nothing.
+            if !(t.block.is_finite() && t.block > 0.0) {
+                return Err(format!(
+                    "[terrain]: block {} must be a positive number",
+                    t.block
+                ));
+            }
+            let grid = 1..=MAX_ATLAS_GRID;
+            if !grid.contains(&t.atlas_columns) || !grid.contains(&t.atlas_rows) {
+                return Err(format!(
+                    "[terrain]: atlas_columns {} and atlas_rows {} must each be 1..={MAX_ATLAS_GRID}",
+                    t.atlas_columns, t.atlas_rows
+                ));
+            }
+            // Both bounded above, so this can't overflow.
             let tiles = t.atlas_columns * t.atlas_rows;
             let mut names = vec![&t.top, &t.side, &t.under, &t.deep];
             if t.peak_height > 0 {
@@ -779,7 +829,6 @@ impl SceneDef {
             }
             if t.water_level > 0 {
                 names.push(&t.shore);
-                names.push(&t.water);
             }
             names.extend(t.ores.iter());
             for name in names {
@@ -797,6 +846,11 @@ impl SceneDef {
                     Some(_) => {}
                 }
             }
+        }
+        // Checked here too (not only when the files are looked up) so a path
+        // the asset server can't load, such as one with a '#', fails to parse.
+        for path in crate::scene::referenced_files(self) {
+            crate::scene::files::normalize(&path).map_err(|e| format!("bad file path: {e}"))?;
         }
         Ok(())
     }
@@ -957,6 +1011,88 @@ mod tests {
         assert!(SceneDef::parse(&ok).is_err());
         let ok = base.replace("dirt = 2 }", "dirt = 2, stone = 3 }");
         SceneDef::parse(&ok).unwrap();
+    }
+
+    /// A valid terrain scene with `extra` keys added to `[terrain]`.
+    fn terrain_with(extra: &str) -> Result<SceneDef, String> {
+        SceneDef::parse(&format!(
+            "[scene]\ndimension = \"3d\"\n[terrain]\natlas = \"a.png\"\n\
+             tiles = {{ grass_top = 0, grass_side = 1, dirt = 2, stone = 3, sand = 5 }}\n{extra}\n"
+        ))
+    }
+
+    #[test]
+    fn terrain_block_must_be_a_positive_number() {
+        terrain_with("").unwrap();
+        terrain_with("block = 0.25").unwrap();
+        for block in ["0.0", "-1.0", "nan", "inf"] {
+            let err = terrain_with(&format!("block = {block}")).unwrap_err();
+            assert!(err.contains("block"), "{block}: {err}");
+        }
+    }
+
+    #[test]
+    fn terrain_atlas_grid_is_bounded_instead_of_overflowing() {
+        // 65536² overflows u32: this must be an error, not a panic.
+        let err = terrain_with("atlas_columns = 65536\natlas_rows = 65536").unwrap_err();
+        assert!(err.contains("atlas_columns"), "{err}");
+        assert!(terrain_with("atlas_rows = 0").is_err());
+        terrain_with("atlas_columns = 1024\natlas_rows = 1024").unwrap();
+        // A tile past the end of a small atlas is still caught.
+        let err = terrain_with("atlas_columns = 2\natlas_rows = 1").unwrap_err();
+        assert!(err.contains("outside the atlas"), "{err}");
+    }
+
+    #[test]
+    fn water_level_needs_a_shore_tile_but_no_water_tile() {
+        // No `water` tile is declared: nothing draws one, so none is required.
+        terrain_with("water_level = 3").unwrap();
+        // The field still parses, for scenes written against the old docs.
+        terrain_with("water_level = 3\nwater = \"lake\"").unwrap();
+        let err = terrain_with("water_level = 3\nshore = \"beach\"").unwrap_err();
+        assert!(err.contains("beach"), "{err}");
+    }
+
+    #[test]
+    fn key_sounds_need_a_key_name_that_exists() {
+        let sound = |key: &str| {
+            SceneDef::parse(&format!(
+                "[sounds.jump]\npath = \"j.ogg\"\ntrigger = \"key\"\n{key}\n"
+            ))
+        };
+        sound("key = \"j\"").unwrap();
+        sound("key = \"F5\"").unwrap();
+        assert!(sound("").unwrap_err().contains("needs key"));
+        for bad in ["up", "shift", ""] {
+            let err = sound(&format!("key = {bad:?}")).unwrap_err();
+            assert!(err.contains("unknown key"), "{bad}: {err}");
+            assert!(err.contains("semicolon"), "lists the names: {err}");
+        }
+        // Other triggers ignore `key`, so it isn't checked there.
+        SceneDef::parse("[sounds.x]\npath = \"x.ogg\"\nkey = \"up\"\n").unwrap();
+    }
+
+    #[test]
+    fn every_key_name_in_the_error_parses() {
+        let letters = ('a'..='z').map(String::from);
+        let digits = ('0'..='9').map(String::from);
+        let fkeys = (1..=12).map(|n| format!("f{n}"));
+        let named = NAMED_KEYS.iter().map(|n| n.to_string());
+        for name in letters.chain(digits).chain(fkeys).chain(named) {
+            assert!(crate::config::parse_key(&name).is_some(), "{name}");
+        }
+    }
+
+    #[test]
+    fn file_paths_with_a_hash_fail_to_parse() {
+        let err = SceneDef::parse("[sounds.note]\npath = \"sounds/C#4.ogg\"\n").unwrap_err();
+        assert!(err.contains('#'), "{err}");
+        let err = SceneDef::parse(
+            "[[object]]\nmesh = \"circle\"\nmaterial = { texture = \"textures/a.png#\" }\n",
+        )
+        .unwrap_err();
+        assert!(err.contains("a.png#"), "{err}");
+        assert!(SceneDef::parse("[shaders]\nsun = \"../sun.wgsl\"\n").is_err());
     }
 
     #[test]

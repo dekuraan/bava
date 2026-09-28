@@ -117,12 +117,7 @@ pub fn resolve(arg: &str) -> Option<SceneEntry> {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let path = Path::new(arg);
-        let dir = if path.file_name().is_some_and(|n| n == SCENE_FILE) {
-            path.parent().map(Path::to_path_buf).unwrap_or_default()
-        } else {
-            path.to_path_buf()
-        };
+        let dir = scene_dir_of(Path::new(arg));
         if dir.join(SCENE_FILE).is_file() {
             let dir = dir.canonicalize().unwrap_or(dir);
             let id = dir
@@ -136,6 +131,20 @@ pub fn resolve(arg: &str) -> Option<SceneEntry> {
         }
     }
     None
+}
+
+/// The scene directory a path argument names: the path itself, or the parent
+/// of a `scene.toml`. A bare `scene.toml` has an *empty* parent, which can't be
+/// read or canonicalized, so it means the current directory.
+#[cfg(not(target_arch = "wasm32"))]
+fn scene_dir_of(path: &Path) -> PathBuf {
+    if path.file_name().is_some_and(|n| n == SCENE_FILE) {
+        path.parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map_or_else(|| PathBuf::from("."), Path::to_path_buf)
+    } else {
+        path.to_path_buf()
+    }
 }
 
 /// A scene's files, keyed by their `/`-separated path inside the scene.
@@ -191,7 +200,7 @@ pub fn read(source: &SceneSource) -> Result<SceneFiles, String> {
 #[cfg(not(target_arch = "wasm32"))]
 fn read_dir(dir: &Path) -> Result<SceneFiles, String> {
     let mut paths = Vec::new();
-    walk(dir, &mut paths).map_err(|e| format!("{}: {e}", dir.display()))?;
+    walk_scene(dir, &mut paths).map_err(|e| format!("{}: {e}", dir.display()))?;
     let mut total = 0u64;
     let mut files = BTreeMap::new();
     for path in paths {
@@ -226,8 +235,30 @@ fn read_dir(dir: &Path) -> Result<SceneFiles, String> {
     ))
 }
 
+/// Deepest directory nesting [`walk_scene`] descends into.
 #[cfg(not(target_arch = "wasm32"))]
-fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+const MAX_SCENE_DEPTH: usize = 32;
+
+/// Every file of a scene directory, recursively. Symlinks are followed, to
+/// agree with [`discover`] / [`resolve`] (which accept a linked `scene.toml`)
+/// and so scenes installed by a dotfile manager load. Dangling links are
+/// skipped, and so is a linked directory that is one of its own ancestors.
+#[cfg(not(target_arch = "wasm32"))]
+fn walk_scene(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    let mut ancestors = vec![dir.canonicalize()?];
+    walk(dir, &mut ancestors, out)
+}
+
+/// [`walk_scene`]'s recursion. `ancestors` holds the canonical paths of `dir`
+/// and every directory above it, so a link cycle is caught on its way back.
+#[cfg(not(target_arch = "wasm32"))]
+fn walk(dir: &Path, ancestors: &mut Vec<PathBuf>, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    if ancestors.len() > MAX_SCENE_DEPTH {
+        return Err(std::io::Error::other(format!(
+            "{} is nested more than {MAX_SCENE_DEPTH} directories deep",
+            dir.display()
+        )));
+    }
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let name = entry.file_name();
@@ -236,9 +267,28 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
             continue;
         }
         let path = entry.path();
-        let kind = entry.file_type()?;
+        let mut kind = entry.file_type()?;
+        let linked = kind.is_symlink();
+        if linked {
+            match std::fs::metadata(&path) {
+                Ok(target) => kind = target.file_type(),
+                Err(_) => continue,
+            }
+        }
         if kind.is_dir() {
-            walk(&path, out)?;
+            let canonical = if linked {
+                path.canonicalize()?
+            } else {
+                // A real subdirectory of a canonical path is canonical too.
+                ancestors[ancestors.len() - 1].join(entry.file_name())
+            };
+            if ancestors.contains(&canonical) {
+                continue;
+            }
+            ancestors.push(canonical);
+            let walked = walk(&path, ancestors, out);
+            ancestors.pop();
+            walked?;
         } else if kind.is_file() {
             out.push(path);
         }
@@ -253,7 +303,7 @@ pub fn stamp(source: &SceneSource) -> Option<u64> {
     if let SceneSource::Dir(dir) = source {
         use std::hash::{Hash, Hasher};
         let mut paths = Vec::new();
-        walk(dir, &mut paths).ok()?;
+        walk_scene(dir, &mut paths).ok()?;
         paths.sort();
         let mut h = std::collections::hash_map::DefaultHasher::new();
         for p in paths {
@@ -273,7 +323,16 @@ pub fn stamp(source: &SceneSource) -> Option<u64> {
 
 /// Normalize a path written in `scene.toml` to a key of [`SceneFiles`]:
 /// `/`-separated, no leading `./`, and never climbing out of the scene.
+///
+/// `#` is refused: the asset server reads everything after the last `#` of an
+/// asset path as a sub-asset label, so `sounds/C#4.ogg` would load a file
+/// named `sounds/C`, and a trailing `#` doesn't parse at all.
 pub fn normalize(rel: &str) -> Result<String, String> {
+    if rel.contains('#') {
+        return Err(format!(
+            "{rel:?}: '#' can't be used in scene file names (Bevy reads it as an asset label)"
+        ));
+    }
     let unified = rel.trim().replace('\\', "/");
     let mut parts: Vec<&str> = Vec::new();
     for part in unified.split('/') {
@@ -358,6 +417,64 @@ mod tests {
         assert!(normalize("../secret").is_err());
         assert!(normalize("a/../../b").is_err());
         assert!(normalize("").is_err());
+    }
+
+    #[test]
+    fn hash_in_a_file_name_is_refused_not_read_as_a_label() {
+        let err = normalize("sounds/piano_C#4.ogg").unwrap_err();
+        assert!(err.contains('#'), "{err}");
+        // A trailing '#' would make `AssetPath::parse` fail (and panic in load).
+        assert!(normalize("textures/a.png#").is_err());
+        assert!(asset_path("s", "sounds/C#4.ogg").is_err());
+
+        let mut files = SceneFiles::default();
+        files
+            .files
+            .insert("sounds/C#4.ogg".into(), Cow::Borrowed(&[0u8][..]));
+        assert!(!files.contains("sounds/C#4.ogg"));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_bare_scene_file_names_the_current_directory() {
+        assert_eq!(scene_dir_of(Path::new(SCENE_FILE)), Path::new("."));
+        assert_eq!(scene_dir_of(Path::new("a/scene.toml")), Path::new("a"));
+        assert_eq!(scene_dir_of(Path::new("./scene.toml")), Path::new("."));
+        assert_eq!(scene_dir_of(Path::new("a/b")), Path::new("a/b"));
+        // "." canonicalizes to a real directory, so the id is its name.
+        assert!(scene_dir_of(Path::new(SCENE_FILE)).canonicalize().is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_scene_files_and_dirs_are_read_and_cycles_skipped() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        // A dotfile-manager layout: real files in a store, links in the scene.
+        let store = dir.path().join("store");
+        std::fs::create_dir_all(store.join("shared")).unwrap();
+        std::fs::write(store.join(SCENE_FILE), "[scene]\nname = \"Linked\"\n").unwrap();
+        std::fs::write(store.join("sand.png"), "png").unwrap();
+        std::fs::write(store.join("shared/x.wgsl"), "// shared").unwrap();
+        let scene = dir.path().join("mine");
+        std::fs::create_dir_all(scene.join("textures")).unwrap();
+        symlink(store.join(SCENE_FILE), scene.join(SCENE_FILE)).unwrap();
+        symlink(store.join("sand.png"), scene.join("textures/sand.png")).unwrap();
+        symlink(store.join("shared"), scene.join("shaders")).unwrap();
+        symlink(&scene, scene.join("textures/loop")).unwrap();
+        symlink(dir.path().join("gone"), scene.join("dangling")).unwrap();
+
+        let entry = resolve(scene.to_str().unwrap()).expect("linked scene.toml resolves");
+        let files = read(&entry.source).expect("linked scene reads");
+        assert!(files.scene_toml().unwrap().contains("Linked"));
+        assert!(files.contains("textures/sand.png"));
+        assert_eq!(files.text("shaders/x.wgsl").unwrap(), "// shared");
+        assert_eq!(files.files.len(), 3, "{:?}", files.files.keys());
+
+        // Editing a link's target is picked up by hot reload.
+        let before = stamp(&entry.source).unwrap();
+        std::fs::write(store.join("sand.png"), "a bigger png").unwrap();
+        assert_ne!(stamp(&entry.source).unwrap(), before);
     }
 
     #[test]

@@ -20,6 +20,7 @@ Their sources are under [`assets/scenes/`](../assets/scenes). Copy one to start 
 bava --list-scenes                      # built-ins and your own scenes
 bava --scene solar_system               # start with a scene
 bava --scene ~/my-scenes/aquarium       # any directory with a scene.toml
+bava --scene scene.toml                 # or the scene.toml itself
 bava --scene none                       # scenes off (overrides the config)
 bava --input song.flac --out out.mp4 --scene minecraft   # render one to video
 ```
@@ -55,7 +56,9 @@ my-scene/
 ```
 
 Paths in `scene.toml` are relative to the scene directory and can't climb out
-of it (`..` is rejected). Colors are `"#rrggbb"`, or `"#aarrggbb"` with alpha
+of it (`..` is rejected). File names can't contain `#`, which Bevy's asset
+paths reserve for labels. Symlinked files and directories inside a scene are
+followed. Colors are `"#rrggbb"`, or `"#aarrggbb"` with alpha
 first, the same as `config.toml`. Unknown keys are errors, reported with the
 key's name.
 
@@ -256,10 +259,10 @@ rebuilt only when a column moves by a whole block.
 ```toml
 [terrain]
 atlas = "textures/blocks.png"
-atlas_columns = 8
+atlas_columns = 8      # the atlas grid, each 1..1024
 atlas_rows = 8
 size = 32              # columns per side
-block = 1.0
+block = 1.0            # world size of one block, above 0
 base_height = 2
 max_height = 15
 mapping = "radial"     # bass in the middle | "radial_inverted" | "waterfall" (scrolling spectrogram)
@@ -286,18 +289,25 @@ grass_side = 1
 # ...
 ```
 
+`water_level` only picks the `shore` caps; the terrain draws no water. For a
+water surface, add a `plane` object just under `water_level × block`, as the
+built-in `minecraft` scene does.
+
 ## Sounds
 
 ```toml
 [sounds.place]
 path = "sounds/place.ogg"
 trigger = "click"      # start | loop | beat | spawn | impact | click | key
-volume = 0.6
-jitter = 0.12          # ± random playback speed
-min_interval = 0.05
+volume = 0.6           # linear gain, 0..2
+jitter = 0.12          # ± random playback speed, 0..0.9
+min_interval = 0.05    # seconds
 every = 32             # trigger = "beat": every Nth beat
-key = "j"              # trigger = "key": same names as [gui] toggle_key
+key = "j"              # trigger = "key": a-z, 0-9, f1-f12, space, enter, ...
 ```
+
+An unknown `key` name is an error that lists the names accepted (the same
+ones as `[gui] toggle_key`).
 
 bava visualizes what the system plays, so a scene's own sounds reach the
 visualizer too. Prefer user-driven triggers (`click`, `key`, `spawn` for
