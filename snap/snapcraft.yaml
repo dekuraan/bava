@@ -71,6 +71,7 @@ parts:
       - libclang-dev
       - pkg-config
       - libpulse-dev
+      - libasound2-dev   # scene sound effects (bevy_audio → cpal → ALSA)
       - libpipewire-0.3-dev
       - libdbus-1-dev
       - libwayland-dev
@@ -82,6 +83,7 @@ parts:
       - libvulkan-dev
     stage-packages:
       - libpulse0
+      - libasound2
       - libpipewire-0.3-0
       - libdbus-1-3
       - libvulkan1

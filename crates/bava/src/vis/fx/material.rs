@@ -1,0 +1,392 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+//! [`FxMaterial`]: the one 2D material every effect — and every scene shader —
+//! is drawn with.
+//!
+//! A `Material2d`'s fragment shader is normally fixed per *type*, which would
+//! mean one Rust type per shader and no way to load a shader a scene file names
+//! at runtime. Instead the shader handle rides in the material's
+//! `bind_group_data` key, and [`Material2d::specialize`] swaps it into the
+//! pipeline descriptor — so each distinct shader just becomes one more
+//! specialization of the same pipeline. The blend mode is keyed the same way:
+//! glows and particles override the blend state to additive, which
+//! [`AlphaMode2d`] has no variant for.
+//!
+//! Every material shares one uniform layout ([`FxUniform`], mirrored by
+//! `struct FxUniform` in `shaders/fx.wgsl`), refreshed each frame by
+//! [`sync_fx_materials`] with the live audio features and palette. That shared
+//! contract is what lets a scene author's shader react to the bass without any
+//! Rust on their side.
+
+use bevy::asset::uuid_handle;
+use bevy::mesh::MeshVertexBufferLayoutRef;
+use bevy::prelude::*;
+use bevy::render::render_resource::{
+    AsBindGroup, BlendComponent, BlendFactor, BlendOperation, BlendState, RenderPipelineDescriptor,
+    ShaderType, SpecializedMeshPipelineError,
+};
+use bevy::shader::{Shader, ShaderRef};
+use bevy::sprite_render::{AlphaMode2d, Material2d, Material2dKey, Material2dPlugin};
+
+use crate::vis::VisSettings;
+use crate::vis::features::{AudioFeatures, FeaturesSet};
+
+/// `bava::fx` — the uniform struct and noise helpers.
+pub const FX_LIB_SHADER: Handle<Shader> = uuid_handle!("5b0c7e0e-2c61-4f1f-9d1c-1f0a8f2b6a01");
+/// `bava::fx_material` — the material bindings + palette / rim helpers.
+pub const FX_MATERIAL_LIB_SHADER: Handle<Shader> =
+    uuid_handle!("5b0c7e0e-2c61-4f1f-9d1c-1f0a8f2b6a02");
+/// The blob's plasma interior.
+pub const BLOB_SHADER: Handle<Shader> = uuid_handle!("5b0c7e0e-2c61-4f1f-9d1c-1f0a8f2b6a03");
+/// The additive glow + corona around the blob.
+pub const HALO_SHADER: Handle<Shader> = uuid_handle!("5b0c7e0e-2c61-4f1f-9d1c-1f0a8f2b6a04");
+/// The starfield / nebula backdrop.
+pub const BACKDROP_SHADER: Handle<Shader> = uuid_handle!("5b0c7e0e-2c61-4f1f-9d1c-1f0a8f2b6a05");
+/// Lit glossy physics balls.
+pub const BALL_SHADER: Handle<Shader> = uuid_handle!("5b0c7e0e-2c61-4f1f-9d1c-1f0a8f2b6a06");
+/// Vertex-colored additive geometry (sparks, flares, shockwaves).
+pub const ADDITIVE_SHADER: Handle<Shader> = uuid_handle!("5b0c7e0e-2c61-4f1f-9d1c-1f0a8f2b6a07");
+
+/// Register the embedded WGSL sources under their fixed handles. Idempotent,
+/// and safe to call from any plugin that needs them.
+pub fn register_shaders(app: &mut App) {
+    let Some(mut shaders) = app.world_mut().get_resource_mut::<Assets<Shader>>() else {
+        return; // no render stack (headless unit tests)
+    };
+    let sources: [(&Handle<Shader>, &'static str, &str); 7] = [
+        (
+            &FX_LIB_SHADER,
+            include_str!("shaders/fx.wgsl"),
+            "bava/fx.wgsl",
+        ),
+        (
+            &FX_MATERIAL_LIB_SHADER,
+            include_str!("shaders/fx_material.wgsl"),
+            "bava/fx_material.wgsl",
+        ),
+        (
+            &BLOB_SHADER,
+            include_str!("shaders/blob.wgsl"),
+            "bava/blob.wgsl",
+        ),
+        (
+            &HALO_SHADER,
+            include_str!("shaders/halo.wgsl"),
+            "bava/halo.wgsl",
+        ),
+        (
+            &BACKDROP_SHADER,
+            include_str!("shaders/backdrop.wgsl"),
+            "bava/backdrop.wgsl",
+        ),
+        (
+            &BALL_SHADER,
+            include_str!("shaders/ball.wgsl"),
+            "bava/ball.wgsl",
+        ),
+        (
+            &ADDITIVE_SHADER,
+            include_str!("shaders/additive.wgsl"),
+            "bava/additive.wgsl",
+        ),
+    ];
+    for (handle, source, path) in sources {
+        if shaders.contains(handle.id()) {
+            continue;
+        }
+        let _ = shaders.insert(handle.id(), Shader::from_wgsl(source, path));
+    }
+}
+
+/// The uniform block shared by every effect and scene shader. Field order and
+/// types must match `struct FxUniform` in `shaders/fx.wgsl`.
+#[derive(ShaderType, Clone, Copy, Debug, PartialEq)]
+pub struct FxUniform {
+    /// Base tint, linear RGB (HDR allowed) + alpha.
+    pub color: Vec4,
+    /// Up to four live palette stops, linear RGB.
+    pub palette: [Vec4; 4],
+    /// (bass, mid, treble, energy).
+    pub audio: Vec4,
+    /// (beat pulse, flow clock, seconds, palette stop count).
+    pub clock: Vec4,
+    /// Free per-material parameters.
+    pub params: [Vec4; 4],
+    /// 64 blob rim radii in px, evenly spaced by angle.
+    pub shape: [Vec4; 16],
+    /// (viewport width, viewport height, blob base radius, rotation).
+    pub info: Vec4,
+}
+
+impl Default for FxUniform {
+    fn default() -> Self {
+        Self {
+            color: Vec4::ONE,
+            palette: [Vec4::ONE; 4],
+            audio: Vec4::ZERO,
+            clock: Vec4::new(0.0, 0.0, 0.0, 1.0),
+            params: [Vec4::ZERO; 4],
+            shape: [Vec4::ZERO; 16],
+            info: Vec4::ZERO,
+        }
+    }
+}
+
+impl FxUniform {
+    /// Write the 64 rim radii into [`shape`](Self::shape).
+    pub fn set_shape(&mut self, radii: &[f32; 64]) {
+        for (slot, chunk) in self.shape.iter_mut().zip(radii.as_chunks::<4>().0) {
+            *slot = Vec4::from_array(*chunk);
+        }
+    }
+}
+
+/// How a material's output is combined with what is behind it.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+pub enum FxBlend {
+    /// Standard alpha blending.
+    #[default]
+    Alpha,
+    /// `dst + src.rgb` — for glows, particles and light.
+    Additive,
+    /// No blending (alpha ignored).
+    Opaque,
+}
+
+/// A 2D material whose fragment shader and blend mode are chosen per instance.
+#[derive(Asset, TypePath, AsBindGroup, Clone, Debug)]
+#[bind_group_data(FxMaterialKey)]
+pub struct FxMaterial {
+    #[uniform(0)]
+    pub uniform: FxUniform,
+    /// Optional image, bound as `fx_texture` (a white fallback when `None`).
+    #[texture(1)]
+    #[sampler(2)]
+    pub texture: Option<Handle<Image>>,
+    /// Fragment shader. Must import `bava::fx_material` for its bindings.
+    pub shader: Handle<Shader>,
+    pub blend: FxBlend,
+    /// Refresh the audio / palette / clock fields every frame. Materials that
+    /// never read them can opt out and stay unmodified (no re-upload).
+    pub live: bool,
+}
+
+impl FxMaterial {
+    /// A live, alpha-blended material drawn with `shader`.
+    pub fn new(shader: Handle<Shader>) -> Self {
+        Self {
+            uniform: FxUniform::default(),
+            texture: None,
+            shader,
+            blend: FxBlend::Alpha,
+            live: true,
+        }
+    }
+
+    pub fn with_blend(mut self, blend: FxBlend) -> Self {
+        self.blend = blend;
+        self
+    }
+}
+
+/// Specialization key: which shader, and how to blend it.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct FxMaterialKey {
+    shader: Handle<Shader>,
+    blend: FxBlend,
+}
+
+impl From<&FxMaterial> for FxMaterialKey {
+    fn from(m: &FxMaterial) -> Self {
+        Self {
+            shader: m.shader.clone(),
+            blend: m.blend,
+        }
+    }
+}
+
+/// `src.rgb + dst.rgb`, leaving the destination alpha alone.
+const ADDITIVE_BLEND: BlendState = BlendState {
+    color: BlendComponent {
+        src_factor: BlendFactor::One,
+        dst_factor: BlendFactor::One,
+        operation: BlendOperation::Add,
+    },
+    alpha: BlendComponent {
+        src_factor: BlendFactor::Zero,
+        dst_factor: BlendFactor::One,
+        operation: BlendOperation::Add,
+    },
+};
+
+impl Material2d for FxMaterial {
+    fn fragment_shader() -> ShaderRef {
+        // Replaced per instance in `specialize`; this only has to be a valid
+        // fragment entry point for the default descriptor.
+        ShaderRef::Handle(ADDITIVE_SHADER)
+    }
+
+    fn alpha_mode(&self) -> AlphaMode2d {
+        match self.blend {
+            FxBlend::Opaque => AlphaMode2d::Opaque,
+            // Additive rides the transparent (sorted) phase; the blend state
+            // itself is overridden in `specialize`.
+            FxBlend::Alpha | FxBlend::Additive => AlphaMode2d::Blend,
+        }
+    }
+
+    fn specialize(
+        descriptor: &mut RenderPipelineDescriptor,
+        _layout: &MeshVertexBufferLayoutRef,
+        key: Material2dKey<Self>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        if let Some(fragment) = descriptor.fragment.as_mut() {
+            fragment.shader = key.bind_group_data.shader.clone();
+            if key.bind_group_data.blend == FxBlend::Additive {
+                for target in fragment.targets.iter_mut().flatten() {
+                    target.blend = Some(ADDITIVE_BLEND);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The live palette, packed for the uniform: up to four linear stops plus the
+/// stop count. More than four stops (a five-color album palette) are resampled
+/// evenly so both ends and the overall sweep survive.
+pub fn palette_uniform(stops: &[Color]) -> ([Vec4; 4], f32) {
+    let lin: Vec<Vec4> = if stops.is_empty() {
+        vec![Vec4::ONE]
+    } else {
+        stops.iter().map(|c| c.to_linear().to_vec4()).collect()
+    };
+    let mut out = [*lin.last().unwrap_or(&Vec4::ONE); 4];
+    if lin.len() <= 4 {
+        out[..lin.len()].copy_from_slice(&lin);
+        return (out, lin.len() as f32);
+    }
+    let span = (lin.len() - 1) as f32;
+    for (k, slot) in out.iter_mut().enumerate() {
+        let x = k as f32 / 3.0 * span;
+        let i = (x.floor() as usize).min(lin.len() - 2);
+        *slot = lin[i].lerp(lin[i + 1], x - i as f32);
+    }
+    (out, 4.0)
+}
+
+/// Pack the live audio features into the (audio, clock) uniform pair.
+pub fn audio_uniform(features: &AudioFeatures, palette_count: f32) -> (Vec4, Vec4) {
+    (
+        Vec4::new(
+            features.bass,
+            features.mid,
+            features.treble,
+            features.energy,
+        ),
+        Vec4::new(
+            features.beat_pulse,
+            features.flow,
+            features.time,
+            palette_count,
+        ),
+    )
+}
+
+/// Refresh every live [`FxMaterial`] with this frame's audio features, palette
+/// and viewport size.
+pub fn sync_fx_materials(
+    features: Res<AudioFeatures>,
+    vis: Res<VisSettings>,
+    windows: Query<&Window>,
+    mut materials: ResMut<Assets<FxMaterial>>,
+) {
+    let (palette, count) = palette_uniform(&vis.fg_stops());
+    let (audio, clock) = audio_uniform(&features, count);
+    let (w, h) = windows
+        .iter()
+        .next()
+        .map(|w| (w.width(), w.height()))
+        .unwrap_or((1280.0, 720.0));
+    for (_, material) in materials.iter_mut() {
+        if !material.live {
+            continue;
+        }
+        let u = &mut material.uniform;
+        u.palette = palette;
+        u.audio = audio;
+        u.clock = clock;
+        u.info.x = w;
+        u.info.y = h;
+    }
+}
+
+/// Registers [`FxMaterial`], its embedded shaders and the per-frame sync.
+pub struct FxMaterialPlugin;
+
+impl Plugin for FxMaterialPlugin {
+    fn build(&self, app: &mut App) {
+        register_shaders(app);
+        app.add_plugins(Material2dPlugin::<FxMaterial>::default())
+            .add_systems(
+                Update,
+                sync_fx_materials.in_set(FxSyncSet).after(FeaturesSet),
+            );
+    }
+}
+
+/// [`sync_fx_materials`]. Systems that set per-material fields (shape, params)
+/// run after it so their writes aren't clobbered.
+#[derive(bevy::ecs::schedule::SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FxSyncSet;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn palette_uniform_keeps_short_palettes_verbatim() {
+        let (p, n) = palette_uniform(&[Color::BLACK, Color::WHITE]);
+        assert_eq!(n, 2.0);
+        assert_eq!(p[0].truncate(), Vec3::ZERO);
+        assert_eq!(p[1].truncate(), Vec3::ONE);
+        let (p, n) = palette_uniform(&[]);
+        assert_eq!(n, 1.0);
+        assert_eq!(p[0], Vec4::ONE);
+    }
+
+    #[test]
+    fn palette_uniform_resamples_five_stops_keeping_the_ends() {
+        let stops: Vec<Color> = (0..5)
+            .map(|i| Color::linear_rgb(i as f32 / 4.0, 0.0, 0.0))
+            .collect();
+        let (p, n) = palette_uniform(&stops);
+        assert_eq!(n, 4.0);
+        assert!((p[0].x - 0.0).abs() < 1e-6);
+        assert!((p[3].x - 1.0).abs() < 1e-6);
+        // Evenly resampled along the ramp.
+        assert!((p[1].x - 1.0 / 3.0).abs() < 1e-5);
+        assert!((p[2].x - 2.0 / 3.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn set_shape_packs_radii_in_order() {
+        let mut radii = [0.0f32; 64];
+        for (i, r) in radii.iter_mut().enumerate() {
+            *r = i as f32;
+        }
+        let mut u = FxUniform::default();
+        u.set_shape(&radii);
+        assert_eq!(u.shape[0], Vec4::new(0.0, 1.0, 2.0, 3.0));
+        assert_eq!(u.shape[15], Vec4::new(60.0, 61.0, 62.0, 63.0));
+    }
+
+    #[test]
+    fn material_key_distinguishes_shader_and_blend() {
+        let a = FxMaterialKey::from(&FxMaterial::new(BLOB_SHADER));
+        let b = FxMaterialKey::from(&FxMaterial::new(HALO_SHADER));
+        let c = FxMaterialKey::from(&FxMaterial::new(BLOB_SHADER).with_blend(FxBlend::Additive));
+        assert_ne!(a, b);
+        assert_ne!(a, c);
+        assert_eq!(a, FxMaterialKey::from(&FxMaterial::new(BLOB_SHADER)));
+    }
+}

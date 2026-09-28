@@ -24,7 +24,7 @@ use cavacore_rs::{CavaConfig, CavaPlan};
 
 /// Tunables for the cavacore pipeline. Insert your own before adding
 /// [`CavaPlugin`] to override the defaults.
-#[derive(Resource, Clone, Debug)]
+#[derive(Resource, Clone, Debug, PartialEq)]
 pub struct CavaSettings {
     /// Bars per channel.
     pub bars_per_channel: usize,
@@ -232,6 +232,73 @@ struct CavaState {
 #[derive(bevy::ecs::schedule::SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct OfflineCavaSet;
 
+/// Signal levels measured on the raw samples (before cavacore's smoothing),
+/// refreshed by `feed_cava` whenever new audio arrives.
+///
+/// cavacore's bars are built to *look* good: integrated, gravity-smoothed and
+/// autosens-scaled into `0..1`, so on a loud mix the low bars sit pinned near
+/// 1.0 between kicks and an onset barely shows. Beat detection needs the
+/// unsmoothed signal, so this meters the incoming audio directly.
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq)]
+pub struct AudioLevels {
+    /// Mean square of the low band (≲ 150 Hz, the kick and bass) over the
+    /// samples that arrived this frame.
+    pub low: f32,
+    /// Mean square of the full-band mono signal over the same samples.
+    pub full: f32,
+    /// True when this frame brought new samples (the values are fresh).
+    pub fresh: bool,
+}
+
+/// Corner frequency of the low-band meter, Hz.
+const LOW_BAND_HZ: f64 = 150.0;
+
+/// Two cascaded one-pole low-pass filters (12 dB/oct) metering the low band.
+#[derive(Default)]
+struct LowBandMeter {
+    a: f64,
+    b: f64,
+}
+
+impl LowBandMeter {
+    /// Meter `samples` (interleaved, `channels` wide) at `rate` Hz: returns
+    /// (low-band mean square, full-band mean square), or `None` for no frames.
+    fn measure(
+        &mut self,
+        samples: impl Iterator<Item = f64>,
+        channels: usize,
+        rate: u32,
+    ) -> Option<(f32, f32)> {
+        let channels = channels.max(1);
+        let k = 1.0 - (-std::f64::consts::TAU * LOW_BAND_HZ / rate.max(1) as f64).exp();
+        let (mut low, mut full, mut frames) = (0.0f64, 0.0f64, 0usize);
+        let (mut acc, mut n) = (0.0f64, 0usize);
+        for s in samples {
+            acc += s;
+            n += 1;
+            if n < channels {
+                continue;
+            }
+            let mono = acc / channels as f64;
+            acc = 0.0;
+            n = 0;
+            self.a += (mono - self.a) * k;
+            self.b += (self.a - self.b) * k;
+            low += self.b * self.b;
+            full += mono * mono;
+            frames += 1;
+        }
+        (frames > 0).then(|| ((low / frames as f64) as f32, (full / frames as f64) as f32))
+    }
+}
+
+/// The system that publishes fresh bars into [`Cava`] (`feed_cava`), live or
+/// offline. Anything deriving per-frame data from the bars — the audio
+/// features the effects run on — orders itself `.after()` this so it reads
+/// this frame's analysis rather than last frame's.
+#[derive(bevy::ecs::schedule::SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CavaAnalysisSet;
+
 /// Pushes decoded samples straight into the audio ring, for offline rendering
 /// (`--input`). Inserted only by [`CavaPlugin`] in offline mode, where there is
 /// no capture thread; the record driver pushes each video frame's worth of
@@ -273,6 +340,7 @@ impl Plugin for CavaPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<CavaSettings>()
             .init_resource::<Cava>()
+            .init_resource::<AudioLevels>()
             .init_resource::<CavaRebuild>()
             .init_resource::<CavaRebuildStatus>();
         let settings = app.world().resource::<CavaSettings>().clone();
@@ -314,7 +382,9 @@ impl Plugin for CavaPlugin {
                 .insert_resource(ring)
                 .add_systems(
                     PreUpdate,
-                    (rebuild_cava, feed_cava).chain().in_set(OfflineCavaSet),
+                    (rebuild_cava, feed_cava.in_set(CavaAnalysisSet))
+                        .chain()
+                        .in_set(OfflineCavaSet),
                 );
             return;
         }
@@ -341,7 +411,12 @@ impl Plugin for CavaPlugin {
 
         app.add_systems(
             Update,
-            (reconcile_capture_rate, rebuild_cava, feed_cava).chain(),
+            (
+                reconcile_capture_rate,
+                rebuild_cava,
+                feed_cava.in_set(CavaAnalysisSet),
+            )
+                .chain(),
         )
         .add_systems(Last, stop_on_exit);
     }
@@ -568,6 +643,7 @@ fn open_with_retry<T>(
 /// processing every full chunk that has buffered, then publish the latest bars.
 /// cava runs at a steady high rate (≈ rate·channels / chunk), so the bars the
 /// render samples are always fresh and smooth.
+#[allow(clippy::too_many_arguments)]
 fn feed_cava(
     ring: Res<AudioRing>,
     state: Option<NonSendMut<CavaState>>,
@@ -576,6 +652,8 @@ fn feed_cava(
     offline: Option<Res<AudioInjector>>,
     mut dbg: Local<FeedStats>,
     mut stall: Local<StallState>,
+    mut levels: ResMut<AudioLevels>,
+    mut meter: Local<LowBandMeter>,
 ) {
     let Some(mut state) = state else {
         return; // cavacore failed to init; leave bars at zero
@@ -591,10 +669,29 @@ fn feed_cava(
         .min(state.plan.max_input_samples() / state.plan.channels())
         * state.plan.channels();
 
-    // Accumulate whatever was captured since the last frame.
+    // Accumulate whatever was captured since the last frame, metering the new
+    // samples on the way in (see [`AudioLevels`]).
+    let before = state.accum.len();
     if let Ok(mut q) = ring.buf.lock() {
         state.accum.extend(q.drain(..));
     }
+    let measured = meter.measure(
+        state.accum.range(before..).copied(),
+        state.plan.channels(),
+        state.plan.rate(),
+    );
+    let next = match measured {
+        Some((low, full)) => AudioLevels {
+            low,
+            full,
+            fresh: true,
+        },
+        None => AudioLevels {
+            fresh: false,
+            ..*levels
+        },
+    };
+    levels.set_if_neq(next);
 
     // Process every complete chunk; cavacore sees a constant sample count.
     let mut executed = 0u32;
@@ -851,6 +948,32 @@ fn stop_on_exit(mut exit: MessageReader<AppExit>, ring: Option<Res<AudioRing>>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn low_band_meter_passes_bass_and_rejects_treble() {
+        let rate = 48_000u32;
+        let tone = |hz: f64| {
+            (0..rate as usize / 2)
+                .flat_map(move |i| {
+                    let s = (std::f64::consts::TAU * hz * i as f64 / rate as f64).sin() * 0.5;
+                    [s, s] // stereo, identical channels
+                })
+                .collect::<Vec<f64>>()
+        };
+        let (low, full) = LowBandMeter::default()
+            .measure(tone(50.0).into_iter(), 2, rate)
+            .unwrap();
+        assert!(low > full * 0.6, "50 Hz passes: {low} of {full}");
+        let (low, full) = LowBandMeter::default()
+            .measure(tone(5_000.0).into_iter(), 2, rate)
+            .unwrap();
+        assert!(low < full * 0.01, "5 kHz is rejected: {low} of {full}");
+        assert!(
+            LowBandMeter::default()
+                .measure(std::iter::empty(), 2, rate)
+                .is_none()
+        );
+    }
 
     #[test]
     fn oversized_chunks_preserve_signal_after_the_first_fft_buffer() {

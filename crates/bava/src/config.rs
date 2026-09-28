@@ -11,6 +11,7 @@ use clap::Parser;
 use serde::{Deserialize, Serialize};
 
 use crate::cava::CavaSettings;
+use crate::vis::fx::FxSettings;
 use crate::vis::physics::PhysicsSettings;
 use crate::vis::{
     ColorProfile, Direction, DrawingMode, ImageLayer, MirrorMode, Theme, ToneMap, VisSettings,
@@ -126,6 +127,20 @@ pub struct Cli {
     /// `[physics] spawn_on_launch`.
     #[arg(long, value_name = "N")]
     pub spawn_balls: Option<usize>,
+
+    /// Load a scene: a built-in (`minecraft`, `solar_system`), a user scene
+    /// under ~/.config/bava/scenes/, or a path to a scene directory. `none`
+    /// turns scenes off. Overrides `[scene] name`.
+    #[arg(long, value_name = "NAME|PATH")]
+    pub scene: Option<String>,
+
+    /// List the available scenes and exit.
+    #[arg(long)]
+    pub list_scenes: bool,
+
+    /// Turn the shader / particle / camera effects off (`[fx] enabled = false`).
+    #[arg(long)]
+    pub no_fx: bool,
 }
 
 /// Top-level config file model.
@@ -136,7 +151,20 @@ pub struct Config {
     pub cava: CavaConfig,
     pub vis: VisConfig,
     pub physics: PhysicsConfig,
+    /// `[fx]` — shader, particle and camera effects.
+    pub fx: FxSettings,
+    /// `[scene]` — the active scene.
+    pub scene: SceneConfig,
     pub gui: GuiConfig,
+}
+
+/// `[scene]` — which scene (if any) is loaded at startup.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct SceneConfig {
+    /// A built-in scene id, a user scene under `~/.config/bava/scenes/`, or a
+    /// path to a scene directory. Empty = no scene.
+    pub name: String,
 }
 
 /// `[gui]` — settings-editor preferences.
@@ -226,6 +254,8 @@ pub struct VisConfig {
     pub inner_radius: f32,
     /// Circle modes: angular offset in radians.
     pub rotation: f32,
+    /// Circle modes: overall size multiplier (1.0 = 42% of the shorter side).
+    pub circle_scale: f32,
     /// Padding around the whole drawing area, in pixels.
     pub area_margin: f32,
     /// Proportional shift of the draw region `[x, y]`.
@@ -419,6 +449,7 @@ impl Config {
                 hearts: vis.hearts,
                 inner_radius: vis.inner_radius,
                 rotation: vis.rotation,
+                circle_scale: vis.circle_scale,
                 area_margin: vis.area_margin,
                 area_offset: vis.area_offset.to_array(),
                 active_profile: vis.active_profile,
@@ -452,6 +483,11 @@ impl Config {
                 trail_length: physics.trail_length,
                 debug_draw: physics.debug_draw,
             },
+            // Effects and the scene aren't part of these four resources;
+            // callers holding them (the editor's "Save") set `fx` / `scene`
+            // afterward.
+            fx: FxSettings::default(),
+            scene: SceneConfig::default(),
             // The editor hotkey isn't derived from the runtime settings; callers
             // that have a live key (the editor's "Save") override it afterward
             // via [`set_gui_toggle_key`](Self::set_gui_toggle_key).
@@ -657,6 +693,21 @@ impl Config {
         if let Some(n) = cli.spawn_balls {
             self.physics.spawn_on_launch = n;
         }
+        if let Some(scene) = &cli.scene {
+            self.scene.name = if scene.trim().eq_ignore_ascii_case("none") {
+                String::new()
+            } else {
+                scene.trim().to_string()
+            };
+        }
+        if cli.no_fx {
+            self.fx.enabled = false;
+        }
+    }
+
+    /// Convert into the runtime [`FxSettings`] resource.
+    pub fn to_fx_settings(&self) -> FxSettings {
+        self.fx.sanitized()
     }
 
     /// Convert into the runtime [`CavaSettings`] resource.
@@ -704,6 +755,11 @@ impl Config {
             hearts: v.hearts,
             inner_radius: v.inner_radius,
             rotation: v.rotation,
+            circle_scale: if v.circle_scale.is_finite() {
+                v.circle_scale.clamp(0.1, 3.0)
+            } else {
+                1.0
+            },
             area_margin: v.area_margin,
             area_offset: Vec2::from(v.area_offset),
             // Clamp against a possibly-stale / hand-edited config so a renderer
@@ -851,7 +907,7 @@ const KEY_NAMES: &[(&str, KeyCode)] = &[
 ];
 
 /// Parse a key name (case-insensitive) into a [`KeyCode`], or `None` if unknown.
-fn parse_key(name: &str) -> Option<KeyCode> {
+pub(crate) fn parse_key(name: &str) -> Option<KeyCode> {
     let n = name.trim().to_ascii_lowercase();
     KEY_NAMES.iter().find(|(k, _)| *k == n).map(|(_, kc)| *kc)
 }
@@ -1163,7 +1219,7 @@ impl From<&ImageConfig> for ImageLayer {
 
 /// Parse a `"#rgb"` / `"#rrggbb"` / `"#aarrggbb"` hex string into a [`Color`].
 /// Returns `None` on malformed input (the stop is then skipped).
-fn hex_to_color(s: &str) -> Option<Color> {
+pub(crate) fn hex_to_color(s: &str) -> Option<Color> {
     let h = s.trim().trim_start_matches('#');
     let (a, r, g, b) = match h.len() {
         // `#rgb` shorthand: each nibble is doubled (`f08` → `ff0088`).
@@ -1348,6 +1404,20 @@ mod tests {
         assert_eq!(back.vis.mirror, cfg.vis.mirror);
         assert_eq!(back.physics.enabled, cfg.physics.enabled);
         assert_eq!(back.gui.toggle_key, cfg.gui.toggle_key);
+        assert_eq!(back.fx, cfg.fx);
+        assert_eq!(back.scene, cfg.scene);
+    }
+
+    #[test]
+    fn fx_and_scene_sections_parse_sparse_and_sanitize() {
+        let cfg: Config =
+            toml::from_str("[fx]\nshake = 99.0\nplasma = false\n[scene]\nname = \"minecraft\"\n")
+                .unwrap();
+        let fx = cfg.to_fx_settings();
+        assert!(!fx.plasma);
+        assert_eq!(fx.shake, 40.0, "clamped");
+        assert!(fx.enabled, "unspecified keys keep their defaults");
+        assert_eq!(cfg.scene.name, "minecraft");
     }
 
     #[test]

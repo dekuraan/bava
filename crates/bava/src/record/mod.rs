@@ -528,6 +528,12 @@ pub fn run(cli: &Cli, config: &Config) -> Result<(), String> {
         .insert_resource(settings)
         .insert_resource(config.to_vis_settings())
         .insert_resource(config.to_physics_settings())
+        .insert_resource(config.to_fx_settings())
+        .insert_resource(crate::scene::SceneSettings {
+            name: config.scene.name.clone(),
+            reload: 0,
+            rebase: false,
+        })
         .insert_resource(config.vis_mode())
         // No settings editor while recording, but vis/physics systems read this.
         .insert_resource(EditorState::new(false, config.gui_toggle_key()))
@@ -542,6 +548,7 @@ pub fn run(cli: &Cli, config: &Config) -> Result<(), String> {
                 offline: Some(offline_track),
             },
             VisPlugin,
+            crate::scene::ScenePlugin { offline: true },
             RecordPlugin {
                 track: std::sync::Mutex::new(Some(track)),
                 spec,

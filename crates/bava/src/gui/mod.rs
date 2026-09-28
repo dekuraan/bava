@@ -17,6 +17,9 @@ use bevy_egui::{EguiContexts, EguiPrimaryContextPass, egui};
 
 use crate::cava::{CaptureStatus, CavaRebuild, CavaRebuildStatus, CavaSettings};
 use crate::config::{Config, ConfigHandle};
+use crate::scene::files::SceneEntry;
+use crate::scene::{SceneSettings, SceneStatus};
+use crate::vis::fx::FxSettings;
 use crate::vis::physics::PhysicsSettings;
 use crate::vis::{ColorProfile, Direction, DrawingMode, MirrorMode, Theme, ToneMap, VisSettings};
 
@@ -44,6 +47,8 @@ pub struct EditorState {
     selected_profile: Option<String>,
     /// Have we populated [`profiles`](Self::profiles) for this open session yet?
     profiles_loaded: bool,
+    /// Scenes available to pick, refreshed when the window opens.
+    scenes: Vec<SceneEntry>,
 }
 
 impl Default for EditorState {
@@ -58,6 +63,7 @@ impl Default for EditorState {
             profiles: Vec::new(),
             selected_profile: None,
             profiles_loaded: false,
+            scenes: Vec::new(),
         }
     }
 }
@@ -97,6 +103,9 @@ fn editor_ui(
     mut rebuild_status: ResMut<CavaRebuildStatus>,
     capture_status: Option<Res<CaptureStatus>>,
     mut physics: ResMut<PhysicsSettings>,
+    mut fx: ResMut<FxSettings>,
+    mut scene: ResMut<SceneSettings>,
+    scene_status: Res<SceneStatus>,
     handle: Res<ConfigHandle>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else {
@@ -129,6 +138,7 @@ fn editor_ui(
     // Populate the profile list once per open.
     if !editor.profiles_loaded {
         editor.profiles = Config::list_profiles();
+        editor.scenes = crate::scene::files::discover();
         editor.profiles_loaded = true;
     }
 
@@ -138,19 +148,23 @@ fn editor_ui(
         .default_width(320.0)
         .resizable(true)
         .show(ctx, |ui| {
-            persistence_section(
-                ui,
-                &mut editor,
-                &mut vis,
-                &mut mode,
-                &mut cava,
-                &mut rebuild,
-                &mut physics,
-                &handle,
-            );
+            let mut live = Live {
+                vis: &mut vis,
+                mode: &mut mode,
+                cava: &mut cava,
+                rebuild: &mut rebuild,
+                physics: &mut physics,
+                fx: &mut fx,
+                scene: &mut scene,
+            };
+            persistence_section(ui, &mut editor, &mut live, &scene_status, &handle);
             ui.separator();
             egui::ScrollArea::vertical().show(ui, |ui| {
+                scene_section(ui, &editor.scenes, &mut scene, &scene_status);
+                ui.separator();
                 mode_section(ui, &mut mode);
+                ui.separator();
+                fx_section(ui, &mut fx);
                 ui.separator();
                 geometry_section(ui, &mut vis);
                 ui.separator();
@@ -175,22 +189,67 @@ fn editor_ui(
 
 // --- Sections ---------------------------------------------------------------
 
+/// The live resources the editor reads and writes, bundled so the save /
+/// load paths take one argument instead of seven.
+struct Live<'a> {
+    vis: &'a mut VisSettings,
+    mode: &'a mut DrawingMode,
+    cava: &'a mut CavaSettings,
+    rebuild: &'a mut CavaRebuild,
+    physics: &'a mut PhysicsSettings,
+    fx: &'a mut FxSettings,
+    scene: &'a mut SceneSettings,
+}
+
+impl Live<'_> {
+    /// The config to save. While a scene is loaded, that is the user's own
+    /// settings *underneath* the scene's overrides, plus the scene's name —
+    /// so the scene is restored next launch without its look being baked in.
+    fn to_config(&self, status: &SceneStatus, key: KeyCode) -> Config {
+        let mut cfg = match &status.base {
+            Some(base) => {
+                let mut c = Config::from_settings(&base.cava, &base.vis, base.mode, &base.physics);
+                c.fx = base.fx.clone();
+                c
+            }
+            None => {
+                let mut c = Config::from_settings(self.cava, self.vis, *self.mode, self.physics);
+                c.fx = self.fx.clone();
+                c
+            }
+        };
+        cfg.scene.name = self.scene.name.clone();
+        cfg.set_gui_toggle_key(key);
+        cfg
+    }
+
+    /// Push a loaded [`Config`] into the live resources, request a cava
+    /// rebuild so the DSP params take hold, and have an active scene re-apply
+    /// its overrides on top of the new settings.
+    fn apply(&mut self, cfg: &Config) {
+        *self.vis = cfg.to_vis_settings();
+        *self.mode = cfg.vis_mode();
+        let debug = self.cava.debug;
+        *self.cava = cfg.to_cava_settings(debug);
+        *self.physics = cfg.to_physics_settings();
+        *self.fx = cfg.to_fx_settings();
+        self.rebuild.0 = true;
+        self.scene.name = cfg.scene.name.clone();
+        self.scene.rebase = true;
+    }
+}
+
 /// Save / reload / profile controls at the top of the window.
-#[allow(clippy::too_many_arguments)]
 fn persistence_section(
     ui: &mut egui::Ui,
     editor: &mut EditorState,
-    vis: &mut VisSettings,
-    mode: &mut DrawingMode,
-    cava: &mut CavaSettings,
-    rebuild: &mut CavaRebuild,
-    physics: &mut PhysicsSettings,
+    live: &mut Live,
+    scene_status: &SceneStatus,
     handle: &ConfigHandle,
 ) {
     ui.horizontal(|ui| {
         if ui.button("💾 Save").clicked() {
-            let mut cfg = Config::from_settings(cava, vis, *mode, physics);
-            cfg.set_gui_toggle_key(editor.toggle_key);
+            let cfg = live.to_config(scene_status, editor.toggle_key);
             editor.status = match cfg.write(&handle.path) {
                 Ok(()) => format!("Saved → {}", handle.path.display()),
                 Err(e) => format!("Save failed: {e}"),
@@ -199,7 +258,7 @@ fn persistence_section(
         if ui.button("⟳ Reload").clicked() {
             match Config::load(&handle.path) {
                 Some(cfg) => {
-                    apply_config(&cfg, vis, mode, cava, rebuild, physics);
+                    live.apply(&cfg);
                     editor.toggle_key = cfg.gui_toggle_key();
                     editor.status = "Reloaded config".into();
                 }
@@ -229,7 +288,7 @@ fn persistence_section(
             {
                 match Config::load_profile(&name) {
                     Some(cfg) => {
-                        apply_config(&cfg, vis, mode, cava, rebuild, physics);
+                        live.apply(&cfg);
                         editor.toggle_key = cfg.gui_toggle_key();
                         editor.status = format!("Loaded profile '{name}'");
                     }
@@ -246,8 +305,7 @@ fn persistence_section(
                 if name.is_empty() {
                     editor.status = "Enter a profile name first".into();
                 } else {
-                    let mut cfg = Config::from_settings(cava, vis, *mode, physics);
-                    cfg.set_gui_toggle_key(editor.toggle_key);
+                    let cfg = live.to_config(scene_status, editor.toggle_key);
                     editor.status = match cfg.save_profile(&name) {
                         Ok(path) => {
                             editor.profiles = Config::list_profiles();
@@ -289,6 +347,97 @@ fn persistence_section(
             egui::RichText::new("Changes apply immediately. Save to keep them.")
                 .weak()
                 .small(),
+        );
+    });
+}
+
+/// Scene picker: none, the built-ins, and user scenes.
+fn scene_section(
+    ui: &mut egui::Ui,
+    scenes: &[SceneEntry],
+    scene: &mut SceneSettings,
+    status: &SceneStatus,
+) {
+    ui.label(egui::RichText::new("Scene").strong());
+    ui.horizontal(|ui| {
+        let current = if scene.name.is_empty() {
+            "None".to_string()
+        } else {
+            scenes
+                .iter()
+                .find(|e| e.id == scene.name)
+                .map(SceneEntry::label)
+                .unwrap_or_else(|| scene.name.clone())
+        };
+        egui::ComboBox::from_id_salt("scene_select")
+            .selected_text(current)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut scene.name, String::new(), "None");
+                for entry in scenes {
+                    ui.selectable_value(&mut scene.name, entry.id.clone(), entry.label());
+                }
+            });
+        if !scene.name.is_empty() && ui.button("⟳").on_hover_text("Reload the scene").clicked() {
+            scene.reload = scene.reload.wrapping_add(1);
+        }
+    });
+    if !status.description.is_empty() {
+        ui.label(egui::RichText::new(&status.description).weak().small());
+    }
+    if !status.message.is_empty() {
+        ui.label(egui::RichText::new(&status.message).small());
+    }
+    let dir = crate::scene::files::user_scenes_dir()
+        .map(|d| d.display().to_string())
+        .unwrap_or_else(|| "~/.config/bava/scenes".into());
+    ui.label(
+        egui::RichText::new(format!(
+            "N cycles scenes. Your own scenes go in {dir}/<name>/scene.toml and reload on save."
+        ))
+        .weak()
+        .small(),
+    );
+}
+
+/// Shader, particle and camera effects.
+fn fx_section(ui: &mut egui::Ui, fx: &mut FxSettings) {
+    ui.label(egui::RichText::new("Effects").strong());
+    ui.checkbox(&mut fx.enabled, "Effects (shaders, particles, camera)");
+    if !fx.enabled {
+        return;
+    }
+    ui.horizontal_wrapped(|ui| {
+        ui.checkbox(&mut fx.plasma, "plasma fill");
+        ui.checkbox(&mut fx.backdrop, "starfield");
+        ui.checkbox(&mut fx.shockwaves, "beat rings");
+        ui.checkbox(&mut fx.sparks, "impact sparks");
+        ui.checkbox(&mut fx.glossy_balls, "glossy balls");
+    });
+    ui.add(egui::Slider::new(&mut fx.blob_opacity, 0.0..=1.0).text("fill opacity"));
+    ui.add(egui::Slider::new(&mut fx.halo, 0.0..=4.0).text("halo"));
+    ui.add(egui::Slider::new(&mut fx.corona, 0.0..=4.0).text("corona streaks"));
+    ui.add(egui::Slider::new(&mut fx.flares, 0.0..=4.0).text("rim flares"));
+    if fx.backdrop {
+        ui.add(egui::Slider::new(&mut fx.stars, 0.0..=1.0).text("stars"));
+        ui.add(egui::Slider::new(&mut fx.nebula, 0.0..=4.0).text("nebula"));
+    }
+    ui.collapsing("Camera", |ui| {
+        ui.add(
+            egui::Slider::new(&mut fx.punch, 0.0..=0.2)
+                .text("beat zoom punch")
+                .step_by(0.005),
+        );
+        ui.add(egui::Slider::new(&mut fx.shake, 0.0..=40.0).text("beat shake (px)"));
+        ui.add(
+            egui::Slider::new(&mut fx.chromatic, 0.0..=0.1)
+                .text("chromatic aberration")
+                .step_by(0.001),
+        );
+        ui.add(egui::Slider::new(&mut fx.vignette, 0.0..=1.0).text("vignette"));
+        ui.add(
+            egui::Slider::new(&mut fx.art_zoom, 0.0..=0.3)
+                .text("cover zoom on bass")
+                .step_by(0.005),
         );
     });
 }
@@ -344,6 +493,7 @@ fn geometry_section(ui: &mut egui::Ui, vis: &mut VisSettings) {
     ui.add(
         egui::Slider::new(&mut vis.rotation, 0.0..=std::f32::consts::TAU).text("rotation (circle)"),
     );
+    ui.add(egui::Slider::new(&mut vis.circle_scale, 0.2..=2.0).text("size (circle)"));
     ui.add(egui::Slider::new(&mut vis.area_margin, 0.0..=200.0).text("area margin (px)"));
     ui.horizontal(|ui| {
         ui.label("area offset");
@@ -725,24 +875,6 @@ fn color_stops(ui: &mut egui::Ui, label: &str, stops: &mut Vec<Color>) {
             stops.pop();
         }
     });
-}
-
-/// Push a loaded [`Config`] into the live runtime resources and request a cava
-/// rebuild so the DSP params take hold.
-fn apply_config(
-    cfg: &Config,
-    vis: &mut VisSettings,
-    mode: &mut DrawingMode,
-    cava: &mut CavaSettings,
-    rebuild: &mut CavaRebuild,
-    physics: &mut PhysicsSettings,
-) {
-    *vis = cfg.to_vis_settings();
-    *mode = cfg.vis_mode();
-    let debug = cava.debug;
-    *cava = cfg.to_cava_settings(debug);
-    *physics = cfg.to_physics_settings();
-    rebuild.0 = true;
 }
 
 /// Bevy [`Color`] → egui [`Color32`] (straight, un-premultiplied alpha).

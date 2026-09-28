@@ -26,8 +26,10 @@ use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
-use crate::cava::Cava;
+use crate::cava::{Cava, CavaAnalysisSet};
 use crate::vis::bars::{BAR_GAP, LEVEL_STEPS};
+use crate::vis::fx::FxSettings;
+use crate::vis::fx::material::{BLOB_SHADER, FxMaterial};
 use crate::vis::stroke::{
     MeshBatch, STROKE_FEATHER, apply_stroke, empty_stroke_mesh, stroke_material,
 };
@@ -42,19 +44,79 @@ const SEGMENTS: usize = 256;
 /// this budget, controlled by [`VisSettings::inner_radius`].
 const MAX_RADIUS_FRAC: f32 = 0.42;
 
+/// Rim samples handed to the effect shaders (`FxUniform::shape`).
+pub(crate) const SHAPE_SAMPLES: usize = 64;
+
 /// Resolve `base` (inner ring radius) and `amp` (peak outward reach) from the
 /// `inner_radius` setting (0 = bars from center, 1 = no space for bars).
-fn circle_radii(extent: f32, inner_radius: f32) -> (f32, f32) {
+pub(crate) fn circle_radii(extent: f32, inner_radius: f32) -> (f32, f32) {
     let r = inner_radius.clamp(0.0, 0.95);
     let total = extent * MAX_RADIUS_FRAC;
     (total * r, total * (1.0 - r))
 }
 
+/// The circle-family ring for this frame, computed once and shared by the ring
+/// stroke, the plasma fill and every effect that hugs the blob (halo,
+/// shockwaves, rim flares).
+///
+/// Physics deliberately does **not** read this: its collider keeps calling
+/// [`blob_ring`] itself, so the collider invariant (same values, same
+/// transform as the render) is checked in one place (see `physics.rs`).
+#[derive(Resource, Clone, Debug)]
+pub(crate) struct BlobShape {
+    /// A circle-family mode is showing this frame (the fields below are fresh).
+    pub(crate) active: bool,
+    /// [`SEGMENTS`] rim points and their (clamped) level, in draw order.
+    pub(crate) points: Vec<(Vec2, f32)>,
+    /// [`SHAPE_SAMPLES`] rim radii (px), evenly spaced by angle from the bottom.
+    pub(crate) radii: [f32; SHAPE_SAMPLES],
+    /// Base ring radius (px).
+    pub(crate) base: f32,
+    /// Full-scale outward reach (px).
+    pub(crate) amp: f32,
+    /// Angular offset (radians), from [`VisSettings::rotation`].
+    pub(crate) rotation: f32,
+    /// Loudest level on the rim this frame.
+    pub(crate) peak: f32,
+}
+
+impl Default for BlobShape {
+    fn default() -> Self {
+        Self {
+            active: false,
+            points: Vec::new(),
+            radii: [0.0; SHAPE_SAMPLES],
+            base: 0.0,
+            amp: 0.0,
+            rotation: 0.0,
+            peak: 0.0,
+        }
+    }
+}
+
+impl BlobShape {
+    /// Largest rim radius this frame.
+    pub(crate) fn max_radius(&self) -> f32 {
+        self.radii.iter().copied().fold(self.base, f32::max)
+    }
+}
+
+/// The blob fill's material, for scenes that swap its shader.
+pub(crate) fn fill_material(world: &World) -> Option<Handle<FxMaterial>> {
+    world
+        .get_resource::<FillHandles>()
+        .map(|h| h.material.clone())
+}
+
+/// [`update_blob_shape`]: effects reading [`BlobShape`] order after this.
+#[derive(bevy::ecs::schedule::SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct BlobShapeSet;
+
 /// Handles for the fill mesh/material so they can be updated each frame.
 #[derive(Resource)]
 struct FillHandles {
     mesh: Handle<Mesh>,
-    material: Handle<ColorMaterial>,
+    material: Handle<FxMaterial>,
 }
 
 /// Handle for the ring-outline stroke mesh, rebuilt each frame.
@@ -88,14 +150,22 @@ pub struct CirclePlugin;
 
 impl Plugin for CirclePlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, setup_circle).add_systems(
-            Update,
-            // The radial bars are one batched mesh rebuilt from scratch each
-            // frame, so a live bar-count change needs no pool reconciliation.
-            // `update_ring` draws both the Wave outline and its optional fill
-            // from one geometry pass.
-            (update_circle_bars, update_ring),
-        );
+        app.init_resource::<BlobShape>()
+            .add_systems(Startup, setup_circle)
+            .add_systems(
+                Update,
+                (
+                    // The radial bars are one batched mesh rebuilt from scratch
+                    // each frame, so a live bar-count change needs no pool
+                    // reconciliation.
+                    update_circle_bars,
+                    // `update_ring` draws both the Wave outline and its
+                    // optional fill from the one shared geometry pass.
+                    (update_blob_shape.in_set(BlobShapeSet), update_ring)
+                        .chain()
+                        .after(CavaAnalysisSet),
+                ),
+            );
     }
 }
 
@@ -104,6 +174,7 @@ fn setup_circle(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
+    mut fx_materials: ResMut<Assets<FxMaterial>>,
 ) {
     // Every radial bar lives in one mesh on one entity; per-vertex color carries
     // the gradient, so one blend material covers them all.
@@ -118,7 +189,9 @@ fn setup_circle(
     commands.insert_resource(CircleBarHandles { mesh: bar_mesh });
 
     let mesh = meshes.add(fan_mesh());
-    let material = materials.add(ColorMaterial::from(Color::NONE));
+    // The fill is drawn by the plasma shader (`shaders/blob.wgsl`), which also
+    // keeps the old flat translucent tint as its `style = 0` path.
+    let material = fx_materials.add(FxMaterial::new(BLOB_SHADER));
     commands.spawn((
         Mesh2d(mesh.clone()),
         MeshMaterial2d(material.clone()),
@@ -173,7 +246,7 @@ fn update_circle_bars(
     let Some(window) = windows.iter().next() else {
         return;
     };
-    let extent = window.width().min(window.height());
+    let extent = vis.circle_extent(window.width(), window.height());
 
     let mut values = cava.mono();
     let n = values.len();
@@ -246,11 +319,15 @@ fn update_circle_bars(
 
 /// A triangle fan: vertex 0 is the center, 1..=SEGMENTS are the ring. Positions
 /// are placeholders (overwritten each frame); indices/normals/uvs are fixed.
+/// `uv.x` runs 0 at the center → 1 on the rim (the plasma shader's radial
+/// coordinate) and `uv.y` is the angle fraction around the ring.
 fn fan_mesh() -> Mesh {
     let verts = SEGMENTS + 1;
     let positions = vec![[0.0f32, 0.0, 0.0]; verts];
     let normals = vec![[0.0f32, 0.0, 1.0]; verts];
-    let uvs = vec![[0.0f32, 0.0]; verts];
+    let mut uvs = Vec::with_capacity(verts);
+    uvs.push([0.0f32, 0.0]);
+    uvs.extend((0..SEGMENTS).map(|k| [1.0f32, k as f32 / SEGMENTS as f32]));
     let mut indices = Vec::with_capacity(SEGMENTS * 3);
     for k in 0..SEGMENTS {
         indices.push(0u32);
@@ -315,20 +392,65 @@ fn ring_point(values: &[f32], k: usize, base: f32, amp: f32, rotation: f32) -> (
     (Vec2::new(ang.cos() * r, ang.sin() * r), v)
 }
 
-/// Rebuild the antialiased ring-outline stroke and, when enabled, the translucent
-/// fill blob for the Wave circle mode — from a **single** ring-geometry pass. (The
-/// fill previously recomputed the whole `mono` → monstercat → `ring_point`
-/// pipeline a second time every frame.)
-#[allow(clippy::too_many_arguments)]
-fn update_ring(
+/// Compute this frame's [`BlobShape`] for the circle-family modes: the ring
+/// points the stroke and fill are drawn through, plus the evenly spaced radii the
+/// effect shaders read. Box modes mark it inactive and leave the rest stale.
+fn update_blob_shape(
     mode: Res<DrawingMode>,
     cava: Res<Cava>,
     vis: Res<VisSettings>,
     windows: Query<&Window>,
+    mut shape: ResMut<BlobShape>,
+) {
+    let circle = mode.family() == VisFamily::Circle;
+    let window = windows.iter().next();
+    let (Some(window), true) = (window, circle) else {
+        if shape.active {
+            shape.active = false;
+        }
+        return;
+    };
+    let mut values = cava.mono();
+    if values.is_empty() {
+        if shape.active {
+            shape.active = false;
+        }
+        return;
+    }
+    let extent = vis.circle_extent(window.width(), window.height());
+    spread_monstercat(&mut values, vis.monstercat);
+    let (base, amp) = circle_radii(extent, vis.inner_radius);
+    let rot = vis.rotation;
+
+    let shape = shape.into_inner();
+    shape.active = true;
+    shape.base = base;
+    shape.amp = amp;
+    shape.rotation = rot;
+    shape.points.clear();
+    shape
+        .points
+        .extend((0..SEGMENTS).map(|k| ring_point(&values, k, base, amp, rot)));
+    shape.peak = shape.points.iter().map(|(_, v)| *v).fold(0.0, f32::max);
+    for (k, r) in shape.radii.iter_mut().enumerate() {
+        let t = k as f32 / SHAPE_SAMPLES as f32;
+        *r = base + amp * sample(&values, t).clamp(0.0, 1.5);
+    }
+}
+
+/// Rebuild the antialiased ring-outline stroke and, when enabled, the plasma
+/// fill for the Wave circle mode, both from the shared [`BlobShape`] (computed
+/// once per frame by [`update_blob_shape`]).
+#[allow(clippy::too_many_arguments)]
+fn update_ring(
+    mode: Res<DrawingMode>,
+    vis: Res<VisSettings>,
+    fx: Res<FxSettings>,
+    shape: Res<BlobShape>,
     ring: Res<RingHandles>,
     fill: Res<FillHandles>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<ColorMaterial>>,
+    mut materials: ResMut<Assets<FxMaterial>>,
     mut ring_q: Query<&mut Visibility, (With<RingStroke>, Without<FillBlob>)>,
     mut fill_q: Query<&mut Visibility, (With<FillBlob>, Without<RingStroke>)>,
 ) {
@@ -350,32 +472,15 @@ fn update_ring(
             Visibility::Hidden
         });
     }
-    if !ring_active {
+    if !ring_active || !shape.active {
         return;
     }
-    let Some(window) = windows.iter().next() else {
-        return;
-    };
-    let extent = window.width().min(window.height());
-
-    let mut values = cava.mono();
-    if values.is_empty() {
-        return;
-    }
-    spread_monstercat(&mut values, vis.monstercat);
-    let (base, amp) = circle_radii(extent, vis.inner_radius);
-    let rot = vis.rotation;
-
-    // Compute the ring geometry once; both the outline stroke and the fill fan
-    // read from it.
-    let ring_pts: Vec<(Vec2, f32)> = (0..SEGMENTS)
-        .map(|k| ring_point(&values, k, base, amp, rot))
-        .collect();
 
     let (lo, hi) = (vis.fg_lo(), vis.fg_hi());
     let glow = vis.glow_gain;
     if let Some(mut mesh) = meshes.get_mut(&ring.mesh) {
-        let pts: Vec<(Vec2, Color)> = ring_pts
+        let pts: Vec<(Vec2, Color)> = shape
+            .points
             .iter()
             .map(|(pos, v)| (*pos, gradient_color(lo, hi, v.min(1.0), glow)))
             .collect();
@@ -394,18 +499,22 @@ fn update_ring(
     if let Some(mut mesh) = meshes.get_mut(&fill.mesh) {
         let mut positions = Vec::with_capacity(SEGMENTS + 1);
         positions.push([0.0, 0.0, 0.0]); // center
-        let mut peak = 0.0f32;
-        for (pos, v) in &ring_pts {
-            peak = peak.max(*v);
-            positions.push([pos.x, pos.y, 0.0]);
-        }
+        positions.extend(shape.points.iter().map(|(pos, _)| [pos.x, pos.y, 0.0]));
         mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
-
-        // Tint the fill by loudness; keep it translucent so art shows through.
-        if let Some(mut mat) = materials.get_mut(&fill.material) {
-            mat.color =
-                gradient_color(vis.fg_lo(), vis.fg_hi(), peak, vis.glow_gain).with_alpha(0.28);
-        }
+    }
+    // The shader tints by the live palette; it needs the loudness, the glow
+    // gain, how opaque to be and which look (flat legacy tint vs. plasma).
+    if let Some(mut mat) = materials.get_mut(&fill.material) {
+        let plasma = fx.enabled && fx.plasma;
+        let opacity = if plasma { fx.blob_opacity } else { 0.28 };
+        mat.uniform.params[0] = Vec4::new(
+            glow,
+            opacity,
+            if plasma { 1.0 } else { 0.0 },
+            shape.peak.min(1.0),
+        );
+        mat.uniform.info.z = shape.base;
+        mat.uniform.info.w = shape.rotation;
     }
 }
 

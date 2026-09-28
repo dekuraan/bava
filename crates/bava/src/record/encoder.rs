@@ -130,6 +130,7 @@ impl Encoder for FfmpegEncoder {
             .data
             .as_ref()
             .ok_or("captured frame has no CPU-side data")?;
+        let data = frame_bytes(data, image.width(), image.height())?;
         if let Err(e) = stdin.write_all(data) {
             // ffmpeg stopped reading. With output trimming (`-t`) it
             // legitimately closes the pipe the moment it has every frame it
@@ -175,6 +176,26 @@ impl Encoder for FfmpegEncoder {
 
 /// `true` if an `ffmpeg` binary is runnable — checked before the slow GPU init
 /// so a missing encoder fails in milliseconds with a clear message.
+/// The first `width × height` RGBA pixels of a captured frame.
+///
+/// `bevy_capture` 0.6 sizes its readback buffer as `align(width) × 4` bytes
+/// per row (aligning the *pixel* count to 256) instead of `align(width × 4)`,
+/// and when the real row is already aligned it hands the whole buffer back —
+/// so at e.g. 1920 or 960 px wide every frame carries trailing zero rows.
+/// Written as-is, ffmpeg's rawvideo reader drifts by that much per frame and
+/// the picture rolls with a black band through it. The rows themselves are
+/// tightly packed at the front, so cutting the frame to size is exact.
+fn frame_bytes(data: &[u8], width: u32, height: u32) -> Result<&[u8]> {
+    let len = width as usize * height as usize * 4;
+    data.get(..len).ok_or_else(|| {
+        format!(
+            "captured frame is {} bytes, expected at least {len} for {width}x{height}",
+            data.len()
+        )
+        .into()
+    })
+}
+
 pub fn ffmpeg_available() -> bool {
     Command::new("ffmpeg")
         .arg("-version")
@@ -182,4 +203,23 @@ pub fn ffmpeg_available() -> bool {
         .stderr(Stdio::null())
         .status()
         .is_ok_and(|s| s.success())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frames_are_cut_to_exactly_one_picture() {
+        // 960 px wide: bevy_capture's buffer holds 1024 px of row space, so the
+        // readback is 36 rows longer than the picture at 540 px tall.
+        let (w, h) = (960u32, 540u32);
+        let oversized = vec![7u8; 1024 * 4 * h as usize];
+        let frame = frame_bytes(&oversized, w, h).unwrap();
+        assert_eq!(frame.len(), (w * h * 4) as usize);
+        assert!(
+            frame_bytes(&oversized[..100], w, h).is_err(),
+            "short frames are an error"
+        );
+    }
 }
