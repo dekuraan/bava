@@ -83,7 +83,10 @@ parts:
       - libvulkan-dev
     stage-packages:
       - libpulse0
-      - libasound2
+      # Not `libasound2`: on noble that is a virtual package that OSS4's
+      # liboss4-salsa-asound2 also provides, and picking it collides with the
+      # real libasound.so.2 the ffmpeg part stages.
+      - libasound2t64
       - libpipewire-0.3-0
       - libdbus-1-3
       - libvulkan1
