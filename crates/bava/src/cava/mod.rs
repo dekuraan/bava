@@ -769,6 +769,13 @@ fn feed_cava(
             for _ in 0..silent_chunks {
                 state.plan.execute(&state.scratch);
             }
+            if let Some(silent_levels) = meter.measure(
+                std::iter::repeat_n(0.0, silent_chunks * chunk),
+                state.plan.channels(),
+                state.plan.rate(),
+            ) {
+                levels.set_if_neq(silent_levels);
+            }
             executed += silent_chunks as u32;
         }
     }
