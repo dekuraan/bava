@@ -9,7 +9,7 @@
 // translucent fill, anything else is the plasma.
 
 #import bevy_sprite::mesh2d_vertex_output::VertexOutput
-#import bava::fx::fbm
+#import bava::fx_cached::fbm
 #import bava::fx_material::{fx, palette}
 
 @fragment

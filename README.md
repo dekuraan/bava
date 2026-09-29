@@ -202,6 +202,10 @@ within one refresh interval. For A/B measurements, use offline rendering with
 `--input song.mp3 --out video.mp4 --duration 5 --headless`. This renders a fixed
 number of frames without display pacing.
 
+`--debug` also logs GPU pass timings in native and offline runs. See
+[measuring the default visualizer](docs/PERFORMANCE.md) for render budgets,
+timing interpretation and the built-in effects' performance tradeoffs.
+
 ## Workspace layout
 
 ```

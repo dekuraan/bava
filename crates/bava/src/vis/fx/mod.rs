@@ -327,6 +327,17 @@ fn update_backdrop(
     }
     if let Some(mut m) = materials.get_mut(&handles.backdrop) {
         m.uniform.params[0] = Vec4::new(fx.stars, fx.nebula, 1.0, 0.0);
+        // These rotations depend only on time. Evaluate six trig functions
+        // once per frame instead of once per pixel of the fullscreen backdrop.
+        if m.shader == BACKDROP_SHADER {
+            let time = m.uniform.clock.z;
+            let (s0, c0) = (time * 0.004).sin_cos();
+            let (s1, c1) = (time * 0.007).sin_cos();
+            let (s2, c2) = (time * 0.011).sin_cos();
+            m.uniform.params[1] = Vec4::new(c0, s0, c1, s1);
+            m.uniform.params[2].x = c2;
+            m.uniform.params[2].y = s2;
+        }
     }
 }
 

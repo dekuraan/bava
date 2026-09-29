@@ -84,7 +84,7 @@ pub struct Cli {
     #[arg(long)]
     pub monstercat: Option<f32>,
 
-    /// Log input/output signal levels about once per second.
+    /// Log audio levels and CPU/GPU diagnostics about once per second.
     #[arg(long)]
     pub debug: bool,
 
