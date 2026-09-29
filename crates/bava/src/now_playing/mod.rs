@@ -124,6 +124,11 @@ pub struct NowPlayingPlugin {
     pub offline: Option<OfflineTrack>,
 }
 
+/// [`apply_now_playing_updates`] (PreUpdate): this frame's metadata and art
+/// land here.
+#[derive(bevy::ecs::schedule::SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct NowPlayingSet;
+
 impl Plugin for NowPlayingPlugin {
     fn build(&self, app: &mut App) {
         let (tx, rx) = crossbeam_channel::unbounded();
@@ -133,7 +138,7 @@ impl Plugin for NowPlayingPlugin {
             // PreUpdate, so metadata/art land before any Update system reads
             // them — in offline rendering that makes the HUD and dynamic
             // palette appear at a deterministic video frame (the first one).
-            .add_systems(PreUpdate, apply_now_playing_updates);
+            .add_systems(PreUpdate, apply_now_playing_updates.in_set(NowPlayingSet));
 
         if let Some(track) = &self.offline {
             // Offline rendering: decode the cover and queue everything *now*,
@@ -182,14 +187,24 @@ fn pump_web_now_playing(keep_alive: Res<NowPlayingTxKeepAlive>) {
     web::pump(&keep_alive.0);
 }
 
+#[derive(Default)]
+struct UpdateState {
+    warned: bool,
+    clear_at: Option<f64>,
+}
+
 /// Drain now-playing messages and update resources / create art textures.
 fn apply_now_playing_updates(
     rx: Res<NowPlayingRx>,
-    mut warned: Local<bool>,
+    mut state: Local<UpdateState>,
+    time: Res<Time>,
+    vis: Res<crate::vis::VisSettings>,
     mut now_playing: ResMut<NowPlaying>,
     mut album_art: ResMut<AlbumArt>,
     mut images: ResMut<Assets<Image>>,
 ) {
+    let UpdateState { warned, clear_at } = &mut *state;
+    let now = time.elapsed_secs_f64();
     loop {
         let msg = match rx.0.try_recv() {
             Ok(msg) => msg,
@@ -215,9 +230,18 @@ fn apply_now_playing_updates(
                         track.artist.as_deref().unwrap_or("?")
                     );
                 }
+                let changed = track.title != now_playing.title
+                    || track.artist != now_playing.artist
+                    || track.album != now_playing.album
+                    || track.art_url != now_playing.art_url;
+                let same_cover = track.art_url.is_some() && track.art_url == now_playing.art_url;
+                if changed && !same_cover && album_art.image.is_some() && clear_at.is_none() {
+                    *clear_at = Some(now + f64::from(vis.album_art_linger));
+                }
                 *now_playing = track;
             }
             NowPlayingMsg::Art(Some(art)) => {
+                *clear_at = None;
                 let image = Image::new(
                     Extent3d {
                         width: art.width,
@@ -238,12 +262,15 @@ fn apply_now_playing_updates(
                 album_art.small = Some(art.small);
             }
             NowPlayingMsg::Art(None) => {
-                album_art.image = None;
-                album_art.size = None;
-                album_art.colors = None;
-                album_art.small = None;
+                if album_art.image.is_some() && clear_at.is_none() {
+                    *clear_at = Some(now + f64::from(vis.album_art_linger));
+                }
             }
         }
+    }
+    if clear_at.is_some_and(|deadline| now >= deadline) {
+        *album_art = AlbumArt::default();
+        *clear_at = None;
     }
 }
 
@@ -410,7 +437,7 @@ mod tests {
 
     /// A `w`×`h` cover with a fully transparent pixel, to check both the
     /// downscale bounds and the opacity flattening.
-    fn art(w: u32, h: u32) -> image::RgbaImage {
+    fn blur_art(w: u32, h: u32) -> image::RgbaImage {
         let mut img = image::RgbaImage::from_pixel(w, h, image::Rgba([200, 40, 90, 255]));
         img.put_pixel(0, 0, image::Rgba([0, 0, 0, 0]));
         img
@@ -418,14 +445,14 @@ mod tests {
 
     #[test]
     fn downscale_caps_longest_side_and_keeps_aspect() {
-        let small = downscale_for_blur(&art(3000, 1500));
+        let small = downscale_for_blur(&blur_art(3000, 1500));
         assert_eq!(small.dimensions(), (ART_BLUR_SOURCE_MAX, 128));
     }
 
     #[test]
     fn downscale_leaves_small_art_alone() {
         // Already under the cap: upscaling would only cost memory and blur time.
-        let small = downscale_for_blur(&art(64, 64));
+        let small = downscale_for_blur(&blur_art(64, 64));
         assert_eq!(small.dimensions(), (64, 64));
     }
 
@@ -433,7 +460,7 @@ mod tests {
     fn downscale_never_collapses_a_thin_cover_to_zero() {
         // A 4000×1 strip rounds its short side to 0 without the `.max(1)`, and a
         // zero-area texture is a GPU validation error.
-        let small = downscale_for_blur(&art(4000, 1));
+        let small = downscale_for_blur(&blur_art(4000, 1));
         assert_eq!(small.dimensions(), (ART_BLUR_SOURCE_MAX, 1));
     }
 
@@ -442,10 +469,114 @@ mod tests {
         // `fast_blur` assumes premultiplied alpha; transparent pixels left in
         // place bleed dark halos through the backdrop.
         for small in [
-            downscale_for_blur(&art(512, 512)),
-            downscale_for_blur(&art(8, 8)),
+            downscale_for_blur(&blur_art(512, 512)),
+            downscale_for_blur(&blur_art(8, 8)),
         ] {
             assert!(small.pixels().all(|p| p.0[3] == u8::MAX));
         }
+    }
+
+    use std::time::Duration;
+
+    fn setup(linger: f32) -> (App, crossbeam_channel::Sender<NowPlayingMsg>) {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<NowPlaying>()
+            .init_resource::<AlbumArt>()
+            .init_resource::<Assets<Image>>()
+            .insert_resource(crate::vis::VisSettings {
+                album_art_linger: linger,
+                ..default()
+            })
+            .insert_resource(NowPlayingRx(rx))
+            .add_systems(Update, apply_now_playing_updates);
+        (app, tx)
+    }
+
+    fn art() -> NowPlayingMsg {
+        NowPlayingMsg::Art(Some(DecodedArt {
+            rgba: vec![255; 4],
+            width: 1,
+            height: 1,
+            colors: Some(vec![Color::WHITE]),
+            small: image::RgbaImage::from_pixel(1, 1, image::Rgba([255; 4])),
+        }))
+    }
+
+    fn advance(app: &mut App, seconds: f64) {
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(Duration::from_secs_f64(seconds));
+        app.update();
+    }
+
+    #[test]
+    fn missing_cover_lingers_then_expires_without_repeated_updates_extending_it() {
+        let (mut app, tx) = setup(5.0);
+        tx.send(art()).unwrap();
+        app.update();
+        let original = app.world().resource::<AlbumArt>().image.clone();
+        tx.send(NowPlayingMsg::Art(None)).unwrap();
+        app.update();
+        advance(&mut app, 4.0);
+        tx.send(NowPlayingMsg::Art(None)).unwrap();
+        app.update();
+        assert_eq!(app.world().resource::<AlbumArt>().image, original);
+        assert!(app.world().resource::<AlbumArt>().colors.is_some());
+        advance(&mut app, 1.0);
+        assert!(app.world().resource::<AlbumArt>().image.is_none());
+        assert!(app.world().resource::<AlbumArt>().colors.is_none());
+        assert!(app.world().resource::<AlbumArt>().small.is_none());
+    }
+
+    #[test]
+    fn replacement_arrives_immediately_and_cancels_expiration() {
+        let (mut app, tx) = setup(5.0);
+        tx.send(art()).unwrap();
+        app.update();
+        let original = app.world().resource::<AlbumArt>().image.clone();
+        tx.send(NowPlayingMsg::Track(NowPlaying {
+            title: Some("Next".into()),
+            ..default()
+        }))
+        .unwrap();
+        app.update();
+        advance(&mut app, 2.0);
+        tx.send(art()).unwrap();
+        app.update();
+        let replacement = app.world().resource::<AlbumArt>().image.clone();
+        assert_ne!(replacement, original);
+        advance(&mut app, 10.0);
+        assert_eq!(app.world().resource::<AlbumArt>().image, replacement);
+    }
+
+    #[test]
+    fn zero_linger_clears_immediately() {
+        let (mut app, tx) = setup(0.0);
+        tx.send(art()).unwrap();
+        app.update();
+        tx.send(NowPlayingMsg::Art(None)).unwrap();
+        app.update();
+        assert!(app.world().resource::<AlbumArt>().image.is_none());
+    }
+
+    #[test]
+    fn same_album_url_keeps_cover_across_tracks() {
+        let (mut app, tx) = setup(5.0);
+        for title in ["First", "Second"] {
+            tx.send(NowPlayingMsg::Track(NowPlaying {
+                title: Some(title.into()),
+                art_url: Some("file:///cover.png".into()),
+                ..default()
+            }))
+            .unwrap();
+            if title == "First" {
+                tx.send(art()).unwrap();
+            }
+            app.update();
+        }
+        advance(&mut app, 10.0);
+        assert!(app.world().resource::<AlbumArt>().image.is_some());
     }
 }

@@ -1,0 +1,226 @@
+# Blockland — a 3D block-world visualizer.
+#
+# The ground is a 32×32 field of block columns whose heights follow the
+# spectrum (bass in the middle, rising into a snow-capped peak on the kick),
+# meshed like a block game: grass on top, dirt, then stone laced with ores that
+# glow on the beat. Two CC0 blocky characters dance on a floating plank
+# platform, faster when it's louder; a ring of ore blocks floats on the
+# spectrum; blocky clouds drift overhead. Click to place a block (sound only).
+#
+# Textures: an original CC0 block set (no Mojang assets). See ATTRIBUTION.md.
+
+[scene]
+name = "Blockland"
+description = "Minecraft-style voxel terrain that grows from the spectrum, with dancing characters"
+dimension = "3d"
+clear_color = "#7fb2ff"
+hud = true
+
+[config.physics]
+enabled = false
+
+[config.vis]
+bloom_intensity = 0.2
+tonemapping = "aces_fitted"
+
+[config.fx]
+chromatic = 0.006
+vignette = 0.3
+
+[camera]
+position = [30.0, 21.0, 30.0]
+look_at = [0.0, 9.0, 0.0]
+fov = 50.0
+orbit = 0.07
+bob = 0.6
+punch = 0.035
+
+[environment]
+ambient_color = "#dfe9ff"
+ambient_brightness = 160.0
+fog_color = "#7fb2ff"
+fog_start = 70.0
+fog_end = 200.0
+sky_shader = "sky"
+sky_params = [
+    [0.03, 0.16, 0.75, 0.0],
+    [0.21, 0.45, 1.0, 0.0],
+    [0.55, 0.6, 0.3, 0.07],
+]
+
+[[light]]
+kind = "directional"
+color = "#fff2d6"
+intensity = 11000.0
+position = [30.0, 40.0, 16.0]
+look_at = [0.0, 0.0, 0.0]
+shadows = true
+react = [{ band = "bass", amount = 0.35 }]
+
+[shaders]
+sky = "shaders/sky.wgsl"
+water = "shaders/water.wgsl"
+
+[sounds.place]
+path = "sounds/place.ogg"
+trigger = "click"
+volume = 0.6
+jitter = 0.12
+
+[sounds.pop]
+path = "sounds/pop.ogg"
+trigger = "key"
+key = "j"
+volume = 0.5
+
+[sounds.dig]
+path = "sounds/dig.ogg"
+trigger = "beat"
+every = 32
+volume = 0.2
+jitter = 0.1
+
+# ------------------------------------------------------------------ ground --
+[terrain]
+atlas = "textures/blocks.png"
+atlas_columns = 8
+atlas_rows = 8
+size = 32
+block = 1.0
+base_height = 2
+max_height = 15
+mapping = "radial"
+roughness = 1.8
+edge_falloff = 0.75
+fall = 0.35
+seed = 11
+top = "grass_top"
+side = "grass_side"
+under = "dirt"
+under_depth = 3
+deep = "stone"
+peak_height = 11
+peak = "snow"
+water_level = 3
+shore = "sand"
+water = "water"
+ore_chance = 0.12
+ores = ["diamond_ore", "gold_ore", "emerald_ore", "redstone_ore", "iron_ore"]
+ore_glow = 0.15
+ore_pulse = 1.2
+
+[terrain.tiles]
+grass_top = 0
+grass_side = 1
+dirt = 2
+stone = 3
+cobblestone = 4
+sand = 5
+water = 6
+snow = 7
+planks = 11
+glowstone = 14
+diamond_ore = 16
+gold_ore = 17
+emerald_ore = 18
+redstone_ore = 19
+coal_ore = 20
+iron_ore = 21
+
+# Water sits just under the shore blocks.
+[[object]]
+mesh = "plane"
+size = [32.0, 32.0]
+position = [0.0, 2.8, 0.0]
+material = { shader = "water", texture = "textures/blocks.png", pixelated = true, blend = "alpha", params = [[6.0, 8.0, 8.0, 0.78]] }
+
+# ---------------------------------------------------------------- platform --
+# A 3×3 plank platform floating over the peak, lit by two glowstone lamps.
+[[object]]
+mesh = "cube"
+position = [-1.0, 17.5, -1.0]
+material = { texture = "textures/blocks.png", pixelated = true, atlas_tile = 11 }
+[[object]]
+mesh = "cube"
+position = [0.0, 17.5, -1.0]
+material = { texture = "textures/blocks.png", pixelated = true, atlas_tile = 11 }
+[[object]]
+mesh = "cube"
+position = [1.0, 17.5, -1.0]
+material = { texture = "textures/blocks.png", pixelated = true, atlas_tile = 11 }
+[[object]]
+mesh = "cube"
+position = [-1.0, 17.5, 0.0]
+material = { texture = "textures/blocks.png", pixelated = true, atlas_tile = 11 }
+[[object]]
+mesh = "cube"
+position = [0.0, 17.5, 0.0]
+material = { texture = "textures/blocks.png", pixelated = true, atlas_tile = 11 }
+[[object]]
+mesh = "cube"
+position = [1.0, 17.5, 0.0]
+material = { texture = "textures/blocks.png", pixelated = true, atlas_tile = 11 }
+[[object]]
+mesh = "cube"
+position = [-1.0, 17.5, 1.0]
+material = { texture = "textures/blocks.png", pixelated = true, atlas_tile = 11 }
+[[object]]
+mesh = "cube"
+position = [0.0, 17.5, 1.0]
+material = { texture = "textures/blocks.png", pixelated = true, atlas_tile = 11 }
+[[object]]
+mesh = "cube"
+position = [1.0, 17.5, 1.0]
+material = { texture = "textures/blocks.png", pixelated = true, atlas_tile = 11 }
+
+[[object]]
+mesh = "cube"
+position = [-1.0, 18.5, -1.0]
+material = { texture = "textures/blocks.png", pixelated = true, atlas_tile = 14, emissive_texture = true, emissive_strength = 0.4 }
+react = [{ property = "brightness", band = "beat", amount = 4.0, smooth = 0.15 }]
+[[object]]
+mesh = "cube"
+position = [1.0, 18.5, 1.0]
+material = { texture = "textures/blocks.png", pixelated = true, atlas_tile = 14, emissive_texture = true, emissive_strength = 0.4 }
+react = [{ property = "brightness", band = "beat", amount = 4.0, smooth = 0.15 }]
+
+# Two CC0 blocky characters (Kenney), dancing — they jump on the beat and
+# their animation speeds up with the music's energy.
+[[object]]
+name = "adventurer"
+model = "models/character.glb"
+animation = 8
+position = [-0.4, 18.0, 0.4]
+rotation = [0.0, 45.0, 0.0]
+scale = 0.8
+react = [{ property = "position.y", band = "beat", amount = 0.9, smooth = 0.18 }]
+
+[[object]]
+name = "orc"
+model = "models/character_orc.glb"
+animation = 2
+position = [0.5, 18.0, -0.5]
+rotation = [0.0, 225.0, 0.0]
+scale = 0.8
+spin = { speed = 25.0, axis = [0.0, 1.0, 0.0] }
+react = [{ property = "position.y", band = "bass", amount = 0.6, smooth = 0.12 }]
+
+# -------------------------------------------------------------- ore ring --
+# Sixteen ore blocks orbit the peak; each rides its own spectrum bar and
+# flares on the beat.
+[[ring]]
+count = 16
+radius = 19.0
+center = [0.0, 10.0, 0.0]
+spin = 12.0
+tiles = [16, 17, 18, 19, 21, 14, 16, 18, 17, 19, 21, 14, 18, 16, 19, 17]
+template = { mesh = "cube", size = [1.4], material = { texture = "textures/blocks.png", pixelated = true, atlas_tile = 16, emissive_texture = true, emissive_strength = 0.12 }, spin = { speed = 70.0, axis = [0.3, 1.0, 0.2] }, react = [{ property = "position.y", band = "bar", amount = 6.0, smooth = 0.2 }, { property = "brightness", band = "beat", amount = 3.0, smooth = 0.15 }] }
+
+# ------------------------------------------------------------------ clouds --
+[[ring]]
+count = 9
+radius = 36.0
+center = [0.0, 27.0, 0.0]
+spin = 2.5
+face_out = true
+template = { mesh = "cube", size = [8.0, 1.4, 4.5], material = { color = "#ffffff", alpha = 0.9, emissive = "#ffffff", emissive_strength = 0.35 } }

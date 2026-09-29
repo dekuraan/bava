@@ -23,7 +23,7 @@ const ART_BLUR_OVERSCALE: f32 = 1.06;
 
 /// Full-window album-art backdrop sprite (driven by now-playing metadata).
 #[derive(Component)]
-struct ArtBackground;
+pub(crate) struct ArtBackground;
 
 /// User-configured background image sprite (from `[vis.background]`).
 #[derive(Component)]
@@ -32,6 +32,10 @@ struct UserBackground;
 /// User-configured foreground image sprite (from `[vis.foreground]`).
 #[derive(Component)]
 struct UserForeground;
+
+/// Root of the now-playing text block (hidden by scenes with `hud = false`).
+#[derive(Component)]
+pub(crate) struct HudRoot;
 
 /// Now-playing text label (title line).
 #[derive(Component)]
@@ -121,16 +125,19 @@ fn setup_hud(mut commands: Commands, mut fonts: ResMut<Assets<Font>>) {
     // Centered now-playing block, pinned to the top of the screen. A full-width
     // column with centered content keeps title + subtitle stacked and centered.
     commands
-        .spawn(Node {
-            position_type: PositionType::Absolute,
-            top: Val::Px(28.0),
-            left: Val::Px(0.0),
-            right: Val::Px(0.0),
-            flex_direction: FlexDirection::Column,
-            align_items: AlignItems::Center,
-            row_gap: Val::Px(4.0),
-            ..default()
-        })
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                top: Val::Px(28.0),
+                left: Val::Px(0.0),
+                right: Val::Px(0.0),
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::Center,
+                row_gap: Val::Px(4.0),
+                ..default()
+            },
+            HudRoot,
+        ))
         .with_children(|parent| {
             parent.spawn((
                 Text::new(""),

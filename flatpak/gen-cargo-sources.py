@@ -19,6 +19,7 @@ Output: flatpak/cargo-sources.json
 """
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 import tomllib
@@ -33,7 +34,12 @@ VENDOR = "cargo/vendor"
 
 
 def main() -> int:
-    with LOCK.open("rb") as f:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--lock", type=Path, default=LOCK)
+    parser.add_argument("-o", "--output", type=Path, default=OUT)
+    parser.add_argument("--check", action="store_true", help="Fail if the output differs from Cargo.lock")
+    args = parser.parse_args()
+    with args.lock.open("rb") as f:
         lock = tomllib.load(f)
 
     sources: list[dict] = []
@@ -111,9 +117,16 @@ def main() -> int:
         )
         return 1
 
-    OUT.write_text(json.dumps(sources, indent=4) + "\n")
+    generated = json.dumps(sources, indent=4) + "\n"
+    if args.check:
+        if not args.output.exists() or args.output.read_text() != generated:
+            print("Flatpak sources are stale; run python3 flatpak/gen-cargo-sources.py", file=sys.stderr)
+            return 1
+        print("Flatpak sources match Cargo.lock")
+        return 0
+    args.output.write_text(generated)
     crates = sum(1 for s in sources if s["type"] == "archive")
-    print(f"wrote {OUT.relative_to(ROOT)} ({crates} crates)")
+    print(f"wrote {args.output} ({crates} crates)")
     return 0
 
 

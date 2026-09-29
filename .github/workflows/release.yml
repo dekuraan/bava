@@ -305,6 +305,12 @@ jobs:
     env:
       AUR_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
     steps:
+      - name: Report missing publishing credentials
+        if: env.AUR_KEY == ''
+        run: |
+          echo '::warning::AUR publication skipped: AUR_SSH_PRIVATE_KEY is not configured.'
+          echo '### AUR: not published' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Configure AUR_USERNAME, AUR_EMAIL, and AUR_SSH_PRIVATE_KEY to enable publication.' >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/checkout@v7
         if: env.AUR_KEY != ''
 

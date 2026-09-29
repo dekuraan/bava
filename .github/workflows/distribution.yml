@@ -1,0 +1,118 @@
+name: Distribution packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Package to build
+        type: choice
+        options: [all, flatpak, snap, nix]
+        default: all
+      publish_snap:
+        description: Publish the Snap to stable (main branch only)
+        type: boolean
+        default: false
+  pull_request:
+    paths:
+      - '.github/workflows/distribution.yml'
+      - 'flatpak/**'
+      - 'snap/**'
+      - 'flake.*'
+      - 'packaging/nix/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/distribution.yml'
+      - 'flatpak/**'
+      - 'snap/**'
+      - 'flake.*'
+      - 'packaging/nix/**'
+
+permissions:
+  contents: read
+
+env:
+  RELEASE_TAG: v0.4.1
+
+jobs:
+  flatpak:
+    if: github.event_name != 'workflow_dispatch' || inputs.target == 'all' || inputs.target == 'flatpak'
+    concurrency:
+      group: distribution-flatpak-${{ github.ref }}
+      cancel-in-progress: false
+    name: Flatpak release manifest
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-25.08
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v7
+      - name: Generate release sources
+        run: |
+          mkdir submission
+          curl --fail --location "https://raw.githubusercontent.com/dekuraan/bava/$RELEASE_TAG/Cargo.lock" -o /tmp/release-Cargo.lock
+          python3 flatpak/gen-cargo-sources.py --lock /tmp/release-Cargo.lock -o submission/cargo-sources.json
+          python3 flatpak/gen-flathub-manifest.py "$RELEASE_TAG" -o submission/io.github.dekuraan.bava.yml
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6.8
+        with:
+          manifest-path: submission/io.github.dekuraan.bava.yml
+          bundle: bava.flatpak
+          cache-key: bava-flatpak-25.08-${{ hashFiles('submission/**') }}
+      - name: Check the installed Flatpak
+        run: |
+          flatpak install --user -y bava.flatpak
+          flatpak run io.github.dekuraan.bava --version
+          flatpak run --command=ffmpeg io.github.dekuraan.bava -hide_banner -encoders > encoders.txt
+          grep -q libx264 encoders.txt
+          grep -q " aac " encoders.txt
+      - uses: actions/upload-artifact@v7
+        with:
+          name: flathub-submission
+          path: submission/
+
+  snap:
+    if: github.event_name != 'workflow_dispatch' || inputs.target == 'all' || inputs.target == 'snap'
+    concurrency:
+      group: distribution-snap-${{ github.ref }}
+      cancel-in-progress: false
+    name: Snap
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: snapcore/action-build@v1
+        id: snapcraft
+        with:
+          snapcraft-args: --verbosity=debug
+      - uses: actions/upload-artifact@v7
+        with:
+          name: bava-snap
+          path: ${{ steps.snapcraft.outputs.snap }}
+      - name: Publish to Snap Store
+        if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.publish_snap
+        uses: snapcore/action-publish@v1
+        with:
+          snap: ${{ steps.snapcraft.outputs.snap }}
+          store_login: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
+          release: stable
+
+  nix:
+    if: github.event_name != 'workflow_dispatch' || inputs.target == 'all' || inputs.target == 'nix'
+    concurrency:
+      group: distribution-nix-${{ github.ref }}
+      cancel-in-progress: false
+    name: Nix flake
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: cachix/install-nix-action@v31.11.1
+      - name: Evaluate and build
+        run: |
+          nix flake lock
+          nix flake check --no-build
+          nix build --print-build-logs .#bava
+          ./result/bin/bava --version
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: nix-flake-lock
+          path: flake.lock

@@ -11,9 +11,11 @@
 
 pub mod bars;
 pub mod circle;
+pub mod features;
+pub mod fx;
 pub mod hud;
 pub mod physics;
-mod stroke;
+pub(crate) mod stroke;
 
 use std::path::PathBuf;
 
@@ -282,6 +284,9 @@ pub struct VisSettings {
     pub inner_radius: f32,
     /// Circle modes: angular offset in radians.
     pub rotation: f32,
+    /// Circle modes: overall size as a multiple of the default (the circle
+    /// spans 42% of the window's shorter side at 1.0, rim peaks included).
+    pub circle_scale: f32,
     /// Padding around the whole drawing area, in pixels.
     pub area_margin: f32,
     /// Proportional shift of the draw region.
@@ -316,6 +321,8 @@ pub struct VisSettings {
     /// Brightness multiplier on the album-art backdrop (`0` = black, `1` = the
     /// art's own brightness), keeping the bars readable over it.
     pub art_brightness: f32,
+    /// Seconds to retain the previous cover while replacement art is unavailable.
+    pub album_art_linger: f32,
     /// Runtime-only animated album colors (most vibrant first), eased toward the
     /// latest extracted set by [`animate_album_colors`]. Not serialized; when
     /// `Some` and [`dynamic_colors`](Self::dynamic_colors) is set it overrides the
@@ -339,6 +346,7 @@ impl Default for VisSettings {
             hearts: false,
             inner_radius: 0.38,
             rotation: 0.0,
+            circle_scale: 1.0,
             area_margin: 0.0,
             area_offset: Vec2::ZERO,
             profiles: vec![ColorProfile::default()],
@@ -355,12 +363,25 @@ impl Default for VisSettings {
             // so it can be brighter than the sharp cover it replaced (0.4).
             art_blur: 0.4,
             art_brightness: 0.62,
+            album_art_linger: 5.0,
             dynamic_fg: None,
         }
     }
 }
 
 impl VisSettings {
+    /// The length the circle modes are laid out against: the window's shorter
+    /// side, times [`circle_scale`](Self::circle_scale). Renderers, effects and
+    /// the physics blob all size from this one value.
+    pub fn circle_extent(&self, w: f32, h: f32) -> f32 {
+        let scale = if self.circle_scale.is_finite() {
+            self.circle_scale.clamp(0.1, 3.0)
+        } else {
+            1.0
+        };
+        w.min(h) * scale
+    }
+
     /// Active foreground color stops: the dynamic album-art palette (clamped to
     /// [`dynamic_color_count`](Self::dynamic_color_count)) when dynamic colors are
     /// on and a palette is available, else the active profile's `fg` stops. Always
@@ -481,8 +502,18 @@ impl Plugin for VisPlugin {
         app.init_resource::<VisSettings>()
             .init_resource::<DrawingMode>()
             .init_resource::<AlbumPalette>()
-            .add_systems(Update, (cycle_mode, animate_album_colors))
+            .add_systems(Update, cycle_mode)
+            // PreUpdate, right after the art lands: every Update reader of
+            // `VisSettings` (renderers, effect materials, ball looks) then sees
+            // this frame's palette. Unordered in Update, some would draw last
+            // frame's and some this frame's, differently from run to run.
+            .add_systems(
+                PreUpdate,
+                animate_album_colors.after(crate::now_playing::NowPlayingSet),
+            )
             .add_plugins((
+                // First: registers the effect material the renderers draw with.
+                fx::FxPlugin,
                 bars::BarsPlugin,
                 circle::CirclePlugin,
                 hud::HudPlugin,

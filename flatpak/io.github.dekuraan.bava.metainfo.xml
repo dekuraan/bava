@@ -59,6 +59,11 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="0.4.1" date="2026-09-06">
+      <description>
+        <p>Resting orb contacts, configurable cover linger, retrying audio capture and album-art downloads, and safer config saves.</p>
+      </description>
+    </release>
     <release version="0.4.0" date="2026-08-03">
       <description>
         <p>Puffin profiling, batched per-frame meshes and scoped ball CCD for higher ball counts, and a browser build of the same visualizer.</p>

@@ -1,6 +1,6 @@
 [package]
 name = "bava"
-version = "0.4.0"
+version = "0.4.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -30,14 +30,14 @@ profile = [
 [dependencies]
 cavacore-rs.workspace = true
 
-# Bevy, tree-shaken to what a 2D visualizer actually touches. Default features
-# pull in all of 3D (PBR/glTF/lighting/meshlets/anti-alias), the audio decoder
-# stack, scene loading, and the picking backends — none of which we use. We opt
-# into just the 2D + UI render pipelines (which transitively give the app/asset/
-# window/text layers and HDR+bloom), windowing on Wayland/X11, and keyboard/mouse
-# input. Adds back: 3D, `audio`, `scene`, `picking`, gamepad, sysinfo — if needed.
+# Bevy, tree-shaken to what bava actually touches. The 2D + UI render
+# pipelines (which transitively give the app/asset/window/text layers and
+# HDR + bloom + the post-process effect stack) draw the visualizers; PBR, glTF
+# and audio are there for *scenes* (`src/scene/`), which can pull in 3D meshes,
+# lit materials, glTF models and sound effects. Still left out: meshlets,
+# picking backends, gamepad, sysinfo, animation graphs.
 bevy = { version = "0.19", default-features = false, features = [
-    "2d_bevy_render",  # sprite + core pipeline + post-process (bloom) + gizmos (avian F3 debug)
+    "2d_bevy_render",  # sprite + core pipeline + post-process (bloom, chromatic aberration, vignette) + gizmos (avian F3 debug)
     "ui_bevy_render",  # bevy_ui for the HUD; transitively pulls default_app (asset/window/state/input_focus)
     "tonemapping_luts", # LUTs for the AgX / TonyMcMapface / BlenderFilmic tone mappers (see [vis] tonemapping)
     "std",
@@ -45,6 +45,14 @@ bevy = { version = "0.19", default-features = false, features = [
     "default_font",    # embedded font so HUD text renders without shipping one
     "keyboard",        # Space / F3 / configurable GUI toggle
     "mouse",           # egui editor interaction
+    "bevy_pbr",        # scenes: lit 3D materials, lights, fog
+    "bevy_light",
+    "bevy_gltf",       # scenes: glTF / GLB models
+    "gltf_animation",  # … and their animation clips
+    "jpeg",            # scenes: .jpg textures (png comes with 2d_bevy_render)
+    "bevy_audio",      # scenes: sound effects on beats / clicks
+    "vorbis",          # … as Ogg Vorbis
+    "wav",             # … or WAV
 ] }
 
 # 2D physics: ECS-native rigid bodies/colliders for the ball + bar simulation.
@@ -62,7 +70,7 @@ fastrand = "2"
 
 # In-app settings editor (immediate-mode GUI overlay). Drop egui's default
 # `picking` (we have no bevy_picking backend) and `open_url` (no hyperlinks).
-bevy_egui = { version = "0.41", default-features = false, features = [
+bevy_egui = { version = "0.42", default-features = false, features = [
     "render",
     "bevy_ui",
     "default_fonts",
@@ -131,6 +139,7 @@ symphonia = { version = "0.6", features = ["mp3", "aac", "isomp4"] }
 # `~/.config/bava` resolution. No filesystem in the browser, where the config
 # store is `window.localStorage` instead.
 dirs = "6"
+tempfile = "3"
 
 # --- Web build (`wasm32-unknown-unknown`, see `web/` and `docs/WEB.md`).
 # Audio comes from a tab-share `MediaStream` the page pushes in through

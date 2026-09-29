@@ -15,8 +15,11 @@
 use bevy::prelude::*;
 use bevy_egui::{EguiContexts, EguiPrimaryContextPass, egui};
 
-use crate::cava::{CavaRebuild, CavaRebuildStatus, CavaSettings};
+use crate::cava::{CaptureStatus, CavaRebuild, CavaRebuildStatus, CavaSettings};
 use crate::config::{Config, ConfigHandle};
+use crate::scene::files::SceneEntry;
+use crate::scene::{SceneSettings, SceneStatus};
+use crate::vis::fx::FxSettings;
 use crate::vis::physics::PhysicsSettings;
 use crate::vis::{ColorProfile, Direction, DrawingMode, MirrorMode, Theme, ToneMap, VisSettings};
 
@@ -44,6 +47,8 @@ pub struct EditorState {
     selected_profile: Option<String>,
     /// Have we populated [`profiles`](Self::profiles) for this open session yet?
     profiles_loaded: bool,
+    /// Scenes available to pick, refreshed when the window opens.
+    scenes: Vec<SceneEntry>,
 }
 
 impl Default for EditorState {
@@ -58,6 +63,7 @@ impl Default for EditorState {
             profiles: Vec::new(),
             selected_profile: None,
             profiles_loaded: false,
+            scenes: Vec::new(),
         }
     }
 }
@@ -95,7 +101,11 @@ fn editor_ui(
     mut cava: ResMut<CavaSettings>,
     mut rebuild: ResMut<CavaRebuild>,
     mut rebuild_status: ResMut<CavaRebuildStatus>,
+    capture_status: Option<Res<CaptureStatus>>,
     mut physics: ResMut<PhysicsSettings>,
+    mut fx: ResMut<FxSettings>,
+    mut scene: ResMut<SceneSettings>,
+    scene_status: Res<SceneStatus>,
     handle: Res<ConfigHandle>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else {
@@ -128,6 +138,7 @@ fn editor_ui(
     // Populate the profile list once per open.
     if !editor.profiles_loaded {
         editor.profiles = Config::list_profiles();
+        editor.scenes = crate::scene::files::discover();
         editor.profiles_loaded = true;
     }
 
@@ -137,19 +148,23 @@ fn editor_ui(
         .default_width(320.0)
         .resizable(true)
         .show(ctx, |ui| {
-            persistence_section(
-                ui,
-                &mut editor,
-                &mut vis,
-                &mut mode,
-                &mut cava,
-                &mut rebuild,
-                &mut physics,
-                &handle,
-            );
+            let mut live = Live {
+                vis: &mut vis,
+                mode: &mut mode,
+                cava: &mut cava,
+                rebuild: &mut rebuild,
+                physics: &mut physics,
+                fx: &mut fx,
+                scene: &mut scene,
+            };
+            persistence_section(ui, &mut editor, &mut live, &scene_status, &handle);
             ui.separator();
             egui::ScrollArea::vertical().show(ui, |ui| {
+                scene_section(ui, &editor.scenes, &mut scene, &scene_status);
+                ui.separator();
                 mode_section(ui, &mut mode);
+                ui.separator();
+                fx_section(ui, &mut fx);
                 ui.separator();
                 geometry_section(ui, &mut vis);
                 ui.separator();
@@ -159,6 +174,9 @@ fn editor_ui(
                 ui.separator();
                 physics_section(ui, &mut physics);
                 ui.separator();
+                if let Some(status) = &capture_status {
+                    ui.label(status.message());
+                }
                 audio_section(ui, &mut cava, &mut rebuild, &mut editor.status);
             });
             if !editor.status.is_empty() {
@@ -169,24 +187,79 @@ fn editor_ui(
     editor.open = open;
 }
 
+/// A slider that clamps and snaps only what the user edits. egui's default
+/// (`SliderClamping::Always`) writes the range clamp and step rounding back into
+/// the bound value on every draw, so merely opening the editor would rewrite
+/// an off-grid or out-of-range setting — and under an active scene, a key
+/// changed that way counts as the user's (see `scene::SceneBase`).
+fn slider<Num: egui::emath::Numeric>(
+    value: &mut Num,
+    range: std::ops::RangeInclusive<Num>,
+) -> egui::Slider<'_> {
+    egui::Slider::new(value, range).clamping(egui::SliderClamping::Edits)
+}
+
 // --- Sections ---------------------------------------------------------------
 
+/// The live resources the editor reads and writes, bundled so the save /
+/// load paths take one argument instead of seven.
+struct Live<'a> {
+    vis: &'a mut VisSettings,
+    mode: &'a mut DrawingMode,
+    cava: &'a mut CavaSettings,
+    rebuild: &'a mut CavaRebuild,
+    physics: &'a mut PhysicsSettings,
+    fx: &'a mut FxSettings,
+    scene: &'a mut SceneSettings,
+}
+
+impl Live<'_> {
+    /// The config to save. While a scene is loaded, that is the live settings
+    /// minus the scene's own overrides, plus the scene's name — so the scene
+    /// is restored next launch without its look being baked in.
+    fn to_config(&self, status: &SceneStatus, key: KeyCode) -> Config {
+        let mut cfg = Config::from_settings(self.cava, self.vis, *self.mode, self.physics);
+        cfg.fx = self.fx.clone();
+        if let Some(base) = &status.base {
+            cfg = base.user_config(&cfg);
+        }
+        cfg.scene.name = crate::scene::persistent_name(&self.scene.name);
+        cfg.set_gui_toggle_key(key);
+        cfg
+    }
+
+    /// Push a loaded [`Config`] into the live resources, request a cava
+    /// rebuild so the DSP params take hold, and have an active scene re-apply
+    /// its overrides on top of the new settings.
+    fn apply(&mut self, cfg: &Config) {
+        // The album palette is live state, not a setting.
+        let dynamic = self.vis.dynamic_fg.take();
+        *self.vis = VisSettings {
+            dynamic_fg: dynamic,
+            ..cfg.to_vis_settings()
+        };
+        *self.mode = cfg.vis_mode();
+        let debug = self.cava.debug;
+        *self.cava = cfg.to_cava_settings(debug);
+        *self.physics = cfg.to_physics_settings();
+        *self.fx = cfg.to_fx_settings();
+        self.rebuild.0 = true;
+        self.scene.name = cfg.scene.name.clone();
+        self.scene.rebase = true;
+    }
+}
+
 /// Save / reload / profile controls at the top of the window.
-#[allow(clippy::too_many_arguments)]
 fn persistence_section(
     ui: &mut egui::Ui,
     editor: &mut EditorState,
-    vis: &mut VisSettings,
-    mode: &mut DrawingMode,
-    cava: &mut CavaSettings,
-    rebuild: &mut CavaRebuild,
-    physics: &mut PhysicsSettings,
+    live: &mut Live,
+    scene_status: &SceneStatus,
     handle: &ConfigHandle,
 ) {
     ui.horizontal(|ui| {
         if ui.button("💾 Save").clicked() {
-            let mut cfg = Config::from_settings(cava, vis, *mode, physics);
-            cfg.set_gui_toggle_key(editor.toggle_key);
+            let cfg = live.to_config(scene_status, editor.toggle_key);
             editor.status = match cfg.write(&handle.path) {
                 Ok(()) => format!("Saved → {}", handle.path.display()),
                 Err(e) => format!("Save failed: {e}"),
@@ -195,7 +268,7 @@ fn persistence_section(
         if ui.button("⟳ Reload").clicked() {
             match Config::load(&handle.path) {
                 Some(cfg) => {
-                    apply_config(&cfg, vis, mode, cava, rebuild, physics);
+                    live.apply(&cfg);
                     editor.toggle_key = cfg.gui_toggle_key();
                     editor.status = "Reloaded config".into();
                 }
@@ -225,7 +298,7 @@ fn persistence_section(
             {
                 match Config::load_profile(&name) {
                     Some(cfg) => {
-                        apply_config(&cfg, vis, mode, cava, rebuild, physics);
+                        live.apply(&cfg);
                         editor.toggle_key = cfg.gui_toggle_key();
                         editor.status = format!("Loaded profile '{name}'");
                     }
@@ -242,8 +315,7 @@ fn persistence_section(
                 if name.is_empty() {
                     editor.status = "Enter a profile name first".into();
                 } else {
-                    let mut cfg = Config::from_settings(cava, vis, *mode, physics);
-                    cfg.set_gui_toggle_key(editor.toggle_key);
+                    let cfg = live.to_config(scene_status, editor.toggle_key);
                     editor.status = match cfg.save_profile(&name) {
                         Ok(path) => {
                             editor.profiles = Config::list_profiles();
@@ -282,9 +354,100 @@ fn persistence_section(
             ],
         );
         ui.label(
-            egui::RichText::new("Change takes effect immediately. Save to persist.")
+            egui::RichText::new("Changes apply immediately. Save to keep them.")
                 .weak()
                 .small(),
+        );
+    });
+}
+
+/// Scene picker: none, the built-ins, and user scenes.
+fn scene_section(
+    ui: &mut egui::Ui,
+    scenes: &[SceneEntry],
+    scene: &mut SceneSettings,
+    status: &SceneStatus,
+) {
+    ui.label(egui::RichText::new("Scene").strong());
+    ui.horizontal(|ui| {
+        let current = if scene.name.is_empty() {
+            "None".to_string()
+        } else {
+            scenes
+                .iter()
+                .find(|e| e.id == scene.name)
+                .map(SceneEntry::label)
+                .unwrap_or_else(|| scene.name.clone())
+        };
+        egui::ComboBox::from_id_salt("scene_select")
+            .selected_text(current)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut scene.name, String::new(), "None");
+                for entry in scenes {
+                    ui.selectable_value(&mut scene.name, entry.id.clone(), entry.label());
+                }
+            });
+        if !scene.name.is_empty() && ui.button("⟳").on_hover_text("Reload the scene").clicked() {
+            scene.reload = scene.reload.wrapping_add(1);
+        }
+    });
+    if !status.description.is_empty() {
+        ui.label(egui::RichText::new(&status.description).weak().small());
+    }
+    if !status.message.is_empty() {
+        ui.label(egui::RichText::new(&status.message).small());
+    }
+    let dir = crate::scene::files::user_scenes_dir()
+        .map(|d| d.display().to_string())
+        .unwrap_or_else(|| "~/.config/bava/scenes".into());
+    ui.label(
+        egui::RichText::new(format!(
+            "N cycles scenes. Your own scenes go in {dir}/<name>/scene.toml and reload on save."
+        ))
+        .weak()
+        .small(),
+    );
+}
+
+/// Shader, particle and camera effects.
+fn fx_section(ui: &mut egui::Ui, fx: &mut FxSettings) {
+    ui.label(egui::RichText::new("Effects").strong());
+    ui.checkbox(&mut fx.enabled, "Effects (shaders, particles, camera)");
+    if !fx.enabled {
+        return;
+    }
+    ui.horizontal_wrapped(|ui| {
+        ui.checkbox(&mut fx.plasma, "plasma fill");
+        ui.checkbox(&mut fx.backdrop, "starfield");
+        ui.checkbox(&mut fx.shockwaves, "beat rings");
+        ui.checkbox(&mut fx.sparks, "impact sparks");
+        ui.checkbox(&mut fx.glossy_balls, "glossy balls");
+    });
+    ui.add(slider(&mut fx.blob_opacity, 0.0..=1.0).text("fill opacity"));
+    ui.add(slider(&mut fx.halo, 0.0..=4.0).text("halo"));
+    ui.add(slider(&mut fx.corona, 0.0..=4.0).text("corona streaks"));
+    ui.add(slider(&mut fx.flares, 0.0..=4.0).text("rim flares"));
+    if fx.backdrop {
+        ui.add(slider(&mut fx.stars, 0.0..=1.0).text("stars"));
+        ui.add(slider(&mut fx.nebula, 0.0..=4.0).text("nebula"));
+    }
+    ui.collapsing("Camera", |ui| {
+        ui.add(
+            slider(&mut fx.punch, 0.0..=0.2)
+                .text("beat zoom punch")
+                .step_by(0.005),
+        );
+        ui.add(slider(&mut fx.shake, 0.0..=40.0).text("beat shake (px)"));
+        ui.add(
+            slider(&mut fx.chromatic, 0.0..=0.1)
+                .text("chromatic aberration")
+                .step_by(0.001),
+        );
+        ui.add(slider(&mut fx.vignette, 0.0..=1.0).text("vignette"));
+        ui.add(
+            slider(&mut fx.art_zoom, 0.0..=0.3)
+                .text("cover zoom on bass")
+                .step_by(0.005),
         );
     });
 }
@@ -304,7 +467,7 @@ fn mode_section(ui: &mut egui::Ui, mode: &mut DrawingMode) {
 fn geometry_section(ui: &mut egui::Ui, vis: &mut VisSettings) {
     ui.label(egui::RichText::new("Geometry").strong());
 
-    ui.add(egui::Slider::new(&mut vis.monstercat, 1.0..=4.0).text("monstercat smoothing"));
+    ui.add(slider(&mut vis.monstercat, 1.0..=4.0).text("monstercat smoothing"));
 
     enum_combo(
         ui,
@@ -330,21 +493,20 @@ fn geometry_section(ui: &mut egui::Ui, vis: &mut VisSettings) {
 
     ui.checkbox(&mut vis.reverse_mirror, "Reverse mirror side");
     ui.checkbox(&mut vis.reverse_order, "Reverse bar order");
-    ui.checkbox(&mut vis.filling, "Fill (vs. outline)");
+    ui.checkbox(&mut vis.filling, "Fill shape");
     ui.checkbox(&mut vis.hearts, "Hearts (spine modes)");
 
-    ui.add(egui::Slider::new(&mut vis.line_thickness, 0.5..=40.0).text("line thickness"));
-    ui.add(egui::Slider::new(&mut vis.items_offset, 0.0..=0.5).text("items offset"));
-    ui.add(egui::Slider::new(&mut vis.items_roundness, 0.0..=1.0).text("items roundness"));
-    ui.add(egui::Slider::new(&mut vis.inner_radius, 0.0..=1.0).text("inner radius (circle)"));
-    ui.add(
-        egui::Slider::new(&mut vis.rotation, 0.0..=std::f32::consts::TAU).text("rotation (circle)"),
-    );
-    ui.add(egui::Slider::new(&mut vis.area_margin, 0.0..=200.0).text("area margin (px)"));
+    ui.add(slider(&mut vis.line_thickness, 0.5..=40.0).text("line thickness"));
+    ui.add(slider(&mut vis.items_offset, 0.0..=0.5).text("items offset"));
+    ui.add(slider(&mut vis.items_roundness, 0.0..=1.0).text("items roundness"));
+    ui.add(slider(&mut vis.inner_radius, 0.0..=1.0).text("inner radius (circle)"));
+    ui.add(slider(&mut vis.rotation, 0.0..=std::f32::consts::TAU).text("rotation (circle)"));
+    ui.add(slider(&mut vis.circle_scale, 0.1..=3.0).text("size (circle)"));
+    ui.add(slider(&mut vis.area_margin, 0.0..=200.0).text("area margin (px)"));
     ui.horizontal(|ui| {
         ui.label("area offset");
-        ui.add(egui::Slider::new(&mut vis.area_offset.x, -1.0..=1.0).text("x"));
-        ui.add(egui::Slider::new(&mut vis.area_offset.y, -1.0..=1.0).text("y"));
+        ui.add(slider(&mut vis.area_offset.x, -1.0..=1.0).text("x"));
+        ui.add(slider(&mut vis.area_offset.y, -1.0..=1.0).text("y"));
     });
 }
 
@@ -368,31 +530,33 @@ fn colors_section(ui: &mut egui::Ui, vis: &mut VisSettings) {
         ],
     );
     ui.add(
-        egui::Slider::new(&mut vis.bloom_intensity, 0.0..=2.0)
+        slider(&mut vis.bloom_intensity, 0.0..=2.0)
             .text("bloom intensity")
             .step_by(0.01),
     );
     ui.add(
-        egui::Slider::new(&mut vis.glow_gain, 0.0..=6.0)
+        slider(&mut vis.glow_gain, 0.0..=6.0)
             .text("glow gain (HDR)")
             .step_by(0.05),
     );
     ui.checkbox(&mut vis.dynamic_colors, "Dynamic colors (from album art)")
         .on_hover_text(
-            "Override the foreground gradient with colors extracted from the \
-             current track's cover. Eases on song change.",
+            "Use colors from the current track's cover for the foreground gradient. \
+             Colors fade when the track changes.",
         );
+    ui.add(slider(&mut vis.album_art_linger, 0.0..=60.0).text("cover linger (s)"))
+        .on_hover_text("Keep the previous cover while waiting for new art. 0 = clear immediately.");
     if vis.dynamic_colors {
         ui.add(
-            egui::Slider::new(
+            slider(
                 &mut vis.dynamic_color_count,
                 2..=crate::now_playing::MAX_DYNAMIC_COLORS,
             )
             .text("dynamic colors"),
         )
-        .on_hover_text("How many album-art colors to spread across the gradient and balls.");
+        .on_hover_text("Number of cover colors used for the gradient and balls.");
         ui.add(
-            egui::Slider::new(&mut vis.dynamic_color_fade, 0.0..=5.0)
+            slider(&mut vis.dynamic_color_fade, 0.0..=5.0)
                 .text("color fade (s)")
                 .step_by(0.05),
         )
@@ -472,18 +636,18 @@ fn audio_section(
 
     let mut bars = cava.bars_per_channel as u32;
     if ui
-        .add(egui::Slider::new(&mut bars, 1..=128).text("bars / channel"))
+        .add(slider(&mut bars, 1..=128).text("bars / channel"))
         .changed()
     {
         cava.bars_per_channel = bars as usize;
     }
     ui.checkbox(&mut cava.autosens, "Auto-sensitivity");
-    ui.add(egui::Slider::new(&mut cava.noise_reduction, 0.0..=1.0).text("noise reduction"));
+    ui.add(slider(&mut cava.noise_reduction, 0.0..=1.0).text("noise reduction"));
 
     let mut low = cava.low_cutoff_freq;
     let mut high = cava.high_cutoff_freq;
     if ui
-        .add(egui::Slider::new(&mut low, 20..=2_000).text("low cutoff (Hz)"))
+        .add(slider(&mut low, 20..=2_000).text("low cutoff (Hz)"))
         .changed()
     {
         cava.low_cutoff_freq = low;
@@ -493,22 +657,22 @@ fn audio_section(
     // (the old fixed 22 kHz max at, say, a 32 kHz rate) is a trap.
     let high_max = (cava.rate / 2).saturating_sub(1).max(2_001);
     if ui
-        .add(egui::Slider::new(&mut high, 2_000..=high_max).text("high cutoff (Hz)"))
+        .add(slider(&mut high, 2_000..=high_max).text("high cutoff (Hz)"))
         .changed()
     {
         cava.high_cutoff_freq = high.min(high_max);
     }
 
-    if ui.button("Apply audio (rebuild plan)").clicked() {
+    if ui.button("Apply audio settings").clicked() {
         rebuild.0 = true;
-        *status = "Rebuilding cavacore plan…".into();
+        *status = "Applying audio settings…".into();
     }
 
     ui.collapsing("Capture (restart required)", |ui| {
         let mut frame = cava.frame_samples as u32;
         if ui
             .add(egui::DragValue::new(&mut frame).range(16..=8192).speed(8.0))
-            .on_hover_text("frame_samples — cava update granularity")
+            .on_hover_text("Audio frames per analysis update")
             .changed()
         {
             cava.frame_samples = frame as usize;
@@ -522,10 +686,7 @@ fn audio_section(
             );
         });
         let mut chans = cava.channels as u32;
-        if ui
-            .add(egui::Slider::new(&mut chans, 1..=2).text("channels"))
-            .changed()
-        {
+        if ui.add(slider(&mut chans, 1..=2).text("channels")).changed() {
             cava.channels = chans as usize;
         }
         ui.horizontal(|ui| {
@@ -540,7 +701,7 @@ fn audio_section(
             }
         });
         ui.label(
-            egui::RichText::new("Rate/channels/source apply after Save + relaunch.")
+            egui::RichText::new("Save and restart to apply the sample rate, channels, and source.")
                 .weak()
                 .small(),
         );
@@ -553,13 +714,13 @@ fn image_section(ui: &mut egui::Ui, vis: &mut VisSettings) {
     image_layer_editor(
         ui,
         "Background image",
-        "Absolute path or relative to working dir.",
+        "Use an absolute path or a path relative to the working directory.",
         &mut vis.background,
     );
     image_layer_editor(
         ui,
         "Foreground overlay",
-        "Rendered above bars, below HUD text.",
+        "Shown above the bars and below the track text.",
         &mut vis.foreground,
     );
 }
@@ -591,8 +752,8 @@ fn image_layer_editor(
             layer.path = None;
         }
         ui.label(egui::RichText::new(help).weak().small());
-        ui.add(egui::Slider::new(&mut layer.scale, 0.1..=4.0).text("scale"));
-        ui.add(egui::Slider::new(&mut layer.alpha, 0.0..=1.0).text("alpha"));
+        ui.add(slider(&mut layer.scale, 0.1..=4.0).text("scale"));
+        ui.add(slider(&mut layer.alpha, 0.0..=1.0).text("alpha"));
     });
 }
 
@@ -606,30 +767,30 @@ fn physics_section(ui: &mut egui::Ui, physics: &mut PhysicsSettings) {
     }
 
     ui.add(
-        egui::Slider::new(&mut physics.gravity, 0.0..=5000.0)
+        slider(&mut physics.gravity, 0.0..=5000.0)
             .text("gravity (px/s²)")
             .step_by(10.0),
     );
     ui.add(
-        egui::Slider::new(&mut physics.restitution, 0.0..=1.0)
+        slider(&mut physics.restitution, 0.0..=1.0)
             .text("ball restitution")
             .step_by(0.01),
     );
     ui.add(
-        egui::Slider::new(&mut physics.air_resistance, 0.0..=5.0)
+        slider(&mut physics.air_resistance, 0.0..=5.0)
             .text("air resistance")
             .step_by(0.01),
     );
     ui.add(
-        egui::Slider::new(&mut physics.mass, 0.1..=10.0)
+        slider(&mut physics.mass, 0.1..=10.0)
             .text("ball mass")
             .step_by(0.1),
     );
-    ui.add(egui::Slider::new(&mut physics.radius, 2.0..=80.0).text("ball radius (px)"));
+    ui.add(slider(&mut physics.radius, 2.0..=80.0).text("ball radius (px)"));
 
     let mut max = physics.max_balls as u32;
     if ui
-        .add(egui::Slider::new(&mut max, 1..=2000).text("max balls"))
+        .add(slider(&mut max, 1..=2000).text("max balls"))
         .changed()
     {
         physics.max_balls = max as usize;
@@ -640,7 +801,7 @@ fn physics_section(ui: &mut egui::Ui, physics: &mut PhysicsSettings) {
     let mut debounce = physics.spawn_debounce_ms as u32;
     if ui
         .add(
-            egui::Slider::new(&mut debounce, 0..=2000)
+            slider(&mut debounce, 0..=2000)
                 .text("right-click spray delay (ms)")
                 .step_by(10.0),
         )
@@ -652,33 +813,27 @@ fn physics_section(ui: &mut egui::Ui, physics: &mut PhysicsSettings) {
 
     ui.collapsing("Surface / wave", |ui| {
         ui.add(
-            egui::Slider::new(&mut physics.bar_smoothing, 0.005..=1.0)
-                .text("smoothing (s)")
-                .step_by(0.005),
-        );
-        ui.add(
-            egui::Slider::new(&mut physics.bar_restitution, 0.0..=2.0)
+            slider(&mut physics.bar_restitution, 0.0..=2.0)
                 .text("surface restitution")
                 .step_by(0.01),
         );
         ui.add(
-            egui::Slider::new(&mut physics.bar_push, 0.0..=10.0)
+            slider(&mut physics.bar_push, 0.0..=10.0)
                 .text("launch gain")
                 .step_by(0.05),
         );
     });
 
     ui.add(
-        egui::Slider::new(&mut physics.central_gravity, 0.0..=5000.0)
+        slider(&mut physics.central_gravity, 0.0..=5000.0)
             .text("central gravity (circle)")
             .step_by(10.0),
     );
 
     ui.checkbox(&mut physics.ccd, "continuous collision detection")
         .on_hover_text(
-            "Stops very fast balls passing through a bar or the floor. \
-             The most expensive part of the ball simulation — turn it off \
-             for a large win with a lot of balls on screen.",
+            "Prevents fast balls from passing through bars or the floor. \
+             Turn it off to reduce simulation work at high ball counts.",
         );
 
     ui.collapsing("Trails", |ui| {
@@ -686,7 +841,7 @@ fn physics_section(ui: &mut egui::Ui, physics: &mut PhysicsSettings) {
         if physics.trails {
             let mut tlen = physics.trail_length as u32;
             if ui
-                .add(egui::Slider::new(&mut tlen, 1..=120).text("trail length"))
+                .add(slider(&mut tlen, 1..=120).text("trail length"))
                 .changed()
             {
                 physics.trail_length = tlen as usize;
@@ -739,24 +894,6 @@ fn color_stops(ui: &mut egui::Ui, label: &str, stops: &mut Vec<Color>) {
     });
 }
 
-/// Push a loaded [`Config`] into the live runtime resources and request a cava
-/// rebuild so the DSP params take hold.
-fn apply_config(
-    cfg: &Config,
-    vis: &mut VisSettings,
-    mode: &mut DrawingMode,
-    cava: &mut CavaSettings,
-    rebuild: &mut CavaRebuild,
-    physics: &mut PhysicsSettings,
-) {
-    *vis = cfg.to_vis_settings();
-    *mode = cfg.vis_mode();
-    let debug = cava.debug;
-    *cava = cfg.to_cava_settings(debug);
-    *physics = cfg.to_physics_settings();
-    rebuild.0 = true;
-}
-
 /// Bevy [`Color`] → egui [`Color32`] (straight, un-premultiplied alpha).
 fn color_to_egui(c: Color) -> egui::Color32 {
     let s = c.to_srgba();
@@ -773,4 +910,45 @@ fn egui_to_color(c: egui::Color32) -> Color {
         b as f32 / 255.0,
         a as f32 / 255.0,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn drawing_the_editor_never_rewrites_a_setting() {
+        // Off the sliders' step grid or outside their ranges, as a hand-written
+        // config or scene can set them.
+        let mut vis = VisSettings {
+            glow_gain: 1.42,
+            monstercat: 0.5,
+            line_thickness: 55.0,
+            ..default()
+        };
+        let mut physics = PhysicsSettings {
+            gravity: 1234.5,
+            mass: 0.05,
+            ..default()
+        };
+        let mut fx = FxSettings {
+            halo: 5.0,
+            ..default()
+        };
+        let ctx = egui::Context::default();
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            geometry_section(ui, &mut vis);
+            colors_section(ui, &mut vis);
+            physics_section(ui, &mut physics);
+            fx_section(ui, &mut fx);
+        });
+        // No renderer takes the font atlas upload here.
+        out.textures_delta.clear();
+        assert_eq!(vis.glow_gain, 1.42);
+        assert_eq!(vis.monstercat, 0.5);
+        assert_eq!(vis.line_thickness, 55.0);
+        assert_eq!(physics.gravity, 1234.5);
+        assert_eq!(physics.mass, 0.05);
+        assert_eq!(fx.halo, 5.0);
+    }
 }

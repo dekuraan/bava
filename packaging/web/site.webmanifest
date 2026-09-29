@@ -1,7 +1,7 @@
 {
   "name": "bava",
   "short_name": "bava",
-  "description": "A music visualizer driven by cavacore",
+  "description": "Visualize music from a browser tab or an audio file.",
   "icons": [
     { "src": "icon-192.png", "sizes": "192x192", "type": "image/png" },
     { "src": "icon-512.png", "sizes": "512x512", "type": "image/png" },

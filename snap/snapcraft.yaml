@@ -7,6 +7,7 @@
 # See packaging/README.md for the two confinement caveats: audio-record must be
 # connected by hand, and MPRIS now-playing only sees snap-packaged players.
 name: bava
+title: Bava
 base: core24
 adopt-info: bava
 summary: Music visualizer driven by cavacore, MPRIS, and PipeWire/PulseAudio
@@ -26,6 +27,8 @@ license: MIT OR Apache-2.0
 icon: flatpak/io.github.dekuraan.bava.svg
 website: https://github.com/dekuraan/bava
 issues: https://github.com/dekuraan/bava/issues
+contact: https://github.com/dekuraan/bava/issues
+source-code: https://github.com/dekuraan/bava
 grade: stable
 confinement: strict
 compression: lzo
@@ -54,15 +57,21 @@ parts:
     plugin: rust
     source: .
     rust-path: [crates/bava]
+    # Build with Ubuntu's tools; the GNOME SDK environment is for GTK builds.
+    build-environment:
+      - PATH: /usr/bin:/bin:${PATH}
+      - LD_LIBRARY_PATH: ""
     override-pull: |
       craftctl default
       # Single source of truth for the version: the crate manifest.
       craftctl set version="$(sed -n '0,/^version = /s/^version = "\(.*\)"/\1/p' crates/bava/Cargo.toml)"
     build-packages:
+      - rustup
       - clang            # libspa-sys bindgen over the PipeWire headers
       - libclang-dev
       - pkg-config
       - libpulse-dev
+      - libasound2-dev   # scene sound effects (bevy_audio → cpal → ALSA)
       - libpipewire-0.3-dev
       - libdbus-1-dev
       - libwayland-dev
@@ -74,6 +83,10 @@ parts:
       - libvulkan-dev
     stage-packages:
       - libpulse0
+      # Not `libasound2`: on noble that is a virtual package that OSS4's
+      # liboss4-salsa-asound2 also provides, and picking it collides with the
+      # real libasound.so.2 the ffmpeg part stages.
+      - libasound2t64
       - libpipewire-0.3-0
       - libdbus-1-3
       - libvulkan1

@@ -11,6 +11,7 @@ use clap::Parser;
 use serde::{Deserialize, Serialize};
 
 use crate::cava::CavaSettings;
+use crate::vis::fx::FxSettings;
 use crate::vis::physics::PhysicsSettings;
 use crate::vis::{
     ColorProfile, Direction, DrawingMode, ImageLayer, MirrorMode, Theme, ToneMap, VisSettings,
@@ -126,6 +127,20 @@ pub struct Cli {
     /// `[physics] spawn_on_launch`.
     #[arg(long, value_name = "N")]
     pub spawn_balls: Option<usize>,
+
+    /// Load a scene: a built-in (`minecraft`, `solar_system`), a user scene
+    /// under ~/.config/bava/scenes/, or a path to a scene directory. `none`
+    /// turns scenes off. Overrides `[scene] name`.
+    #[arg(long, value_name = "NAME|PATH")]
+    pub scene: Option<String>,
+
+    /// List the available scenes and exit.
+    #[arg(long)]
+    pub list_scenes: bool,
+
+    /// Turn the shader / particle / camera effects off (`[fx] enabled = false`).
+    #[arg(long)]
+    pub no_fx: bool,
 }
 
 /// Top-level config file model.
@@ -136,7 +151,20 @@ pub struct Config {
     pub cava: CavaConfig,
     pub vis: VisConfig,
     pub physics: PhysicsConfig,
+    /// `[fx]` — shader, particle and camera effects.
+    pub fx: FxSettings,
+    /// `[scene]` — the active scene.
+    pub scene: SceneConfig,
     pub gui: GuiConfig,
+}
+
+/// `[scene]` — which scene (if any) is loaded at startup.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct SceneConfig {
+    /// A built-in scene id, a user scene under `~/.config/bava/scenes/`, or a
+    /// path to a scene directory. Empty = no scene.
+    pub name: String,
 }
 
 /// `[gui]` — settings-editor preferences.
@@ -226,6 +254,8 @@ pub struct VisConfig {
     pub inner_radius: f32,
     /// Circle modes: angular offset in radians.
     pub rotation: f32,
+    /// Circle modes: overall size multiplier (1.0 = 42% of the shorter side).
+    pub circle_scale: f32,
     /// Padding around the whole drawing area, in pixels.
     pub area_margin: f32,
     /// Proportional shift of the draw region `[x, y]`.
@@ -259,6 +289,8 @@ pub struct VisConfig {
     pub art_blur: f32,
     /// Brightness of the album-art backdrop (0 = black, 1 = the art's own).
     pub art_brightness: f32,
+    /// Seconds to retain the previous cover while replacement art is unavailable.
+    pub album_art_linger: f32,
 }
 
 /// `[[vis.profile]]` — a named color scheme.
@@ -327,8 +359,6 @@ pub struct PhysicsConfig {
     /// workload, so this is how you reproduce a loaded scene — for a benchmark or
     /// just to start with the playground already full.
     pub spawn_on_launch: usize,
-    /// Spectrum-surface smoothing time constant, in seconds (larger = smoother).
-    pub bar_smoothing: f32,
     /// Restitution of the spectrum surface.
     pub bar_restitution: f32,
     /// Launch gain: how strongly a rising surface flings balls along its normal.
@@ -423,6 +453,7 @@ impl Config {
                 hearts: vis.hearts,
                 inner_radius: vis.inner_radius,
                 rotation: vis.rotation,
+                circle_scale: vis.circle_scale,
                 area_margin: vis.area_margin,
                 area_offset: vis.area_offset.to_array(),
                 active_profile: vis.active_profile,
@@ -437,6 +468,7 @@ impl Config {
                 dynamic_color_fade: vis.dynamic_color_fade,
                 art_blur: vis.art_blur,
                 art_brightness: vis.art_brightness,
+                album_art_linger: vis.album_art_linger,
             },
             physics: PhysicsConfig {
                 enabled: physics.enabled,
@@ -449,7 +481,6 @@ impl Config {
                 randomize: physics.randomize,
                 spawn_debounce_ms: physics.spawn_debounce_ms,
                 spawn_on_launch: physics.spawn_on_launch,
-                bar_smoothing: physics.bar_smoothing,
                 bar_restitution: physics.bar_restitution,
                 bar_push: physics.bar_push,
                 central_gravity: physics.central_gravity,
@@ -458,6 +489,11 @@ impl Config {
                 trail_length: physics.trail_length,
                 debug_draw: physics.debug_draw,
             },
+            // Effects and the scene aren't part of these four resources;
+            // callers holding them (the editor's "Save") set `fx` / `scene`
+            // afterward.
+            fx: FxSettings::default(),
+            scene: SceneConfig::default(),
             // The editor hotkey isn't derived from the runtime settings; callers
             // that have a live key (the editor's "Save") override it afterward
             // via [`set_gui_toggle_key`](Self::set_gui_toggle_key).
@@ -552,7 +588,13 @@ impl Config {
                     let backup = path.with_extension("toml.bak");
                     let where_to = match store::rename(path, &backup) {
                         Ok(()) => format!("backed up to {}", backup.display()),
-                        Err(be) => format!("could not back it up: {be}"),
+                        Err(be) => {
+                            eprintln!(
+                                "bava: {} failed to parse ({e}); backup failed ({be}); leaving file untouched and using defaults",
+                                path.display()
+                            );
+                            return Config::default();
+                        }
                     };
                     eprintln!(
                         "bava: {} failed to parse ({e}); {where_to}, writing fresh defaults",
@@ -657,6 +699,21 @@ impl Config {
         if let Some(n) = cli.spawn_balls {
             self.physics.spawn_on_launch = n;
         }
+        if let Some(scene) = &cli.scene {
+            self.scene.name = if scene.trim().eq_ignore_ascii_case("none") {
+                String::new()
+            } else {
+                scene.trim().to_string()
+            };
+        }
+        if cli.no_fx {
+            self.fx.enabled = false;
+        }
+    }
+
+    /// Convert into the runtime [`FxSettings`] resource.
+    pub fn to_fx_settings(&self) -> FxSettings {
+        self.fx.sanitized()
     }
 
     /// Convert into the runtime [`CavaSettings`] resource.
@@ -704,6 +761,11 @@ impl Config {
             hearts: v.hearts,
             inner_radius: v.inner_radius,
             rotation: v.rotation,
+            circle_scale: if v.circle_scale.is_finite() {
+                v.circle_scale.clamp(0.1, 3.0)
+            } else {
+                1.0
+            },
             area_margin: v.area_margin,
             area_offset: Vec2::from(v.area_offset),
             // Clamp against a possibly-stale / hand-edited config so a renderer
@@ -723,6 +785,11 @@ impl Config {
             dynamic_color_fade: v.dynamic_color_fade.max(0.0),
             art_blur: v.art_blur.clamp(0.0, 1.0),
             art_brightness: v.art_brightness.max(0.0),
+            album_art_linger: if v.album_art_linger.is_finite() {
+                v.album_art_linger.clamp(0.0, 60.0)
+            } else {
+                5.0
+            },
             dynamic_fg: None,
         }
     }
@@ -741,7 +808,6 @@ impl Config {
             randomize: p.randomize,
             spawn_debounce_ms: p.spawn_debounce_ms,
             spawn_on_launch: p.spawn_on_launch,
-            bar_smoothing: p.bar_smoothing,
             bar_restitution: p.bar_restitution,
             bar_push: p.bar_push,
             // Inward pull magnitude; negative values would make the orbit
@@ -849,7 +915,7 @@ const KEY_NAMES: &[(&str, KeyCode)] = &[
 ];
 
 /// Parse a key name (case-insensitive) into a [`KeyCode`], or `None` if unknown.
-fn parse_key(name: &str) -> Option<KeyCode> {
+pub(crate) fn parse_key(name: &str) -> Option<KeyCode> {
     let n = name.trim().to_ascii_lowercase();
     KEY_NAMES.iter().find(|(k, _)| *k == n).map(|(_, kc)| *kc)
 }
@@ -890,10 +956,21 @@ mod store {
     }
 
     pub fn write(path: &Path, text: &str) -> std::io::Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+        use std::io::Write;
+
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        std::fs::create_dir_all(parent)?;
+        let mut pending = tempfile::NamedTempFile::new_in(parent)?;
+        if let Ok(metadata) = std::fs::metadata(path) {
+            pending.as_file().set_permissions(metadata.permissions())?;
         }
-        std::fs::write(path, text)
+        pending.write_all(text.as_bytes())?;
+        pending.as_file().sync_all()?;
+        pending.persist(path).map_err(|e| e.error)?;
+        Ok(())
     }
 
     pub fn rename(from: &Path, to: &Path) -> std::io::Result<()> {
@@ -1150,7 +1227,7 @@ impl From<&ImageConfig> for ImageLayer {
 
 /// Parse a `"#rgb"` / `"#rrggbb"` / `"#aarrggbb"` hex string into a [`Color`].
 /// Returns `None` on malformed input (the stop is then skipped).
-fn hex_to_color(s: &str) -> Option<Color> {
+pub(crate) fn hex_to_color(s: &str) -> Option<Color> {
     let h = s.trim().trim_start_matches('#');
     let (a, r, g, b) = match h.len() {
         // `#rgb` shorthand: each nibble is doubled (`f08` → `ff0088`).
@@ -1204,6 +1281,45 @@ fn color_to_hex(c: Color) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn failed_backup_preserves_invalid_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let original = "[vis\nmy irreplaceable settings";
+        std::fs::write(&path, original).unwrap();
+        std::fs::create_dir(path.with_extension("toml.bak")).unwrap();
+        Config::load_or_create(&path);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn malformed_config_is_backed_up_before_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[broken").unwrap();
+        Config::load_or_create(&path);
+        assert_eq!(
+            std::fs::read_to_string(path.with_extension("toml.bak")).unwrap(),
+            "[broken"
+        );
+        assert!(Config::load(&path).is_some());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn atomic_save_replaces_existing_config_and_cleans_temporary_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut cfg = Config::default();
+        cfg.write(&path).unwrap();
+        cfg.cava.bars_per_channel = 37;
+        cfg.write(&path).unwrap();
+        assert_eq!(Config::load(&path).unwrap().cava.bars_per_channel, 37);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
 
     fn srgba(c: Color) -> (u8, u8, u8, u8) {
         let s = c.to_srgba();
@@ -1296,6 +1412,20 @@ mod tests {
         assert_eq!(back.vis.mirror, cfg.vis.mirror);
         assert_eq!(back.physics.enabled, cfg.physics.enabled);
         assert_eq!(back.gui.toggle_key, cfg.gui.toggle_key);
+        assert_eq!(back.fx, cfg.fx);
+        assert_eq!(back.scene, cfg.scene);
+    }
+
+    #[test]
+    fn fx_and_scene_sections_parse_sparse_and_sanitize() {
+        let cfg: Config =
+            toml::from_str("[fx]\nshake = 99.0\nplasma = false\n[scene]\nname = \"minecraft\"\n")
+                .unwrap();
+        let fx = cfg.to_fx_settings();
+        assert!(!fx.plasma);
+        assert_eq!(fx.shake, 40.0, "clamped");
+        assert!(fx.enabled, "unspecified keys keep their defaults");
+        assert_eq!(cfg.scene.name, "minecraft");
     }
 
     #[test]
@@ -1329,6 +1459,30 @@ mod tests {
         assert_eq!(phys_back.central_gravity, physics.central_gravity);
 
         assert_eq!(cfg.vis_mode(), DrawingMode::BarsCircle);
+    }
+
+    #[test]
+    fn cover_linger_defaults_round_trips_and_rejects_nonfinite_values() {
+        let mut cfg: Config = toml::from_str("").unwrap();
+        assert_eq!(cfg.to_vis_settings().album_art_linger, 5.0);
+        cfg.vis.album_art_linger = 12.5;
+        let encoded = toml::to_string(&cfg).unwrap();
+        let decoded: Config = toml::from_str(&encoded).unwrap();
+        let vis = decoded.to_vis_settings();
+        assert_eq!(vis.album_art_linger, 12.5);
+        let saved = Config::from_settings(
+            &CavaSettings::default(),
+            &vis,
+            DrawingMode::BarsCircle,
+            &PhysicsSettings::default(),
+        );
+        assert_eq!(saved.vis.album_art_linger, 12.5);
+        for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            cfg.vis.album_art_linger = value;
+            assert_eq!(cfg.to_vis_settings().album_art_linger, 5.0);
+        }
+        cfg.vis.album_art_linger = -2.0;
+        assert_eq!(cfg.to_vis_settings().album_art_linger, 0.0);
     }
 
     #[test]

@@ -14,6 +14,8 @@
   libpulseaudio,
   pipewire,
   dbus,
+  # Scene sound effects (bevy_audio → cpal → ALSA).
+  alsa-lib,
   # Windowing / input / GPU. Bevy dlopens vulkan-loader, wayland, and
   # libxkbcommon at runtime, so they need an rpath entry, not just a link.
   vulkan-loader,
@@ -25,7 +27,7 @@
   ffmpeg,
   withFfmpeg ? false,
   src ? ../..,
-  version ? "0.4.0",
+  version ? (builtins.fromTOML (builtins.readFile (src + "/crates/bava/Cargo.toml"))).package.version,
 }:
 
 let
@@ -52,6 +54,7 @@ rustPlatform.buildRustPackage {
     libpulseaudio
     pipewire
     dbus
+    alsa-lib
     wayland
     libxkbcommon
     vulkan-loader

@@ -31,15 +31,26 @@ use bevy::window::{ExitCondition, PresentMode, WindowCloseRequested, WindowResol
 use bevy::winit::WinitPlugin;
 use bevy_capture::{Capture, CaptureBundle, CapturePlugin, RenderTargetHeadless};
 
-use crate::cava::{AudioInjector, CavaPlugin, OfflineCavaSet};
+use crate::cava::{AudioInjector, CavaPlugin, CavaSettings, OfflineCavaSet};
 use crate::config::{Cli, Config};
 use crate::gui::EditorState;
 use crate::now_playing::NowPlayingPlugin;
+use crate::scene::SceneSettings;
+use crate::scene::ready::{SceneReady, SceneReadySet};
 use crate::vis::VisPlugin;
 use crate::vis::bars::VisCamera;
 
 use audio::DecodedTrack;
 use encoder::{EncoderStatus, FfmpegEncoder};
+
+/// How long a scene's assets may take to load before the recording starts
+/// without them (the wait would otherwise never end on a load that hangs).
+const SCENE_LOAD_LIMIT: Duration = Duration::from_secs(60);
+
+/// One video frame of simulated time.
+fn frame_duration(fps: u32) -> Duration {
+    Duration::from_secs_f64(1.0 / fps as f64)
+}
 
 /// Everything the record driver needs, fixed at startup.
 #[derive(Resource)]
@@ -74,6 +85,10 @@ struct RecordState {
     /// One no-capture frame after the camera is retargeted, so pipelines and
     /// the render target exist before the first captured frame.
     warmed_up: bool,
+    /// Waiting, with the clock stopped, for the scene's assets: since when.
+    settling: Option<Instant>,
+    /// Frames spent waiting so far.
+    settle_frames: u32,
     capturing: bool,
     /// Video frames fed/captured so far.
     frame: u64,
@@ -135,7 +150,10 @@ impl Plugin for RecordPlugin {
         .add_systems(PostStartup, attach_capture)
         // Feed before analysis (`OfflineCavaSet`, PreUpdate) so this frame's
         // samples are in this frame's bars, deterministically.
-        .add_systems(PreUpdate, drive_recording.before(OfflineCavaSet));
+        .add_systems(
+            PreUpdate,
+            drive_recording.before(OfflineCavaSet).after(SceneReadySet),
+        );
 
         if !self.spec.headless {
             // Closing the preview window mid-recording is an *abort*, not a
@@ -209,11 +227,16 @@ fn attach_capture(
 
 /// The per-frame heartbeat of a recording, in `PreUpdate` so the samples it
 /// pushes are analyzed by `feed_cava` (and drawn) in the same frame:
-/// warm up → start capture + feed → … → stop → wait for ffmpeg → exit.
+/// warm up → (wait for the scene) → start capture + feed → … → stop → wait
+/// for ffmpeg → exit.
+#[allow(clippy::too_many_arguments)]
 fn drive_recording(
     mut state: ResMut<RecordState>,
     rec: Res<Recording>,
     injector: Res<AudioInjector>,
+    scene: Option<Res<SceneSettings>>,
+    scene_ready: Option<Res<SceneReady>>,
+    mut clock: ResMut<TimeUpdateStrategy>,
     mut captures: Query<&mut Capture>,
     windows: Query<&Window>,
     mut size_warned: Local<bool>,
@@ -224,6 +247,39 @@ fn drive_recording(
     };
     if !state.warmed_up {
         state.warmed_up = true;
+        // A scene's textures and models load on the IO pool and arrive on
+        // whatever frame the wall clock allows. Stop the clock until they are
+        // all in: every frame until then is a zero-length step, in which
+        // orbits, spins, animations and physics hold still — so the first
+        // captured frame doesn't depend on how long the loads took.
+        if scene.is_some_and(|s| !s.name.trim().is_empty()) {
+            *clock = TimeUpdateStrategy::ManualDuration(Duration::ZERO);
+            state.settling = Some(Instant::now());
+        }
+        return;
+    }
+
+    if let Some(since) = state.settling {
+        state.settle_frames += 1;
+        let ready = scene_ready.is_none_or(|r| r.0);
+        let late = since.elapsed() >= SCENE_LOAD_LIMIT;
+        // Also end on a fixed parity: a stopped clock stills everything
+        // time-driven, but a resting ball's trail retracts and re-seeds on
+        // alternate frames, so an odd/even wait would still show in it.
+        if !(ready || late) || state.settle_frames.is_multiple_of(2) {
+            return;
+        }
+        if !ready {
+            warn!(
+                "bava: the scene is still loading after {}s; recording anyway \
+                 (this video may not be reproducible)",
+                SCENE_LOAD_LIMIT.as_secs()
+            );
+        }
+        // The clock restarts next frame, which steps by exactly one video
+        // frame and is the first captured — as it is without a scene.
+        *clock = TimeUpdateStrategy::ManualDuration(frame_duration(rec.fps));
+        state.settling = None;
         return;
     }
 
@@ -390,6 +446,25 @@ fn pcm_target(frames: u64, rate: u32, fps: u32, total: usize) -> usize {
     ((frames * rate as u64 / fps.max(1) as u64) as usize).min(total)
 }
 
+fn analysis_settings(
+    config: &Config,
+    debug: bool,
+    rate: u32,
+    channels: usize,
+) -> Result<CavaSettings, String> {
+    let mut settings = config.to_cava_settings(debug);
+    settings.rate = rate;
+    settings.channels = channels;
+    settings.source = None;
+    settings.follow_active_sink = false;
+    settings.high_cutoff_freq = settings.high_cutoff_freq.min((rate / 2).saturating_sub(1));
+    settings
+        .plan_config()
+        .build()
+        .map_err(|e| format!("cannot analyze decoded audio: {e}"))?;
+    Ok(settings)
+}
+
 /// Decode `--input`, build the offline app, render, encode. Returns an error
 /// string for `main` to print; `Ok` means the video was written and verified
 /// by ffmpeg's exit status.
@@ -417,16 +492,11 @@ pub fn run(cli: &Cli, config: &Config) -> Result<(), String> {
         return Err(format!("--fps {fps} is out of range (1..=240)"));
     }
 
-    let track = audio::decode(&input)?;
+    let track = audio::decode(&input, cli.duration)?;
     let headless = cli
         .headless
         .unwrap_or_else(|| !std::io::stdout().is_terminal());
-    let total_pcm = cli
-        .duration
-        .filter(|s| *s > 0.0)
-        .map_or(track.pcm_frames(), |s| {
-            ((s * track.rate as f64) as usize).min(track.pcm_frames())
-        });
+    let total_pcm = track.pcm_frames();
     // The video is a whole number of frames covering all fed audio; ffmpeg
     // trims both streams to exactly this length.
     let total_frames = (total_pcm as u64 * fps as u64).div_ceil(track.rate.max(1) as u64);
@@ -448,11 +518,7 @@ pub fn run(cli: &Cli, config: &Config) -> Result<(), String> {
 
     // The cavacore plan must match the decoded stream exactly; capture-thread
     // options are meaningless offline.
-    let mut settings = config.to_cava_settings(cli.debug);
-    settings.rate = track.rate;
-    settings.channels = track.channels;
-    settings.source = None;
-    settings.follow_active_sink = false;
+    let settings = analysis_settings(config, cli.debug, track.rate, track.channels)?;
 
     let offline_track = track.track.clone();
     let spec = RecordSpec {
@@ -518,20 +584,25 @@ pub fn run(cli: &Cli, config: &Config) -> Result<(), String> {
         .insert_resource(settings)
         .insert_resource(config.to_vis_settings())
         .insert_resource(config.to_physics_settings())
+        .insert_resource(config.to_fx_settings())
+        .insert_resource(crate::scene::SceneSettings {
+            name: config.scene.name.clone(),
+            reload: 0,
+            rebase: false,
+        })
         .insert_resource(config.vis_mode())
         // No settings editor while recording, but vis/physics systems read this.
         .insert_resource(EditorState::new(false, config.gui_toggle_key()))
         // Deterministic time: exactly one video frame per update, regardless
         // of how fast the machine renders.
-        .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
-            1.0 / fps as f64,
-        )))
+        .insert_resource(TimeUpdateStrategy::ManualDuration(frame_duration(fps)))
         .add_plugins((
             CavaPlugin { offline: true },
             NowPlayingPlugin {
                 offline: Some(offline_track),
             },
             VisPlugin,
+            crate::scene::ScenePlugin { offline: true },
             RecordPlugin {
                 track: std::sync::Mutex::new(Some(track)),
                 spec,
@@ -550,6 +621,28 @@ pub fn run(cli: &Cli, config: &Config) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn low_rate_audio_gets_a_valid_analysis_band() {
+        for rate in [8_000, 16_000, 22_050, 44_100, 48_000] {
+            let settings = analysis_settings(&Config::default(), false, rate, 1).unwrap();
+            let plan = settings
+                .plan_config()
+                .build()
+                .expect("decoded audio must be analyzable");
+            assert_eq!(plan.rate(), rate);
+            assert_eq!(plan.channels(), 1);
+            assert_eq!(settings.low_cutoff_freq, 50);
+            assert_eq!(settings.high_cutoff_freq, 10_000.min(rate / 2 - 1));
+        }
+    }
+
+    #[test]
+    fn invalid_offline_analysis_fails_before_rendering() {
+        let mut config = Config::default();
+        config.cava.low_cutoff_freq = 5_000;
+        assert!(analysis_settings(&config, false, 8_000, 1).is_err());
+    }
 
     /// Feeding frame by frame must cover every sample exactly once, in order,
     /// with steady per-frame chunks — cavacore's autosens depends on it.
@@ -598,5 +691,89 @@ mod tests {
         assert_eq!(pcm_target(1_000_000, 44_100, 60, 500), 500);
         // fps is validated at the CLI, but the helper must not divide by zero.
         assert_eq!(pcm_target(10, 44_100, 0, usize::MAX), 441_000);
+    }
+
+    const FPS: u32 = 30;
+
+    /// The record driver over a bare app, asked for `scene`: a second of
+    /// silence to feed and a capture to start. These tests stop before the
+    /// capture would start (that spawns ffmpeg).
+    fn driver_app(scene: &str) -> App {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(CavaSettings {
+            channels: 1,
+            ..default()
+        });
+        app.add_plugins(CavaPlugin { offline: true });
+        app.insert_resource(Recording {
+            samples: vec![0.0; 44_100],
+            rate: 44_100,
+            channels: 1,
+            total_pcm: 44_100,
+            fps: FPS,
+            width: 64,
+            height: 64,
+            headless: true,
+            out: "unused.mp4".into(),
+            input: "unused.flac".into(),
+            video_secs: 1.0,
+        });
+        app.init_resource::<RecordState>();
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(frame_duration(FPS)));
+        app.insert_resource(SceneSettings {
+            name: scene.into(),
+            ..default()
+        });
+        app.init_resource::<SceneReady>();
+        app.world_mut().spawn(Capture::default());
+        app.add_systems(PreUpdate, drive_recording.before(OfflineCavaSet));
+        app
+    }
+
+    fn steps_one_frame(app: &App) -> bool {
+        matches!(
+            app.world().resource::<TimeUpdateStrategy>(),
+            TimeUpdateStrategy::ManualDuration(d) if *d == frame_duration(FPS)
+        )
+    }
+
+    #[test]
+    fn a_loading_scene_holds_the_start_with_the_clock_stopped() {
+        let mut app = driver_app("solar_system");
+        app.update(); // warm-up
+        let mut frames = 1;
+        for _ in 0..4 {
+            app.update();
+            frames += 1;
+            let state = app.world().resource::<RecordState>();
+            assert!(!state.capturing, "no capture while the scene loads");
+            assert_eq!((state.frame, state.cursor), (0, 0), "no audio fed");
+            assert_eq!(app.world().resource::<Time>().delta(), Duration::ZERO);
+        }
+
+        app.world_mut().resource_mut::<SceneReady>().0 = true;
+        while app.world().resource::<RecordState>().settling.is_some() {
+            assert!(frames < 8, "never resumed");
+            app.update();
+            frames += 1;
+            let state = app.world().resource::<RecordState>();
+            assert!(!state.capturing && state.frame == 0);
+            assert_eq!(app.world().resource::<Time>().delta(), Duration::ZERO);
+        }
+        // Every frame so far stood still, and there was an even number of
+        // them however long the loads took; the next steps one video frame.
+        assert_eq!(frames % 2, 0, "{frames} frozen frames");
+        assert!(steps_one_frame(&app));
+    }
+
+    #[test]
+    fn without_a_scene_the_clock_is_left_alone() {
+        let mut app = driver_app("");
+        app.update();
+        let state = app.world().resource::<RecordState>();
+        assert!(state.warmed_up && state.settling.is_none());
+        // So the next update starts capturing, exactly as before scenes.
+        assert!(steps_one_frame(&app));
     }
 }
