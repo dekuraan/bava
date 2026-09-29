@@ -79,13 +79,20 @@ impl Plugin for BarsPlugin {
             // The bar geometry is one batched mesh rebuilt from scratch each
             // frame, so a live bar-count change (editor "Apply" / profile load)
             // needs no pool reconciliation — it just draws the new count.
-            .add_systems(Update, (update_bars, update_box_lines).chain())
+            // After this frame's analysis, like the colliders built from the
+            // same values (`vis/physics.rs`), so both read the same bars.
+            .add_systems(
+                Update,
+                (update_bars, update_box_lines)
+                    .chain()
+                    .after(crate::cava::CavaAnalysisSet),
+            )
             // Keep camera post-process in sync with the live editor settings.
             .add_systems(Update, (apply_tonemapping, apply_bloom));
     }
 }
 
-/// Spawn the 2D camera and one sprite per bar. The camera is HDR with 8× MSAA
+/// Spawn the 2D camera and one sprite per bar. The camera is HDR with 4× MSAA
 /// and bloom, so the amplitude-boosted (HDR-range) colors from
 /// [`gradient_color`](crate::vis::gradient_color) glow at peaks and the gizmo /
 /// mesh edges stay smooth.
@@ -104,7 +111,13 @@ fn setup(
         // the HUD would silently vanish from the captured video.
         bevy::ui::IsDefaultUiCamera,
         Hdr,
-        Msaa::Sample8,
+        // 4×, not 8×: WebGPU only guarantees sample counts 1 and 4 for the
+        // HDR color (Rgba16Float) and depth formats, and adapters that stop
+        // there (llvmpipe, some mobile/integrated GPUs) fail to create the
+        // 8× target outright. Strokes and bars carry their own feathered edge,
+        // so 4× loses nothing visible. A scene's 3D camera copies this value
+        // (cameras sharing a target must agree on it).
+        Msaa::Sample4,
         // Map the HDR (amplitude-boosted) colors to the display per [`VisSettings::tonemapping`].
         Tonemapping::from(vis.tonemapping),
         Bloom {

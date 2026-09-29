@@ -63,7 +63,25 @@ sudo snap install bava && sudo snap connect bava:audio-record
   each have box and circle variants; Splitter is box-only. Customize colors,
   mirror and direction settings, and HDR bloom.
 - Spawn physics balls that collide with the spectrum and leave color trails.
-  Physics uses avian2d.
+  Physics uses avian2d. In the circle modes, balls orbit the pulsing blob.
+- Effects keyed to a beat detector:
+  - A plasma shader fills the blob, with a halo and corona that hug its rim.
+  - A starfield and nebula sit behind everything, and the balls are glossy.
+  - Flares shed from the rim, sparks fly where balls are struck, and a
+    shockwave ring leaves the blob on every kick.
+  - The camera punches and shakes on the beat, with chromatic aberration and
+    a vignette.
+
+  Tune it all in the editor's Effects section or `[fx]`, or turn it off with
+  `--no-fx`.
+- Load scenes with `--scene NAME` or cycle them with **N**. A scene is a
+  `scene.toml` plus its own shaders, textures, glTF models, and sounds; it
+  can re-skin the blob, add 2D or 3D content driven by the music, and
+  override any setting. Two are built in: `solar_system` (the blob is the sun;
+  planets orbit on tilted paths) and `minecraft` (a voxel island that grows
+  from the spectrum, with dancing characters). Write your own in
+  `~/.config/bava/scenes/`; it hot-reloads when you save. See
+  [docs/SCENES.md](docs/SCENES.md).
 - Press `p` to open the settings editor. Visual changes apply immediately;
   DSP changes require Apply. The editor key is configurable.
 - Show the track title, artist, and cover art, with the cover as a dimmed
@@ -107,6 +125,7 @@ See [docs/WEB.md](docs/WEB.md).
 bava --input song.mp3 --out musicvideo.mp4          # 1080p60 by default
 bava --input song.flac --out out.mp4 --width 3840 --height 2160 --fps 60
 bava --input song.mp3 --out test.mp4 --duration 10  # quick 10-second preview
+bava --input song.flac --out blocks.mp4 --scene minecraft   # render a scene
 ```
 
 Requires `ffmpeg` on `PATH` to encode the rendered frames and audio. Supported
@@ -193,12 +212,15 @@ crates/
     src/cava/capture/  # AudioCapture trait; backends: pipewire.rs / pulse.rs / wasapi.rs / coreaudio.rs / web.rs
     src/now_playing/   # NowPlaying + AlbumArt resources; backends: linux / windows / macos / web
     src/vis/           # VisPlugin: all visualizer modes, HUD, physics, stroke mesh helpers
+    src/vis/fx/        # effects: FxMaterial + WGSL shaders, particles, beat camera
+    src/scene/         # scenes: scene.toml model, loading, spawning, animation, voxel terrain, sounds
     src/gui/           # in-app settings editor (bevy_egui)
     src/record/        # offline --input/--out rendering: decode, drive, ffmpeg encoder
     src/config.rs      # config.toml ↔ runtime *Settings resources; CLI via clap
     src/profiling.rs   # puffin bridge, behind --features profile
     web/               # the browser page: index.html, bava.js, audio-worklet.js, style.css
-docs/                  # WEB.md and the generated screenshot
+assets/scenes/         # built-in scenes (embedded into the binary at build time)
+docs/                  # WEB.md, SCENES.md and the generated screenshot
 packaging/             # icons, AUR, AppImage, Nix, web assets; see packaging/README.md
 flatpak/  snap/        # Flathub manifest and snapcraft.yaml
 ```
@@ -210,6 +232,7 @@ flatpak/  snap/        # Flathub manifest and snapcraft.yaml
 | Space | Cycle visualizer mode |
 | p | Toggle settings editor (configurable via `[gui] toggle_key`) |
 | F3 | Collider debug overlay + FPS and live ball count |
+| N | Cycle scenes (none → built-ins → your scenes) |
 | Left-click | Spawn one physics ball |
 | Right-click (hold) | Spray a burst of balls |
 
@@ -230,7 +253,11 @@ fn my_vis(cava: Res<bava::cava::Cava>) {
 ```
 
 To add a visualizer, create its entities and a system that reads `Cava`.
-See the existing modes in `vis/` for examples.
+See the existing modes in `vis/` for examples. For beat-synced effects, read
+`bava::vis::features::AudioFeatures` (bands, `beat`, a decaying `beat_pulse`).
+
+Most new looks don't need Rust at all: a [scene](docs/SCENES.md) can add
+meshes, models, textures, sounds, and WGSL shaders that receive the live audio.
 
 ## License
 
@@ -240,3 +267,8 @@ bava is available under the [MIT License](LICENSE-MIT) or
 The `cavacore-rs` crate is a pure-Rust reimplementation of the analysis engine
 from [karlstav/cava](https://github.com/karlstav/cava), under the MIT license.
 It uses [`realfft`](https://crates.io/crates/realfft) and does not link C or FFTW.
+
+The built-in scenes bundle CC0 art and audio (an original block-texture set,
+Kenney's characters and sound effects) and NASA public-domain planet maps; no
+Mojang assets are used. See `assets/scenes/*/ATTRIBUTION.md` and
+[NOTICE](NOTICE).

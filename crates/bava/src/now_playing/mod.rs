@@ -118,6 +118,11 @@ pub struct NowPlayingPlugin {
     pub offline: Option<OfflineTrack>,
 }
 
+/// [`apply_now_playing_updates`] (PreUpdate): this frame's metadata and art
+/// land here.
+#[derive(bevy::ecs::schedule::SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct NowPlayingSet;
+
 impl Plugin for NowPlayingPlugin {
     fn build(&self, app: &mut App) {
         let (tx, rx) = crossbeam_channel::unbounded();
@@ -127,7 +132,7 @@ impl Plugin for NowPlayingPlugin {
             // PreUpdate, so metadata/art land before any Update system reads
             // them — in offline rendering that makes the HUD and dynamic
             // palette appear at a deterministic video frame (the first one).
-            .add_systems(PreUpdate, apply_now_playing_updates);
+            .add_systems(PreUpdate, apply_now_playing_updates.in_set(NowPlayingSet));
 
         if let Some(track) = &self.offline {
             // Offline rendering: decode the cover and queue everything *now*,
