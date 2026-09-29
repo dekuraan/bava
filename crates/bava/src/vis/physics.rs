@@ -292,7 +292,10 @@ impl Plugin for PhysicsPlugin {
                     toggle_physics_debug,
                     sync_physics_debug,
                     update_debug_overlay,
-                    spawn_initial_balls,
+                    // After a `--scene` has applied its `[physics]` overrides,
+                    // so the launch balls follow them (a scene's `randomize =
+                    // false` keeps a recording deterministic).
+                    spawn_initial_balls.after(crate::scene::SceneApplySet),
                 ),
             )
             // Ball and trail geometry is built from the *simulated* transforms,

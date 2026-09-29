@@ -492,7 +492,15 @@ impl Plugin for VisPlugin {
         app.init_resource::<VisSettings>()
             .init_resource::<DrawingMode>()
             .init_resource::<AlbumPalette>()
-            .add_systems(Update, (cycle_mode, animate_album_colors))
+            .add_systems(Update, cycle_mode)
+            // PreUpdate, right after the art lands: every Update reader of
+            // `VisSettings` (renderers, effect materials, ball looks) then sees
+            // this frame's palette. Unordered in Update, some would draw last
+            // frame's and some this frame's, differently from run to run.
+            .add_systems(
+                PreUpdate,
+                animate_album_colors.after(crate::now_playing::NowPlayingSet),
+            )
             .add_plugins((
                 // First: registers the effect material the renderers draw with.
                 fx::FxPlugin,

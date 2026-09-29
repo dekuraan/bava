@@ -167,7 +167,7 @@ live audio uniform (see below). Without a shader you get a plain material:
 | `atlas_tile`, `atlas_columns`, `atlas_rows` | Cubes: show tile N (row-major) of a texture atlas on every face |
 | `emissive`, `emissive_strength`, `emissive_texture` | 3D glow (bloom picks it up) |
 | `unlit`, `roughness`, `metallic`, `double_sided` | 3D surface |
-| `blend` | `alpha`, `additive`, `opaque`, or `mask` (cutout) |
+| `blend` | `alpha`, `additive`, `opaque`, or `mask` (cutout). In 3D, a shader material with `alpha` blend and `alpha = 1` still blends but also writes depth, so a solid shape hides its own far side |
 | `shader`, `params` | Effect shader and up to four `[x, y, z, w]` parameters |
 
 ### Motion
@@ -181,7 +181,9 @@ live audio uniform (see below). Without a shader you get a plain material:
   passes behind the sun. Satellites follow their parent's near/far state.
   `path_width` / `path_color` draw the orbit. In 3D, `tilt = [x°, z°]` tilts
   the orbit plane. With an orbit, `position` is an offset from the orbiting
-  point.
+  point, except that in 2D its `z` stays the object's own draw layer: a
+  satellite follows only its parent's x/y. So Saturn's rings at z 1.9 and 2.2
+  sit behind and in front of Saturn at 2.0.
 - **`spin`** rotates at `speed` degrees per second around `axis`.
 
 ### Audio reactions

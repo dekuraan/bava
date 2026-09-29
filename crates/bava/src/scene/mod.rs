@@ -193,7 +193,7 @@ impl Plugin for ScenePlugin {
             .add_systems(
                 Update,
                 (
-                    apply_scene,
+                    apply_scene.in_set(SceneApplySet),
                     cycle_scene,
                     (
                         animate::animate_objects,
@@ -210,6 +210,12 @@ impl Plugin for ScenePlugin {
             );
     }
 }
+
+/// [`apply_scene`]: the frame's scene load / unload. Systems that must see a
+/// scene's `[config]` overrides on the frame it loads (the launch balls) run
+/// after it.
+#[derive(bevy::ecs::schedule::SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SceneApplySet;
 
 /// **N** steps to the next scene (off → each built-in / user scene → off),
 /// unless the editor has the keyboard or is bound to N itself.
