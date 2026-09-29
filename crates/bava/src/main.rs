@@ -13,6 +13,7 @@ mod config;
 mod gui;
 mod now_playing;
 mod profiling;
+mod scene;
 // Offline video rendering shells out to ffmpeg and decodes files off a
 // filesystem — neither exists in the browser.
 #[cfg(not(target_arch = "wasm32"))]
@@ -50,6 +51,17 @@ fn main() {
     }
     config.apply_cli(&cli);
 
+    if cli.list_scenes {
+        for entry in scene::list_scenes() {
+            let about = scene::describe(&entry).unwrap_or_default();
+            println!("{:<22} {about}", entry.label());
+        }
+        if let Some(dir) = scene::files::user_scenes_dir() {
+            println!("\nuser scenes: {}", dir.display());
+        }
+        return;
+    }
+
     if cli.print_config {
         match toml::to_string_pretty(&config) {
             Ok(s) => println!("# resolved config (from {})\n\n{s}", path.display()),
@@ -72,6 +84,7 @@ fn main() {
     let settings = config.to_cava_settings(cli.debug);
     let vis_settings = config.to_vis_settings();
     let physics_settings = config.to_physics_settings();
+    let fx_settings = config.to_fx_settings();
     let vis_mode = config.vis_mode();
 
     let mut app = App::new();
@@ -109,6 +122,12 @@ fn main() {
         .insert_resource(settings)
         .insert_resource(vis_settings)
         .insert_resource(physics_settings)
+        .insert_resource(fx_settings)
+        .insert_resource(scene::SceneSettings {
+            name: config.scene.name.clone(),
+            reload: 0,
+            rebase: false,
+        })
         .insert_resource(vis_mode)
         // Where the editor saves/reloads, and whether it starts open.
         .insert_resource(ConfigHandle { path })
@@ -117,6 +136,7 @@ fn main() {
             CavaPlugin::default(),
             NowPlayingPlugin::default(),
             VisPlugin,
+            scene::ScenePlugin { offline: false },
             GuiPlugin,
         ));
 

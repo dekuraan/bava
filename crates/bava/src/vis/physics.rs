@@ -36,10 +36,11 @@ use avian2d::prelude::*;
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::prelude::*;
 
-use crate::cava::Cava;
+use crate::cava::{Cava, CavaAnalysisSet};
 use crate::gui::EditorState;
 use crate::vis::bars::{LEVEL_STEPS, Layout, MAX_HEIGHT_FRAC, column_geom, mirror_values};
 use crate::vis::circle::blob_ring;
+use crate::vis::fx::BallLooks;
 use crate::vis::stroke::{MeshBatch, STROKE_FEATHER, empty_stroke_mesh, stroke_material};
 use crate::vis::{
     DrawingMode, MirrorMode, VisFamily, VisSettings, VisShape, sample_gradient, spread_monstercat,
@@ -129,13 +130,14 @@ impl Default for PhysicsSettings {
 
 /// A spawned ball. `id` is a monotonic spawn counter used to evict the oldest;
 /// `radius` is cached for the surface-push proximity test; `tint` is the ball's
-/// fixed 0..1 position in the active palette, re-sampled by [`retint_balls`] when
-/// the dynamic album colors change so the ball follows the fade.
+/// fixed 0..1 position in the active palette, which picks its shared palette
+/// material ([`BallLooks`]) — recolored as a bank when the dynamic album colors
+/// change, so the ball follows the fade.
 #[derive(Component)]
-struct Ball {
+pub(crate) struct Ball {
     id: u64,
-    radius: f32,
-    tint: f32,
+    pub(crate) radius: f32,
+    pub(crate) tint: f32,
 }
 
 /// Monotonic counter handing out [`Ball::id`]s.
@@ -259,8 +261,11 @@ impl Plugin for PhysicsPlugin {
             .add_systems(
                 Update,
                 (
-                    // Tear down on a mode switch before anything reads the caches.
-                    on_mode_change,
+                    // Tear down on a mode switch before anything reads the caches
+                    // — after a scene has set its mode, so the scene's first
+                    // frame doesn't read as a switch (and despawn the launch
+                    // balls queued below).
+                    on_mode_change.after(crate::scene::SceneApplySet),
                     spawn_ball_on_click,
                     enforce_ball_cap,
                     despawn_escaped_balls,
@@ -270,20 +275,32 @@ impl Plugin for PhysicsPlugin {
                     // only after `on_mode_change` has zeroed the caches on a
                     // switch frame — otherwise a reader could see a stale rate
                     // delta and fling balls (the documented invariant above).
-                    (update_surface, push_balls).chain().after(on_mode_change),
+                    // After `CavaAnalysisSet` too, so every collider is built
+                    // from this frame's bars — the analysis the renderers
+                    // (`update_blob_shape` / `update_ring`) draw from.
+                    (update_surface, push_balls)
+                        .chain()
+                        .after(on_mode_change)
+                        .after(CavaAnalysisSet),
                     (reconcile_columns, update_columns, push_columns)
                         .chain()
-                        .after(on_mode_change),
+                        .after(on_mode_change)
+                        .after(CavaAnalysisSet),
                     (update_planet, planet_forces, planet_gravity)
                         .chain()
-                        .after(on_mode_change),
+                        .after(on_mode_change)
+                        .after(CavaAnalysisSet),
                     reconcile_trails,
                     reconcile_ccd,
-                    retint_balls,
                     toggle_physics_debug,
                     sync_physics_debug,
                     update_debug_overlay,
-                    spawn_initial_balls,
+                    // After a `--scene` has applied its `[physics]` overrides,
+                    // so the launch balls follow them (a scene's `randomize =
+                    // false` keeps a recording deterministic).
+                    spawn_initial_balls
+                        .after(crate::scene::SceneApplySet)
+                        .after(on_mode_change),
                 ),
             )
             // Ball and trail geometry is built from the *simulated* transforms,
@@ -291,13 +308,22 @@ impl Plugin for PhysicsPlugin {
             // would render every ball and trail head one frame stale.
             .add_systems(
                 PostUpdate,
-                (recover_planet_penetration, update_trails)
+                (
+                    recover_planet_penetration.in_set(PlanetRecoverySet),
+                    update_trails,
+                )
                     .chain()
                     .after(PhysicsSystems::Writeback)
                     .before(bevy::transform::TransformSystems::Propagate),
             );
     }
 }
+
+/// [`recover_planet_penetration`], the last writer of ball transforms and
+/// velocities each frame. Systems that read those to react to the physics
+/// (the fx impact sparks) order themselves after it.
+#[derive(bevy::ecs::schedule::SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct PlanetRecoverySet;
 
 /// Drop `[physics] spawn_on_launch` (or `--spawn-balls N`) balls in a grid
 /// across the drawing area, once, so bava can start with the playground already
@@ -312,11 +338,10 @@ fn spawn_initial_balls(
     mut commands: Commands,
     mut done: Local<bool>,
     settings: Res<PhysicsSettings>,
-    vis: Res<VisSettings>,
     mode: Res<DrawingMode>,
     windows: Query<&Window>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<ColorMaterial>>,
+    looks: Res<BallLooks>,
     mut counter: ResMut<BallCounter>,
 ) {
     if *done {
@@ -344,9 +369,8 @@ fn spawn_initial_balls(
         spawn_one_ball(
             &mut commands,
             &mut meshes,
-            &mut materials,
+            &looks,
             &settings,
-            &vis,
             &mut counter,
             *mode,
             world,
@@ -566,7 +590,7 @@ fn spawn_ball_on_click(
     editor: Res<EditorState>,
     mut counter: ResMut<BallCounter>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<ColorMaterial>>,
+    looks: Res<BallLooks>,
     windows: Query<&Window>,
     cameras: Query<(&Camera, &GlobalTransform), With<crate::vis::bars::VisCamera>>,
     time: Res<Time>,
@@ -615,9 +639,8 @@ fn spawn_ball_on_click(
         spawn_one_ball(
             &mut commands,
             &mut meshes,
-            &mut materials,
+            &looks,
             &settings,
-            &vis,
             &mut counter,
             *mode,
             at,
@@ -631,9 +654,8 @@ fn spawn_ball_on_click(
 fn spawn_one_ball(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<ColorMaterial>,
+    looks: &BallLooks,
     settings: &PhysicsSettings,
-    vis: &VisSettings,
     counter: &mut BallCounter,
     mode: DrawingMode,
     world: Vec2,
@@ -656,9 +678,6 @@ fn spawn_one_ball(
         )
     };
 
-    // Sample the full active palette so balls span every dynamic color, not just
-    // the two gradient ends.
-    let color = sample_gradient(&vis.fg_stops(), tint, vis.glow_gain);
     let id = counter.0;
     counter.0 += 1;
 
@@ -692,7 +711,10 @@ fn spawn_one_ball(
             // measured *slower* (2000 balls: 39 ms/frame → 52 ms/frame). See the
             // batching note in AGENTS.md.
             Mesh2d(meshes.add(Circle::new(radius))),
-            MeshMaterial2d(materials.add(color)),
+            // One of the shared palette-bucket materials (see [`BallLooks`]):
+            // the ball's `tint` picks where in the active palette it sits, so
+            // balls span every dynamic color, not just the two gradient ends.
+            MeshMaterial2d(looks.material(tint)),
             Transform::from_translation(world.extend(1.0)),
             Ball { id, radius, tint },
         ))
@@ -751,15 +773,19 @@ fn reconcile_ccd(
     if !settings.is_changed() {
         return;
     }
+    // `try_*`: the same settings change can be `enabled = false`, which makes
+    // `despawn_escaped_balls` despawn every ball this very frame — a plain
+    // insert into a ball whose despawn was queued first is a command error
+    // (a panic under Bevy's default handler).
     match ball_ccd(&settings) {
         Some(ccd) => {
             for ball in &balls {
-                commands.entity(ball).insert(ccd);
+                commands.entity(ball).try_insert(ccd);
             }
         }
         None => {
             for ball in &balls {
-                commands.entity(ball).remove::<SweptCcd>();
+                commands.entity(ball).try_remove::<SweptCcd>();
             }
         }
     }
@@ -1230,7 +1256,7 @@ fn update_planet(
     let Some(window) = windows.iter().next() else {
         return;
     };
-    let extent = window.width().min(window.height());
+    let extent = vis.circle_extent(window.width(), window.height());
     let mut values = cava.mono();
     if values.is_empty() {
         return;
@@ -1517,30 +1543,6 @@ fn update_trails(
 
     if let Some(mut mesh) = meshes.get_mut(&handles.mesh) {
         batch.write(&mut mesh);
-    }
-}
-
-/// Re-sample each live ball's material color from the active palette whenever
-/// [`VisSettings`] changes, so balls already on screen follow the dynamic
-/// album-color fade (and any live gradient edit) instead of staying frozen at
-/// their spawn-time color. Each ball keeps its fixed `tint` (its position in the
-/// palette), so the relative spread across colors is preserved.
-///
-/// Trails need no equivalent: [`update_trails`] resamples from `Ball::tint` as it
-/// builds the batched mesh, which is free.
-fn retint_balls(
-    vis: Res<VisSettings>,
-    balls: Query<(&Ball, &MeshMaterial2d<ColorMaterial>)>,
-    mut materials: ResMut<Assets<ColorMaterial>>,
-) {
-    if !vis.is_changed() {
-        return;
-    }
-    let stops = vis.fg_stops();
-    for (ball, mat) in &balls {
-        if let Some(mut material) = materials.get_mut(&mat.0) {
-            material.color = sample_gradient(&stops, ball.tint, vis.glow_gain);
-        }
     }
 }
 
@@ -2055,6 +2057,30 @@ mod tests {
             ..PhysicsSettings::default()
         });
         assert!(off.is_none());
+    }
+
+    #[test]
+    fn l2_disabling_physics_with_ccd_on_does_not_touch_despawned_balls() {
+        // One settings change both despawns every ball (`enabled = false`) and
+        // re-applies CCD to every ball; the CCD insert must not error on the
+        // balls whose despawn was queued first (it used to panic).
+        let mut app = bare_app();
+        app.insert_resource(PhysicsSettings::default());
+        app.add_systems(Update, (despawn_escaped_balls, reconcile_ccd).chain());
+        for id in 0..3 {
+            app.world_mut().spawn((
+                Ball {
+                    id,
+                    radius: 8.0,
+                    tint: 0.5,
+                },
+                Transform::default(),
+            ));
+        }
+        app.update();
+        app.world_mut().resource_mut::<PhysicsSettings>().enabled = false;
+        app.update();
+        assert_eq!(ball_count(&mut app), 0);
     }
 
     #[test]

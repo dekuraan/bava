@@ -38,3 +38,18 @@ and is licensed under the MIT License:
 `cavacore-rs` reimplements cavacore's `cava_init`/`cava_execute` algorithm in
 safe Rust (no C code, no FFI, no code copied verbatim) and is distributed as
 part of bava under MIT OR Apache-2.0, consistent with the MIT license above.
+
+--------------------------------------------------------------------------------
+
+The built-in scenes under assets/scenes/ (embedded into the bava binary) ship
+third-party art and audio, all dedicated to the public domain:
+
+  - Block textures: "16x16 Block Texture Set" by ARoachIFoundOnMyPillow
+    (OpenGameArt), CC0 1.0, some tiles recolored within its palette.
+  - Character models and sound effects: Kenney (kenney.nl) — Blocky
+    Characters, Impact Sounds, Interface Sounds, Sci-fi Sounds — CC0 1.0.
+  - Earth and Moon surface maps: NASA (Blue Marble Next Generation; SVS CGI
+    Moon Kit), public domain.
+
+No Mojang/Minecraft assets are used. Per-file sources, authors and changes are
+listed in assets/scenes/*/ATTRIBUTION.md.

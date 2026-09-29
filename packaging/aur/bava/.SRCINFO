@@ -13,6 +13,7 @@ pkgbase = bava
 	depends = gcc-libs
 	depends = glibc
 	depends = libpulse
+	depends = alsa-lib
 	depends = libpipewire
 	depends = dbus
 	depends = libxkbcommon

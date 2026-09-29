@@ -10,6 +10,7 @@ depends=(
     'gcc-libs'
     'glibc'
     'libpulse'
+    'alsa-lib'   # scene sound effects (bevy_audio → cpal)
     'libpipewire'
     'dbus'
     'libxkbcommon'

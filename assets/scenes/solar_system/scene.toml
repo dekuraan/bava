@@ -1,0 +1,181 @@
+# Solar System — bava's blob is the sun.
+#
+# Planets on tilted (elliptical) orbits pass behind the sun on the far side,
+# shaded by a sun-lit sphere shader and spinning; Earth and the Moon wear NASA
+# surface maps. The asteroid belt is a 96-rock spectrum. Physics balls are
+# comets: click to launch one (and hear it), and they bounce off the planets.
+#
+# Every number here is in a 1000-unit canvas across the window's shorter side,
+# so the system scales with the window. Colors are "#rrggbb" or "#aarrggbb"
+# (alpha first, as in config.toml). See docs/SCENES.md.
+
+[scene]
+name = "Solar System"
+description = "The blob is the sun; planets orbit on tilted paths and pulse with their bands"
+dimension = "2d"
+canvas = 1000.0
+clear_color = "#020309"
+
+[config.vis]
+mode = "wave_circle"
+inner_radius = 0.42
+circle_scale = 0.62
+line_thickness = 3.0
+filling = true
+monstercat = 1.3
+dynamic_colors = false
+active_profile = 0
+bloom_intensity = 0.24
+glow_gain = 1.4
+
+[[config.vis.profile]]
+name = "Sun"
+theme = "dark"
+fg = ["#b81d00", "#ff6a00", "#ffb52e", "#fff1c4"]
+bg = ["#020309"]
+
+[config.physics]
+radius = 6.0
+randomize = false
+trails = true
+trail_length = 22
+central_gravity = 1500.0
+
+[config.fx]
+halo = 1.3
+corona = 1.7
+flares = 1.6
+stars = 0.55
+nebula = 0.45
+blob_opacity = 1.0
+
+[shaders]
+sun = "shaders/sun.wgsl"
+planet = "shaders/planet.wgsl"
+rings = "shaders/rings.wgsl"
+
+[blob]
+fill_shader = "sun"
+fill_params = [[5.0, 0.8, 1.0, 0.0]]
+
+[sounds.launch]
+path = "sounds/blip.ogg"
+trigger = "spawn"
+volume = 0.35
+jitter = 0.15
+min_interval = 0.08
+
+[sounds.hit]
+path = "sounds/whoosh.ogg"
+trigger = "impact"
+volume = 0.18
+jitter = 0.2
+min_interval = 0.35
+
+# ---------------------------------------------------------------- planets --
+# Each planet: a circle whose disc fills 82% of the mesh (the rest is its
+# atmosphere glow), an elliptical orbit (ry = 0.42 rx: the system is seen
+# from above at an angle), and a band it breathes with.
+
+[[object]]
+name = "mercury"
+mesh = "circle"
+size = [15.0]
+position = [0.0, 0.0, 2.0]
+material = { shader = "planet", params = [[0.62, 0.58, 0.55, 0.0], [0.0, 0.0, 0.0, 0.0], [0.9, 0.0, 0.25, 0.0], [0.8, 0.8, 0.8, 0.15]] }
+orbit = { radius = [230.0, 97.0], period = 7.0, phase = 0.1, behind_z = -7.5, perspective = 0.18, speed_band = "energy", speed_react = 0.8, path_width = 1.2, path_color = "#1cffffff" }
+collider = { radius = 12.3 }
+react = [{ property = "scale", band = "treble", amount = 0.35 }]
+
+[[object]]
+name = "venus"
+mesh = "circle"
+size = [22.0]
+position = [0.0, 0.0, 2.0]
+material = { shader = "planet", params = [[0.93, 0.78, 0.5, 0.0], [0.0, 0.0, 0.0, 0.0], [0.0, 0.8, 0.1, 0.0], [1.0, 0.85, 0.55, 0.6]] }
+orbit = { radius = [300.0, 126.0], period = 10.0, phase = 0.55, behind_z = -7.5, perspective = 0.18, speed_band = "energy", speed_react = 0.8, path_width = 1.2, path_color = "#1cffffff" }
+collider = { radius = 18.0 }
+react = [{ property = "scale", band = "mid", amount = 0.25 }]
+
+[[object]]
+name = "earth"
+mesh = "circle"
+size = [26.0]
+position = [0.0, 0.0, 2.0]
+material = { shader = "planet", texture = "textures/earth.jpg", params = [[0.2, 0.4, 0.8, 0.0], [0.0, 0.0, 0.0, 0.0], [0.0, 0.55, 0.35, 1.0], [0.35, 0.6, 1.0, 0.9]] }
+orbit = { radius = [380.0, 160.0], period = 14.0, phase = 0.3, behind_z = -7.5, perspective = 0.18, speed_band = "energy", speed_react = 0.8, path_width = 1.2, path_color = "#1cffffff" }
+collider = { radius = 21.0 }
+react = [
+    { property = "scale", band = "mid", amount = 0.2 },
+    { property = "param.3.w", band = "beat", amount = 1.2, smooth = 0.2 },
+]
+
+[[object]]
+name = "moon"
+mesh = "circle"
+size = [9.0]
+position = [0.0, 0.0, 2.1]
+material = { shader = "planet", texture = "textures/moon.jpg", params = [[0.7, 0.7, 0.7, 0.0], [0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.2, 1.0], [0.0, 0.0, 0.0, 0.0]] }
+orbit = { parent = "earth", radius = [44.0, 20.0], period = 3.0, behind_z = -7.4, perspective = 0.1 }
+collider = { radius = 7.4 }
+
+[[object]]
+name = "mars"
+mesh = "circle"
+size = [19.0]
+position = [0.0, 0.0, 2.0]
+material = { shader = "planet", params = [[0.78, 0.36, 0.2, 0.0], [0.0, 0.0, 0.0, 0.0], [0.5, 0.1, 0.3, 0.0], [1.0, 0.55, 0.4, 0.35]] }
+orbit = { radius = [460.0, 193.0], period = 18.0, phase = 0.8, behind_z = -7.5, perspective = 0.18, speed_band = "energy", speed_react = 0.8, path_width = 1.2, path_color = "#1cffffff" }
+collider = { radius = 15.6 }
+react = [{ property = "scale", band = "bass", amount = 0.3 }]
+
+[[object]]
+name = "jupiter"
+mesh = "circle"
+size = [58.0]
+position = [0.0, 0.0, 2.0]
+material = { shader = "planet", params = [[0.86, 0.72, 0.55, 12.0], [0.62, 0.38, 0.24, 0.75], [0.0, 0.0, 0.12, 0.0], [1.0, 0.85, 0.6, 0.35]] }
+orbit = { radius = [650.0, 273.0], period = 28.0, phase = 0.45, behind_z = -7.5, perspective = 0.18, speed_band = "energy", speed_react = 0.8, path_width = 1.2, path_color = "#16ffffff" }
+collider = { radius = 47.5 }
+react = [
+    { property = "scale", band = "bass", amount = 0.18 },
+    { property = "brightness", band = "beat", amount = 0.5, smooth = 0.15 },
+]
+
+[[object]]
+name = "saturn"
+mesh = "circle"
+size = [46.0]
+position = [0.0, 0.0, 2.0]
+material = { shader = "planet", params = [[0.92, 0.84, 0.62, 9.0], [0.75, 0.62, 0.42, 0.5], [0.0, 0.0, 0.1, 0.0], [1.0, 0.9, 0.7, 0.3]] }
+orbit = { radius = [790.0, 332.0], period = 36.0, phase = 0.95, behind_z = -7.5, perspective = 0.18, speed_band = "energy", speed_react = 0.8, path_width = 1.2, path_color = "#12ffffff" }
+collider = { radius = 37.7 }
+react = [{ property = "scale", band = "mid", amount = 0.2 }]
+
+# Saturn's rings: the far half behind the planet, the near half in front.
+[[object]]
+mesh = "ring"
+size = [70.0, 44.0]
+position = [0.0, 0.0, 1.9]
+scale = [1.0, 0.3, 1.0]
+material = { shader = "rings", color = "#e8d6a8", params = [[0.55, 0.45, 0.32, 0.0], [1.0, 0.7, 0.0, 0.0]] }
+orbit = { parent = "saturn", radius = 0.0, behind_z = -7.6 }
+
+[[object]]
+mesh = "ring"
+size = [70.0, 44.0]
+position = [0.0, 0.0, 2.2]
+scale = [1.0, 0.3, 1.0]
+material = { shader = "rings", color = "#e8d6a8", params = [[0.55, 0.45, 0.32, 0.0], [-1.0, 0.7, 0.0, 0.0]] }
+orbit = { parent = "saturn", radius = 0.0, behind_z = -7.4 }
+
+# ----------------------------------------------------------- asteroid belt --
+# 96 rocks between Mars and Jupiter; each swells with its own spectrum bar.
+[[ring]]
+count = 96
+radius = [548.0, 230.0]
+spin = 4.0
+behind_z = -7.6
+perspective = 0.18
+face_out = false
+template = { mesh = "circle", size = [3.2], position = [0.0, 0.0, 1.5], material = { color = "#b9a48a" }, react = [{ property = "scale", band = "bar", amount = 1.6, smooth = 0.12 }] }

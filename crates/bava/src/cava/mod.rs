@@ -24,7 +24,7 @@ use cavacore_rs::{CavaConfig, CavaPlan};
 
 /// Tunables for the cavacore pipeline. Insert your own before adding
 /// [`CavaPlugin`] to override the defaults.
-#[derive(Resource, Clone, Debug)]
+#[derive(Resource, Clone, Debug, PartialEq)]
 pub struct CavaSettings {
     /// Bars per channel.
     pub bars_per_channel: usize,
@@ -232,6 +232,119 @@ struct CavaState {
 #[derive(bevy::ecs::schedule::SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct OfflineCavaSet;
 
+/// Signal levels measured on the raw samples (before cavacore's smoothing),
+/// refreshed by `feed_cava` whenever new audio arrives.
+///
+/// cavacore's bars are built to *look* good: integrated, gravity-smoothed and
+/// autosens-scaled into `0..1`, so on a loud mix the low bars sit pinned near
+/// 1.0 between kicks and an onset barely shows. Beat detection needs the
+/// unsmoothed signal, so this meters the incoming audio directly.
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq)]
+pub struct AudioLevels {
+    /// Running mean square of the low band (≲ 150 Hz, the kick and bass) as of
+    /// the newest sample, averaged over the last ~25 ms of audio.
+    pub low: f32,
+    /// The highest `low` reached over the samples this frame brought, and
+    /// its mean over them. The beat detector fires on the peak and follows
+    /// the mean, so a kick's peak counts wherever the frame boundaries fell
+    /// and the bass under it reads at its average rather than at whatever
+    /// phase of its ripple a boundary caught: with coarse frames (30 fps, a
+    /// 1024-sample PipeWire quantum) the end-of-block value alone lost most of
+    /// a moderate kick's 3 dB.
+    pub low_peak: f32,
+    pub low_mean: f32,
+    /// Running mean square of the full-band mono signal, over the same window.
+    pub full: f32,
+    /// True when this frame brought new samples (the values are fresh).
+    pub fresh: bool,
+}
+
+/// Corner frequency of the low-band meter, Hz.
+const LOW_BAND_HZ: f64 = 150.0;
+
+/// Time constant of the meter's mean-square envelope, seconds.
+///
+/// The published level is this running average as of the newest sample, so it
+/// depends only on the audio, never on how many samples a frame happened to
+/// drain. A per-frame *block* average can't do that: once a frame is shorter
+/// than a period of the bass note (≈ 7 ms at 144 Hz), a steady 40 Hz sine's
+/// block mean square swings with its phase, and the beat detector's valley
+/// follower reads every swing as an onset. 25 ms smooths a 20 Hz tone's ripple
+/// to under 1.5 dB (half the trigger margin) and still follows a kick's attack.
+const LEVEL_TAU: f64 = 0.025;
+
+/// Two cascaded one-pole low-pass filters (12 dB/oct) metering the low band,
+/// then per-sample mean-square envelopes of it and of the full-band signal.
+#[derive(Default)]
+struct LowBandMeter {
+    a: f64,
+    b: f64,
+    /// Running mean square of the low band (`b²`).
+    low: f64,
+    /// Running mean square of the full-band mono signal.
+    full: f64,
+}
+
+impl LowBandMeter {
+    /// Meter `samples` (interleaved, `channels` wide) at `rate` Hz: the
+    /// envelopes after the last frame and the low band's range over the
+    /// block, or `None` for no frames.
+    fn measure(
+        &mut self,
+        samples: impl Iterator<Item = f64>,
+        channels: usize,
+        rate: u32,
+    ) -> Option<AudioLevels> {
+        let channels = channels.max(1);
+        let rate = rate.max(1) as f64;
+        let k = 1.0 - (-std::f64::consts::TAU * LOW_BAND_HZ / rate).exp();
+        let env = 1.0 - (-1.0 / (LEVEL_TAU * rate)).exp();
+        let mut frames = 0usize;
+        let (mut peak, mut sum) = (f64::MIN, 0.0f64);
+        let (mut acc, mut n) = (0.0f64, 0usize);
+        for s in samples {
+            acc += s;
+            n += 1;
+            if n < channels {
+                continue;
+            }
+            let mono = acc / channels as f64;
+            acc = 0.0;
+            n = 0;
+            self.a += (mono - self.a) * k;
+            self.b += (self.a - self.b) * k;
+            self.low += (self.b * self.b - self.low) * env;
+            self.full += (mono * mono - self.full) * env;
+            peak = peak.max(self.low);
+            sum += self.low;
+            frames += 1;
+        }
+        // Digital silence would otherwise leave the filters decaying into
+        // subnormals, where they stay (`x * k` rounds to zero) and every later
+        // sample pays for subnormal arithmetic. Nothing decays from 1e-30 to
+        // the subnormal range within one block.
+        for v in [&mut self.a, &mut self.b, &mut self.low, &mut self.full] {
+            if v.abs() < 1e-30 {
+                *v = 0.0;
+            }
+        }
+        (frames > 0).then(|| AudioLevels {
+            low: self.low as f32,
+            low_peak: peak as f32,
+            low_mean: (sum / frames as f64) as f32,
+            full: self.full as f32,
+            fresh: true,
+        })
+    }
+}
+
+/// The system that publishes fresh bars into [`Cava`] (`feed_cava`), live or
+/// offline. Anything deriving per-frame data from the bars — the audio
+/// features the effects run on — orders itself `.after()` this so it reads
+/// this frame's analysis rather than last frame's.
+#[derive(bevy::ecs::schedule::SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CavaAnalysisSet;
+
 /// Pushes decoded samples straight into the audio ring, for offline rendering
 /// (`--input`). Inserted only by [`CavaPlugin`] in offline mode, where there is
 /// no capture thread; the record driver pushes each video frame's worth of
@@ -273,6 +386,7 @@ impl Plugin for CavaPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<CavaSettings>()
             .init_resource::<Cava>()
+            .init_resource::<AudioLevels>()
             .init_resource::<CavaRebuild>()
             .init_resource::<CavaRebuildStatus>();
         let settings = app.world().resource::<CavaSettings>().clone();
@@ -314,7 +428,9 @@ impl Plugin for CavaPlugin {
                 .insert_resource(ring)
                 .add_systems(
                     PreUpdate,
-                    (rebuild_cava, feed_cava).chain().in_set(OfflineCavaSet),
+                    (rebuild_cava, feed_cava.in_set(CavaAnalysisSet))
+                        .chain()
+                        .in_set(OfflineCavaSet),
                 );
             return;
         }
@@ -341,7 +457,12 @@ impl Plugin for CavaPlugin {
 
         app.add_systems(
             Update,
-            (reconcile_capture_rate, rebuild_cava, feed_cava).chain(),
+            (
+                reconcile_capture_rate,
+                rebuild_cava,
+                feed_cava.in_set(CavaAnalysisSet),
+            )
+                .chain(),
         )
         .add_systems(Last, stop_on_exit);
     }
@@ -568,6 +689,7 @@ fn open_with_retry<T>(
 /// processing every full chunk that has buffered, then publish the latest bars.
 /// cava runs at a steady high rate (≈ rate·channels / chunk), so the bars the
 /// render samples are always fresh and smooth.
+#[allow(clippy::too_many_arguments)]
 fn feed_cava(
     ring: Res<AudioRing>,
     state: Option<NonSendMut<CavaState>>,
@@ -576,6 +698,8 @@ fn feed_cava(
     offline: Option<Res<AudioInjector>>,
     mut dbg: Local<FeedStats>,
     mut stall: Local<StallState>,
+    mut levels: ResMut<AudioLevels>,
+    mut meter: Local<LowBandMeter>,
 ) {
     let Some(mut state) = state else {
         return; // cavacore failed to init; leave bars at zero
@@ -591,10 +715,25 @@ fn feed_cava(
         .min(state.plan.max_input_samples() / state.plan.channels())
         * state.plan.channels();
 
-    // Accumulate whatever was captured since the last frame.
+    // Accumulate whatever was captured since the last frame, metering the new
+    // samples on the way in (see [`AudioLevels`]).
+    let before = state.accum.len();
     if let Ok(mut q) = ring.buf.lock() {
         state.accum.extend(q.drain(..));
     }
+    let measured = meter.measure(
+        state.accum.range(before..).copied(),
+        state.plan.channels(),
+        state.plan.rate(),
+    );
+    let next = match measured {
+        Some(levels) => levels,
+        None => AudioLevels {
+            fresh: false,
+            ..*levels
+        },
+    };
+    levels.set_if_neq(next);
 
     // Process every complete chunk; cavacore sees a constant sample count.
     let mut executed = 0u32;
@@ -714,14 +853,14 @@ fn reconcile_capture_rate(
     // Clamp the high cutoff below the negotiated Nyquist (and keep it above the
     // low cutoff). A lower-than-requested negotiated rate simply cannot represent
     // the top of the requested band, and without this clamp the rebuild would
-    // fail `CavaConfig` validation (`high_cutoff >= rate/2`) and strand us on the
+    // fail `CavaConfig` validation (`high_cutoff > rate/2`) and strand us on the
     // stale requested-rate plan — the exact frequency/smoothing mismatch this
     // function exists to fix.
-    let nyquist = negotiated / 2;
-    let high_cutoff = settings
-        .high_cutoff_freq
-        .min(nyquist.saturating_sub(1))
-        .max(settings.low_cutoff_freq.saturating_add(1));
+    let high_cutoff = clamp_high_cutoff(
+        settings.high_cutoff_freq,
+        settings.low_cutoff_freq,
+        negotiated,
+    );
     let cfg = CavaConfig {
         bars: settings.bars_per_channel as u32,
         rate: negotiated,
@@ -761,6 +900,15 @@ fn reconcile_capture_rate(
     }
 }
 
+/// `high` clamped to at most `rate`'s Nyquist and above `low` — the band
+/// `CavaConfig` validation accepts (unless `low` itself sits at Nyquist, which
+/// no high cutoff can fix). The plan runs at the rate capture *negotiated*,
+/// so a cutoff that was valid at the requested rate, or one restored from a
+/// saved config or scene snapshot, may not be valid at the rate in use.
+pub(crate) fn clamp_high_cutoff(high: u32, low: u32, rate: u32) -> u32 {
+    high.min(rate / 2).max(low.saturating_add(1))
+}
+
 /// Rebuild the cavacore plan in place when a [`CavaRebuild`] is requested,
 /// applying the DSP-relevant [`CavaSettings`] (bars, autosens, noise reduction,
 /// cutoffs) live. Rate and channels stay pinned to the running capture thread,
@@ -769,7 +917,7 @@ fn rebuild_cava(
     mut request: ResMut<CavaRebuild>,
     mut status: ResMut<CavaRebuildStatus>,
     state: Option<NonSendMut<CavaState>>,
-    settings: Res<CavaSettings>,
+    mut settings: ResMut<CavaSettings>,
     mut cava: ResMut<Cava>,
 ) {
     if !request.0 {
@@ -783,15 +931,21 @@ fn rebuild_cava(
     };
 
     // Keep the capture thread's rate/channels; only the analysis params change.
+    // The high cutoff is clamped to that rate's Nyquist, as in
+    // `reconcile_capture_rate`: an edited or restored cutoff above it would
+    // otherwise fail validation and strand the previous plan (and every later
+    // Apply with it) while `CavaSettings` claims the new values.
     let channels = state.plan.channels();
+    let rate = state.plan.rate();
+    let high_cutoff = clamp_high_cutoff(settings.high_cutoff_freq, settings.low_cutoff_freq, rate);
     let cfg = CavaConfig {
         bars: settings.bars_per_channel as u32,
-        rate: state.plan.rate(),
+        rate,
         channels: channels as u32,
         autosens: settings.autosens,
         noise_reduction: settings.noise_reduction,
         low_cutoff_freq: settings.low_cutoff_freq,
-        high_cutoff_freq: settings.high_cutoff_freq,
+        high_cutoff_freq: high_cutoff,
     };
     match cfg.build() {
         Ok(plan) => {
@@ -803,8 +957,18 @@ fn rebuild_cava(
             cava.bars = vec![0.0; bars * channels];
             cava.bars_per_channel = bars;
             cava.channels = channels;
-            info!("bava: rebuilt cavacore — {bars} bars/ch");
-            status.0 = Some(format!("Rebuilt cavacore — {bars} bars/ch"));
+            let mut message = format!("Rebuilt cavacore — {bars} bars/ch");
+            // Write the clamp back so the editor and a later save show the
+            // cutoff actually in use. Only when it bit: an unconditional write
+            // would mark `CavaSettings` changed on every rebuild.
+            if settings.high_cutoff_freq != high_cutoff {
+                settings.high_cutoff_freq = high_cutoff;
+                message.push_str(&format!(
+                    " (high cutoff clamped to {high_cutoff} Hz for {rate} Hz audio)"
+                ));
+            }
+            info!("bava: {message}");
+            status.0 = Some(message);
         }
         Err(e) => {
             error!("bava: cavacore rebuild failed: {e}; keeping previous plan");
@@ -851,6 +1015,223 @@ fn stop_on_exit(mut exit: MessageReader<AppExit>, ring: Option<Res<AudioRing>>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn low_band_meter_passes_bass_and_rejects_treble() {
+        let rate = 48_000u32;
+        let tone = |hz: f64| {
+            (0..rate as usize / 2)
+                .flat_map(move |i| {
+                    let s = (std::f64::consts::TAU * hz * i as f64 / rate as f64).sin() * 0.5;
+                    [s, s] // stereo, identical channels
+                })
+                .collect::<Vec<f64>>()
+        };
+        let AudioLevels { low, full, .. } = LowBandMeter::default()
+            .measure(tone(50.0).into_iter(), 2, rate)
+            .unwrap();
+        assert!(low > full * 0.6, "50 Hz passes: {low} of {full}");
+        let AudioLevels { low, full, .. } = LowBandMeter::default()
+            .measure(tone(5_000.0).into_iter(), 2, rate)
+            .unwrap();
+        assert!(low < full * 0.01, "5 kHz is rejected: {low} of {full}");
+        assert!(
+            LowBandMeter::default()
+                .measure(std::iter::empty(), 2, rate)
+                .is_none()
+        );
+    }
+
+    const RATE: u32 = 48_000;
+
+    /// `secs` seconds of mono audio at [`RATE`], sample `i` = `f(i / RATE)`.
+    fn signal(secs: f64, f: impl Fn(f64) -> f64) -> Vec<f64> {
+        (0..(secs * RATE as f64) as usize)
+            .map(|i| f(i as f64 / RATE as f64))
+            .collect()
+    }
+
+    /// Meter `signal` as a `fps` render loop drains it into the beat
+    /// detector, the audio arriving in blocks of `quantum` samples (`1`: as
+    /// fast as it plays); the beats after the first second.
+    fn beats_in(signal: &[f64], fps: u64, quantum: usize) -> u64 {
+        let mut meter = LowBandMeter::default();
+        let mut features = crate::vis::features::AudioFeatures::default();
+        let (mut start, mut warm) = (0, 0);
+        for frame in 1u64.. {
+            let due = (frame * RATE as u64 / fps) as usize;
+            if due > signal.len() {
+                break;
+            }
+            let end = (due / quantum * quantum).max(start);
+            let levels = meter
+                .measure(signal[start..end].iter().copied(), 1, RATE)
+                .unwrap_or_default();
+            start = end;
+            features.update(&[0.5; 8], levels, 1.0 / fps as f32);
+            if frame == fps {
+                warm = features.beats;
+            }
+        }
+        features.beats - warm
+    }
+
+    fn beats_at(signal: &[f64], fps: u64) -> u64 {
+        beats_in(signal, fps, 1)
+    }
+
+    /// Render rates and capture quanta audio really arrives at.
+    const DELIVERIES: [(u64, usize); 6] = [
+        (30, 1),
+        (60, 1),
+        (144, 1),
+        (240, 1),
+        (60, 1024),
+        (144, 1024),
+    ];
+
+    #[test]
+    fn low_band_level_does_not_depend_on_block_size() {
+        // The published level is a function of the samples alone: draining
+        // the same audio in 200- or 800-sample frames reads identically at
+        // every shared boundary.
+        let tone = signal(0.5, |t| 0.5 * (std::f64::consts::TAU * 40.0 * t).sin());
+        let (mut whole, mut split) = (LowBandMeter::default(), LowBandMeter::default());
+        for block in tone.chunks(800) {
+            let a = whole.measure(block.iter().copied(), 1, RATE).unwrap();
+            let mut parts = Vec::new();
+            for part in block.chunks(200) {
+                parts.push(split.measure(part.iter().copied(), 1, RATE).unwrap());
+            }
+            let b = parts.last().unwrap();
+            assert_eq!((a.low, a.full), (b.low, b.full));
+            // The block's peak is its parts' highest; its mean their average.
+            let peak = parts.iter().map(|p| p.low_peak).fold(f32::MIN, f32::max);
+            let mean = parts.iter().map(|p| p.low_mean).sum::<f32>() / parts.len() as f32;
+            assert_eq!(a.low_peak, peak);
+            assert!(
+                (a.low_mean - mean).abs() <= mean * 1e-5,
+                "{} vs {mean}",
+                a.low_mean
+            );
+        }
+    }
+
+    #[test]
+    fn steady_bass_never_beats_at_any_frame_rate() {
+        // A frame shorter than a period of the note (≈ 4 ms at 240 fps) used
+        // to catch the sine's power mid-swing; the valley follower read each
+        // swing as a +3 dB onset and fired ~6.7 times a second.
+        for hz in [20.0, 30.0, 35.0, 40.0, 45.0, 60.0, 80.0] {
+            let tone = signal(6.0, |t| 0.5 * (std::f64::consts::TAU * hz * t).sin());
+            for (fps, quantum) in DELIVERIES {
+                assert_eq!(
+                    beats_in(&tone, fps, quantum),
+                    0,
+                    "{hz} Hz tone at {fps} fps, {quantum}-sample quanta"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn moderate_kicks_beat_once_each_however_the_audio_arrives() {
+        // Kicks only ~4 dB over the bass in the low band: judged on the last
+        // sample of each drained block, coarse frames (30 fps, 1024-sample
+        // quanta) caught a fraction of the rise and missed most of them.
+        let tau = std::f64::consts::TAU;
+        // A 150 → 60 Hz swept kick over a 30 Hz bass, 128 BPM.
+        let swept = |t: f64| {
+            let s = t % (60.0 / 128.0);
+            let phase = tau * (60.0 * s + 90.0 * 0.03 * (1.0 - (-s / 0.03).exp()));
+            0.3 * (tau * 30.0 * t).sin() + 0.6 * (-s / 0.1).exp() * phase.sin()
+        };
+        // A short 60 Hz kick over a 45 Hz bass, 150 BPM.
+        let short = |t: f64| {
+            let s = t % 0.4;
+            0.3 * (tau * 45.0 * t).sin() + 0.5 * (-s / 0.06).exp() * (tau * 60.0 * s).sin()
+        };
+        // The 150 BPM track below, with a kick about half as loud.
+        let soft = |t: f64| {
+            let s = t % 0.4;
+            0.3 * (tau * 40.0 * t).sin() + 0.5 * (-s / 0.1).exp() * (tau * 55.0 * s).sin()
+        };
+        let tracks = [
+            ("swept", 128.0, signal(7.0, swept)),
+            ("short", 150.0, signal(7.0, short)),
+            ("soft", 150.0, signal(7.0, soft)),
+        ];
+        for (name, bpm, track) in tracks {
+            let expected = 6.0 * bpm / 60.0;
+            for (fps, quantum) in DELIVERIES {
+                let beats = beats_in(&track, fps, quantum);
+                assert!(
+                    (beats as f64 - expected).abs() <= 1.0,
+                    "{name} at {fps} fps, {quantum}-sample quanta: {beats} beats, expected {expected}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn kicks_over_a_sustained_bass_beat_once_each_at_any_frame_rate() {
+        // (bpm, bass Hz, kick Hz): a decaying kick every beat over a steady
+        // bass note, like an 808 under a four-on-the-floor kick.
+        for (bpm, bass, kick) in [(120.0, 45.0, 60.0), (150.0, 40.0, 55.0)] {
+            let period = 60.0 / bpm;
+            let track = signal(7.0, |t| {
+                let since = t % period;
+                0.3 * (std::f64::consts::TAU * bass * t).sin()
+                    + 0.9 * (-since / 0.1).exp() * (std::f64::consts::TAU * kick * since).sin()
+            });
+            let expected = 6.0 * bpm / 60.0;
+            for fps in [60, 144, 240] {
+                let beats = beats_at(&track, fps);
+                assert!(
+                    (beats as f64 - expected).abs() <= 1.0,
+                    "{bpm} BPM at {fps} fps: {beats} beats, expected {expected}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn high_cutoff_clamps_below_nyquist_and_above_low() {
+        assert_eq!(clamp_high_cutoff(10_000, 50, 16_000), 8_000);
+        assert_eq!(clamp_high_cutoff(10_000, 50, 44_100), 10_000);
+        assert_eq!(clamp_high_cutoff(100, 200, 44_100), 201);
+    }
+
+    #[test]
+    fn rebuild_clamps_a_cutoff_above_nyquist_instead_of_keeping_the_old_plan() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(CavaSettings {
+            channels: 1,
+            rate: 16_000,
+            high_cutoff_freq: 7_000,
+            ..default()
+        });
+        app.add_plugins(CavaPlugin { offline: true });
+        // A restored snapshot or an edit asks for a band this rate can't hold.
+        {
+            let mut settings = app.world_mut().resource_mut::<CavaSettings>();
+            settings.high_cutoff_freq = 10_000;
+            settings.bars_per_channel = 12;
+        }
+        app.world_mut().resource_mut::<CavaRebuild>().0 = true;
+        app.update();
+        let status = app.world_mut().resource_mut::<CavaRebuildStatus>().0.take();
+        assert!(
+            status.as_deref().is_some_and(|s| s.starts_with("Rebuilt")),
+            "{status:?}"
+        );
+        assert_eq!(app.world().resource::<Cava>().bars_per_channel, 12);
+        assert_eq!(
+            app.world().resource::<CavaSettings>().high_cutoff_freq,
+            8_000
+        );
+    }
 
     #[test]
     fn oversized_chunks_preserve_signal_after_the_first_fft_buffer() {
