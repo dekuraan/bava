@@ -437,7 +437,7 @@ mod tests {
         app.cleanup();
         for path in [&file, file.strip_prefix(&cwd).unwrap()] {
             let layer = ImageLayer {
-                path: Some(path.to_string_lossy().into_owned()),
+                path: Some(path.to_path_buf()),
                 ..default()
             };
             let mut sprite = Sprite::default();

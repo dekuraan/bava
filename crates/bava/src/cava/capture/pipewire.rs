@@ -36,6 +36,9 @@ use spa::utils::{Direction, SpaTypes};
 
 use super::{AudioCapture, CaptureError};
 
+/// Bound format negotiation so the caller can fall back to PulseAudio.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+
 /// Wait long enough to span ordinary packet jitter before returning a short
 /// read. The shared consumer handles idle decay after 200 ms without samples.
 const IDLE_TIMEOUT: Duration = Duration::from_millis(180);
