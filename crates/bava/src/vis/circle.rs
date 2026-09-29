@@ -158,7 +158,7 @@ impl Plugin for CirclePlugin {
                     // The radial bars are one batched mesh rebuilt from scratch
                     // each frame, so a live bar-count change needs no pool
                     // reconciliation.
-                    update_circle_bars,
+                    update_circle_bars.after(CavaAnalysisSet),
                     // `update_ring` draws both the Wave outline and its
                     // optional fill from the one shared geometry pass.
                     (update_blob_shape.in_set(BlobShapeSet), update_ring)

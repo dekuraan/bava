@@ -79,7 +79,14 @@ impl Plugin for BarsPlugin {
             // The bar geometry is one batched mesh rebuilt from scratch each
             // frame, so a live bar-count change (editor "Apply" / profile load)
             // needs no pool reconciliation — it just draws the new count.
-            .add_systems(Update, (update_bars, update_box_lines).chain())
+            // After this frame's analysis, like the colliders built from the
+            // same values (`vis/physics.rs`), so both read the same bars.
+            .add_systems(
+                Update,
+                (update_bars, update_box_lines)
+                    .chain()
+                    .after(crate::cava::CavaAnalysisSet),
+            )
             // Keep camera post-process in sync with the live editor settings.
             .add_systems(Update, (apply_tonemapping, apply_bloom));
     }

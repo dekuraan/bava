@@ -143,6 +143,11 @@ fn restore_owned(
                 restore_owned(out, b, a, o)
             }
             (_, Some(live), Some(b), Some(a)) if live == a => *live = b.clone(),
+            // A key the scene added (an optional setting that was unset, like
+            // an image layer's `path`): unset it again.
+            (_, Some(live), None, Some(a)) if live == a => {
+                out.remove(k);
+            }
             _ => {}
         }
     }
@@ -279,14 +284,15 @@ fn apply_scene(world: &mut World) {
         state.since_poll += dt;
         if !offline && state.since_poll >= HOT_RELOAD_POLL {
             state.since_poll = 0.0;
+            // A stamp can go `None` (a directory that stopped being
+            // readable) and back: compare, don't require `Some`. Built-ins
+            // are always `None`, so they never poll as changed.
             if let Some(loaded) = &state.loaded
-                && loaded.stamp.is_some()
                 && files::stamp(&loaded.entry.source) != loaded.stamp
             {
                 stale = true;
             }
             if let Some((source, stamp)) = &state.failed
-                && stamp.is_some()
                 && files::stamp(source) != *stamp
             {
                 // The broken scene was edited: forget the failed attempt so it
@@ -434,6 +440,7 @@ fn load(
         def.scene.name.clone()
     };
     let ctx = spawn::SpawnContext {
+        id: sanitize(&entry.id),
         slot,
         shader_sources,
         files: scene_files,
@@ -519,7 +526,7 @@ fn apply_overrides(
             warnings.push(format!("[config.{skip}] can't be set by a scene"));
         }
     }
-    unknown_keys(&owned, &before, "config", &mut warnings);
+    unknown_keys(&owned, &known_keys(&before), "config", &mut warnings);
     let mut table = before.clone();
     merge(&mut table, &owned);
     write_settings(world, &before, &table)?;
@@ -530,6 +537,17 @@ fn apply_overrides(
         clear: world.resource::<ClearColor>().clone(),
     };
     Ok((base, warnings))
+}
+
+/// Every settable key: `settings` plus the optional ones it leaves out while
+/// unset (an image layer's `path`).
+fn known_keys(settings: &toml::Table) -> toml::Table {
+    let mut all = Config::default();
+    all.vis.background.path = Some("unset".into());
+    all.vis.foreground.path = Some("unset".into());
+    let mut known = toml::Table::try_from(&all).unwrap_or_default();
+    merge(&mut known, settings);
+    known
 }
 
 /// The live settings as a `config.toml` table.
@@ -560,7 +578,7 @@ fn write_settings(
     if changed("cava") {
         let before = world.resource::<CavaSettings>().clone();
         // Capture-thread parameters stay pinned (see the editor's Apply).
-        let cava = CavaSettings {
+        let mut cava = CavaSettings {
             rate: before.rate,
             channels: before.channels,
             frame_samples: before.frame_samples,
@@ -568,6 +586,11 @@ fn write_settings(
             follow_active_sink: before.follow_active_sink,
             ..cfg.to_cava_settings(before.debug)
         };
+        // Write the cutoff the plan will actually run with, so the rebuild
+        // has nothing to correct: a correction would read as a user edit of
+        // a scene-owned key.
+        cava.high_cutoff_freq =
+            crate::cava::clamp_high_cutoff(cava.high_cutoff_freq, cava.low_cutoff_freq, cava.rate);
         if cava != before {
             *world.resource_mut::<CavaSettings>() = cava;
             world.resource_mut::<CavaRebuild>().0 = true;
@@ -660,11 +683,14 @@ pub fn describe(entry: &SceneEntry) -> Option<String> {
 /// directory named by a relative path as its absolute path, so the saved config
 /// still finds it from another working directory.
 pub fn persistent_name(name: &str) -> String {
+    if files::discover().iter().any(|e| e.id == name.trim()) {
+        return name.to_string();
+    }
     match files::resolve(name) {
         Some(SceneEntry {
-            id,
             source: files::SceneSource::Dir(dir),
-        }) if id != name.trim() && dir.is_absolute() => dir.display().to_string(),
+            ..
+        }) if dir.is_absolute() => dir.display().to_string(),
         _ => name.to_string(),
     }
 }
@@ -860,6 +886,42 @@ mod tests {
         // the directory itself.
         let roundabout = dir.path().join("mine/../mine/scene.toml");
         assert_eq!(persistent_name(roundabout.to_str().unwrap()), canonical);
+
+        // A bare directory name in the working directory (`--scene myscene`).
+        let here = tempfile::Builder::new()
+            .prefix("bava-scene-name-test")
+            .tempdir_in(".")
+            .unwrap();
+        std::fs::write(here.path().join("scene.toml"), "[scene]\n").unwrap();
+        let bare = here.path().file_name().unwrap().to_str().unwrap();
+        let canonical = here.path().canonicalize().unwrap().display().to_string();
+        assert_eq!(persistent_name(bare), canonical);
+    }
+
+    #[test]
+    fn a_setting_the_scene_added_is_unset_again() {
+        let mut world = settings_world();
+        let over: toml::Table =
+            toml::from_str("[vis.background]\npath = \"/tmp/space.png\"\n").unwrap();
+        let (base, warnings) = apply_overrides(&mut world, Some(&over)).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(world.resource::<VisSettings>().background.path.is_some());
+        restore(&mut world, &base);
+        assert_eq!(world.resource::<VisSettings>().background.path, None);
+    }
+
+    #[test]
+    fn a_scene_cutoff_above_nyquist_is_applied_clamped_and_restored() {
+        let mut world = settings_world();
+        let user = world.resource::<CavaSettings>().high_cutoff_freq;
+        let rate = world.resource::<CavaSettings>().rate;
+        let over: toml::Table =
+            toml::from_str(&format!("[cava]\nhigh_cutoff_freq = {}\n", rate)).unwrap();
+        let (base, _) = apply_overrides(&mut world, Some(&over)).unwrap();
+        // What the plan can run: the rebuild then has nothing to correct.
+        assert_eq!(world.resource::<CavaSettings>().high_cutoff_freq, rate / 2);
+        restore(&mut world, &base);
+        assert_eq!(world.resource::<CavaSettings>().high_cutoff_freq, user);
     }
 
     #[test]
@@ -868,7 +930,7 @@ mod tests {
             let f = files::read(&files::SceneSource::Builtin(id)).unwrap();
             let def = SceneDef::parse(f.scene_toml().unwrap()).unwrap();
             let Some(over) = def.config else { continue };
-            let known = toml::Table::try_from(Config::default()).unwrap();
+            let known = known_keys(&toml::Table::try_from(Config::default()).unwrap());
             let mut warnings = Vec::new();
             unknown_keys(&over, &known, "config", &mut warnings);
             assert!(warnings.is_empty(), "{id}: {warnings:?}");

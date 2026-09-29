@@ -244,6 +244,15 @@ pub struct AudioLevels {
     /// Running mean square of the low band (≲ 150 Hz, the kick and bass) as of
     /// the newest sample, averaged over the last ~25 ms of audio.
     pub low: f32,
+    /// The highest `low` reached over the samples this frame brought, and
+    /// its mean over them. The beat detector fires on the peak and follows
+    /// the mean, so a kick's peak counts wherever the frame boundaries fell
+    /// and the bass under it reads at its average rather than at whatever
+    /// phase of its ripple a boundary caught: with coarse frames (30 fps, a
+    /// 1024-sample PipeWire quantum) the end-of-block value alone lost most of
+    /// a moderate kick's 3 dB.
+    pub low_peak: f32,
+    pub low_mean: f32,
     /// Running mean square of the full-band mono signal, over the same window.
     pub full: f32,
     /// True when this frame brought new samples (the values are fresh).
@@ -277,20 +286,21 @@ struct LowBandMeter {
 }
 
 impl LowBandMeter {
-    /// Meter `samples` (interleaved, `channels` wide) at `rate` Hz: returns the
-    /// (low-band, full-band) mean-square envelopes after the last frame, or
-    /// `None` for no frames.
+    /// Meter `samples` (interleaved, `channels` wide) at `rate` Hz: the
+    /// envelopes after the last frame and the low band's range over the
+    /// block, or `None` for no frames.
     fn measure(
         &mut self,
         samples: impl Iterator<Item = f64>,
         channels: usize,
         rate: u32,
-    ) -> Option<(f32, f32)> {
+    ) -> Option<AudioLevels> {
         let channels = channels.max(1);
         let rate = rate.max(1) as f64;
         let k = 1.0 - (-std::f64::consts::TAU * LOW_BAND_HZ / rate).exp();
         let env = 1.0 - (-1.0 / (LEVEL_TAU * rate)).exp();
         let mut frames = 0usize;
+        let (mut peak, mut sum) = (f64::MIN, 0.0f64);
         let (mut acc, mut n) = (0.0f64, 0usize);
         for s in samples {
             acc += s;
@@ -305,9 +315,26 @@ impl LowBandMeter {
             self.b += (self.a - self.b) * k;
             self.low += (self.b * self.b - self.low) * env;
             self.full += (mono * mono - self.full) * env;
+            peak = peak.max(self.low);
+            sum += self.low;
             frames += 1;
         }
-        (frames > 0).then_some((self.low as f32, self.full as f32))
+        // Digital silence would otherwise leave the filters decaying into
+        // subnormals, where they stay (`x * k` rounds to zero) and every later
+        // sample pays for subnormal arithmetic. Nothing decays from 1e-30 to
+        // the subnormal range within one block.
+        for v in [&mut self.a, &mut self.b, &mut self.low, &mut self.full] {
+            if v.abs() < 1e-30 {
+                *v = 0.0;
+            }
+        }
+        (frames > 0).then(|| AudioLevels {
+            low: self.low as f32,
+            low_peak: peak as f32,
+            low_mean: (sum / frames as f64) as f32,
+            full: self.full as f32,
+            fresh: true,
+        })
     }
 }
 
@@ -700,11 +727,7 @@ fn feed_cava(
         state.plan.rate(),
     );
     let next = match measured {
-        Some((low, full)) => AudioLevels {
-            low,
-            full,
-            fresh: true,
-        },
+        Some(levels) => levels,
         None => AudioLevels {
             fresh: false,
             ..*levels
@@ -877,14 +900,13 @@ fn reconcile_capture_rate(
     }
 }
 
-/// `high` clamped strictly below `rate`'s Nyquist and above `low` — the band
+/// `high` clamped to at most `rate`'s Nyquist and above `low` — the band
 /// `CavaConfig` validation accepts (unless `low` itself sits at Nyquist, which
 /// no high cutoff can fix). The plan runs at the rate capture *negotiated*,
 /// so a cutoff that was valid at the requested rate, or one restored from a
 /// saved config or scene snapshot, may not be valid at the rate in use.
-fn clamp_high_cutoff(high: u32, low: u32, rate: u32) -> u32 {
-    high.min((rate / 2).saturating_sub(1))
-        .max(low.saturating_add(1))
+pub(crate) fn clamp_high_cutoff(high: u32, low: u32, rate: u32) -> u32 {
+    high.min(rate / 2).max(low.saturating_add(1))
 }
 
 /// Rebuild the cavacore plan in place when a [`CavaRebuild`] is requested,
@@ -1005,11 +1027,11 @@ mod tests {
                 })
                 .collect::<Vec<f64>>()
         };
-        let (low, full) = LowBandMeter::default()
+        let AudioLevels { low, full, .. } = LowBandMeter::default()
             .measure(tone(50.0).into_iter(), 2, rate)
             .unwrap();
         assert!(low > full * 0.6, "50 Hz passes: {low} of {full}");
-        let (low, full) = LowBandMeter::default()
+        let AudioLevels { low, full, .. } = LowBandMeter::default()
             .measure(tone(5_000.0).into_iter(), 2, rate)
             .unwrap();
         assert!(low < full * 0.01, "5 kHz is rejected: {low} of {full}");
@@ -1029,24 +1051,22 @@ mod tests {
             .collect()
     }
 
-    /// Meter `signal` as a `fps` render loop drains it (`RATE / fps` samples a
-    /// frame) into the beat detector; the beats after the first second.
-    fn beats_at(signal: &[f64], fps: u64) -> u64 {
+    /// Meter `signal` as a `fps` render loop drains it into the beat
+    /// detector, the audio arriving in blocks of `quantum` samples (`1`: as
+    /// fast as it plays); the beats after the first second.
+    fn beats_in(signal: &[f64], fps: u64, quantum: usize) -> u64 {
         let mut meter = LowBandMeter::default();
         let mut features = crate::vis::features::AudioFeatures::default();
         let (mut start, mut warm) = (0, 0);
         for frame in 1u64.. {
-            let end = (frame * RATE as u64 / fps) as usize;
-            if end > signal.len() {
+            let due = (frame * RATE as u64 / fps) as usize;
+            if due > signal.len() {
                 break;
             }
+            let end = (due / quantum * quantum).max(start);
             let levels = meter
                 .measure(signal[start..end].iter().copied(), 1, RATE)
-                .map_or(AudioLevels::default(), |(low, full)| AudioLevels {
-                    low,
-                    full,
-                    fresh: true,
-                });
+                .unwrap_or_default();
             start = end;
             features.update(&[0.5; 8], levels, 1.0 / fps as f32);
             if frame == fps {
@@ -1056,6 +1076,20 @@ mod tests {
         features.beats - warm
     }
 
+    fn beats_at(signal: &[f64], fps: u64) -> u64 {
+        beats_in(signal, fps, 1)
+    }
+
+    /// Render rates and capture quanta audio really arrives at.
+    const DELIVERIES: [(u64, usize); 6] = [
+        (30, 1),
+        (60, 1),
+        (144, 1),
+        (240, 1),
+        (60, 1024),
+        (144, 1024),
+    ];
+
     #[test]
     fn low_band_level_does_not_depend_on_block_size() {
         // The published level is a function of the samples alone: draining
@@ -1064,12 +1098,22 @@ mod tests {
         let tone = signal(0.5, |t| 0.5 * (std::f64::consts::TAU * 40.0 * t).sin());
         let (mut whole, mut split) = (LowBandMeter::default(), LowBandMeter::default());
         for block in tone.chunks(800) {
-            let a = whole.measure(block.iter().copied(), 1, RATE);
-            let mut b = None;
+            let a = whole.measure(block.iter().copied(), 1, RATE).unwrap();
+            let mut parts = Vec::new();
             for part in block.chunks(200) {
-                b = split.measure(part.iter().copied(), 1, RATE);
+                parts.push(split.measure(part.iter().copied(), 1, RATE).unwrap());
             }
-            assert_eq!(a, b);
+            let b = parts.last().unwrap();
+            assert_eq!((a.low, a.full), (b.low, b.full));
+            // The block's peak is its parts' highest; its mean their average.
+            let peak = parts.iter().map(|p| p.low_peak).fold(f32::MIN, f32::max);
+            let mean = parts.iter().map(|p| p.low_mean).sum::<f32>() / parts.len() as f32;
+            assert_eq!(a.low_peak, peak);
+            assert!(
+                (a.low_mean - mean).abs() <= mean * 1e-5,
+                "{} vs {mean}",
+                a.low_mean
+            );
         }
     }
 
@@ -1078,10 +1122,53 @@ mod tests {
         // A frame shorter than a period of the note (≈ 4 ms at 240 fps) used
         // to catch the sine's power mid-swing; the valley follower read each
         // swing as a +3 dB onset and fired ~6.7 times a second.
-        for hz in [30.0, 35.0, 40.0, 45.0] {
+        for hz in [20.0, 30.0, 35.0, 40.0, 45.0, 60.0, 80.0] {
             let tone = signal(6.0, |t| 0.5 * (std::f64::consts::TAU * hz * t).sin());
-            for fps in [60, 120, 144, 240] {
-                assert_eq!(beats_at(&tone, fps), 0, "{hz} Hz tone at {fps} fps");
+            for (fps, quantum) in DELIVERIES {
+                assert_eq!(
+                    beats_in(&tone, fps, quantum),
+                    0,
+                    "{hz} Hz tone at {fps} fps, {quantum}-sample quanta"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn moderate_kicks_beat_once_each_however_the_audio_arrives() {
+        // Kicks only ~4 dB over the bass in the low band: judged on the last
+        // sample of each drained block, coarse frames (30 fps, 1024-sample
+        // quanta) caught a fraction of the rise and missed most of them.
+        let tau = std::f64::consts::TAU;
+        // A 150 → 60 Hz swept kick over a 30 Hz bass, 128 BPM.
+        let swept = |t: f64| {
+            let s = t % (60.0 / 128.0);
+            let phase = tau * (60.0 * s + 90.0 * 0.03 * (1.0 - (-s / 0.03).exp()));
+            0.3 * (tau * 30.0 * t).sin() + 0.6 * (-s / 0.1).exp() * phase.sin()
+        };
+        // A short 60 Hz kick over a 45 Hz bass, 150 BPM.
+        let short = |t: f64| {
+            let s = t % 0.4;
+            0.3 * (tau * 45.0 * t).sin() + 0.5 * (-s / 0.06).exp() * (tau * 60.0 * s).sin()
+        };
+        // The 150 BPM track below, with a kick about half as loud.
+        let soft = |t: f64| {
+            let s = t % 0.4;
+            0.3 * (tau * 40.0 * t).sin() + 0.5 * (-s / 0.1).exp() * (tau * 55.0 * s).sin()
+        };
+        let tracks = [
+            ("swept", 128.0, signal(7.0, swept)),
+            ("short", 150.0, signal(7.0, short)),
+            ("soft", 150.0, signal(7.0, soft)),
+        ];
+        for (name, bpm, track) in tracks {
+            let expected = 6.0 * bpm / 60.0;
+            for (fps, quantum) in DELIVERIES {
+                let beats = beats_in(&track, fps, quantum);
+                assert!(
+                    (beats as f64 - expected).abs() <= 1.0,
+                    "{name} at {fps} fps, {quantum}-sample quanta: {beats} beats, expected {expected}"
+                );
             }
         }
     }
@@ -1110,7 +1197,7 @@ mod tests {
 
     #[test]
     fn high_cutoff_clamps_below_nyquist_and_above_low() {
-        assert_eq!(clamp_high_cutoff(10_000, 50, 16_000), 7_999);
+        assert_eq!(clamp_high_cutoff(10_000, 50, 16_000), 8_000);
         assert_eq!(clamp_high_cutoff(10_000, 50, 44_100), 10_000);
         assert_eq!(clamp_high_cutoff(100, 200, 44_100), 201);
     }
@@ -1142,7 +1229,7 @@ mod tests {
         assert_eq!(app.world().resource::<Cava>().bars_per_channel, 12);
         assert_eq!(
             app.world().resource::<CavaSettings>().high_cutoff_freq,
-            7_999
+            8_000
         );
     }
 

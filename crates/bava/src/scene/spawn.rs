@@ -44,6 +44,8 @@ use crate::vis::fx::material::{
 
 /// What a load hands the spawner.
 pub(crate) struct SpawnContext {
+    /// The scene's id, reduced to a path segment: stable across reloads.
+    pub id: String,
     /// Embedded-registry slot the scene's files were registered under.
     pub slot: String,
     /// `[shaders]` name → (path, WGSL source).
@@ -191,10 +193,40 @@ fn compile_shaders(world: &mut World, ctx: &SpawnContext) -> Shaders {
     let mut out = HashMap::new();
     let mut assets = world.resource_mut::<Assets<Shader>>();
     for (name, (path, source)) in &ctx.shader_sources {
-        let shader = Shader::from_wgsl(source.clone(), format!("bava-scene/{}/{path}", ctx.slot));
-        out.insert(name.clone(), assets.add(shader));
+        // One handle per (scene, shader) for the whole process, overwritten
+        // on every load: a fresh handle per load would give every material a
+        // new specialization key, and the pipeline caches keep every key's
+        // pipeline (and its shader) forever. Rewriting the same handle
+        // recompiles the existing pipelines in place instead.
+        let handle = Handle::<Shader>::from(scene_shader_uuid(&ctx.id, name));
+        let shader = Shader::from_wgsl(source.clone(), format!("bava-scene/{}/{path}", ctx.id));
+        if assets.insert(handle.id(), shader).is_ok() {
+            out.insert(name.clone(), handle);
+        }
     }
     out
+}
+
+/// A stable id for scene `id`'s shader `name` (FNV-1a over both, twice with
+/// different offsets for 128 bits).
+fn scene_shader_uuid(id: &str, name: &str) -> bevy::asset::uuid::Uuid {
+    let fnv = |offset: u64| {
+        let mut h = offset;
+        for b in "bava-scene-shader"
+            .bytes()
+            .chain([0])
+            .chain(id.bytes())
+            .chain([0])
+            .chain(name.bytes())
+        {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(0x0100_0000_01b3);
+        }
+        h
+    };
+    let hi = fnv(0xcbf2_9ce4_8422_2325);
+    let lo = fnv(0x84222325_cbf29ce4);
+    bevy::asset::uuid::Uuid::from_u128((u128::from(hi) << 64) | u128::from(lo))
 }
 
 /// Put the built-in layers back the way bava draws them without a scene.
@@ -312,6 +344,14 @@ fn fx_blend(b: BlendDef) -> FxBlend {
         BlendDef::Additive => FxBlend::Additive,
         BlendDef::Opaque => FxBlend::Opaque,
     }
+}
+
+/// Whether a 3D effect material writes depth though it blends: only plain
+/// `alpha` blending at full material opacity. A `mask` cutout (or a
+/// translucent material) must not, or its see-through texels would hide what
+/// is behind them.
+fn fx_depth_write(m: &MaterialDef) -> bool {
+    m.blend == BlendDef::Alpha && m.alpha >= 1.0
 }
 
 /// Per-instance overrides when spawning a ring member.
@@ -591,6 +631,7 @@ fn material_3d(
             texture,
             shader,
             blend: fx_blend(m.blend),
+            depth_write: fx_depth_write(m),
             double_sided: m.double_sided,
         };
         let handle = world.resource_mut::<Assets<FxMaterial3d>>().add(material);
@@ -885,7 +926,10 @@ fn spawn_orbit_path(
             speed_band: None,
             speed_react: 0.0,
             face_out: false,
-            behind_z: None,
+            // The satellite's far-side layer, kept 0.5 under it like `z`: the
+            // path takes its parent's near/far state, so it sinks behind the
+            // sun exactly when the satellite does.
+            behind_z: orbit.behind_z.map(|b| b - 0.5),
             perspective: 0.0,
         });
     }
@@ -982,6 +1026,7 @@ fn spawn_camera(world: &mut World, def: &SceneDef, shaders: &Shaders) -> Result<
                 texture: None,
                 shader,
                 blend: FxBlend::Opaque,
+                depth_write: false,
                 double_sided: true,
             });
         world.spawn((
@@ -1318,6 +1363,30 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn only_opaque_alpha_materials_write_depth() {
+        let m = |blend, alpha| MaterialDef {
+            blend,
+            alpha,
+            ..MaterialDef::default()
+        };
+        assert!(fx_depth_write(&m(BlendDef::Alpha, 1.0)));
+        assert!(!fx_depth_write(&m(BlendDef::Alpha, 0.5)));
+        assert!(
+            !fx_depth_write(&m(BlendDef::Mask, 1.0)),
+            "cutouts show through"
+        );
+        assert!(!fx_depth_write(&m(BlendDef::Additive, 1.0)));
+    }
+
+    #[test]
+    fn scene_shader_ids_are_stable_and_distinct() {
+        assert_eq!(scene_shader_uuid("a", "sun"), scene_shader_uuid("a", "sun"));
+        assert_ne!(scene_shader_uuid("a", "sun"), scene_shader_uuid("a", "sky"));
+        assert_ne!(scene_shader_uuid("a", "sun"), scene_shader_uuid("b", "sun"));
+        assert_ne!(scene_shader_uuid("ab", "c"), scene_shader_uuid("a", "bc"));
     }
 
     #[test]

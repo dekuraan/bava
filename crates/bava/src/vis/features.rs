@@ -189,28 +189,35 @@ impl BeatDetector {
         // would otherwise creep only on the fresh frames and `FLOOR_TAU`
         // would stretch by the burst ratio.
         let elapsed = std::mem::take(&mut self.pending) + dt;
-        let db = 10.0 * levels.low.max(1e-12).log10();
+        // Judge the block, not its last sample: fire on its peak, follow its
+        // mean. Otherwise how much of a kick shows depends on where the frame
+        // boundaries fell, and coarse frames read the bass at one phase of its
+        // ripple.
+        let db = |x: f32| 10.0 * x.max(1e-12).log10();
+        let (peak, level) = (db(levels.low_peak), db(levels.low_mean));
         if !self.primed {
             self.primed = true;
-            self.floor = db;
+            self.floor = level;
             return false;
         }
-        let rise = db - self.floor;
-        let fired = self.armed && self.since >= REFRACTORY && db > SILENCE_DB && rise > TRIGGER_DB;
+        let fired = self.armed
+            && self.since >= REFRACTORY
+            && peak > SILENCE_DB
+            && peak - self.floor > TRIGGER_DB;
         if fired {
             self.armed = false;
             self.since = 0.0;
-        } else if !self.armed && rise < REARM_DB {
+        } else if !self.armed && level - self.floor < REARM_DB {
             self.armed = true;
         }
         // Move the floor *after* the comparison so the onset frame is judged
         // against the level that preceded it: down to any new trough at once,
         // up toward the current level slowly.
-        if db < self.floor {
-            self.floor = db;
+        if level < self.floor {
+            self.floor = level;
         } else if elapsed > 0.0 {
             let k = 1.0 - (-elapsed / FLOOR_TAU).exp();
-            self.floor += (db - self.floor) * k;
+            self.floor += (level - self.floor) * k;
         }
         fired
     }
@@ -259,21 +266,24 @@ mod tests {
             .map(|f| {
                 let phase = (f as f32 * DT) % period;
                 let amp = bed + kick * (-phase / 0.12).exp();
-                AudioLevels {
-                    low: amp * amp * 0.5,
-                    full: amp * amp,
-                    fresh: true,
-                }
+                flat(amp * amp * 0.5, amp * amp)
             })
             .collect()
     }
 
-    fn level(amp: f32) -> AudioLevels {
+    /// A fresh frame whose low band held `low` throughout.
+    fn flat(low: f32, full: f32) -> AudioLevels {
         AudioLevels {
-            low: amp * amp * 0.5,
-            full: amp * amp,
+            low,
+            low_peak: low,
+            low_mean: low,
+            full,
             fresh: true,
         }
+    }
+
+    fn level(amp: f32) -> AudioLevels {
+        flat(amp * amp * 0.5, amp * amp)
     }
 
     fn run(features: &mut AudioFeatures, track: &[AudioLevels]) -> u64 {
@@ -362,11 +372,7 @@ mod tests {
         // PipeWire quantum at 144 Hz). The floor must also creep over the stale
         // frames' time, or its time constant triples and the swell outruns it
         // by > 3 dB.
-        let swell = |t: f32| AudioLevels {
-            low: 10f32.powf((-30.0 + 5.0 * t) / 10.0),
-            full: 0.0,
-            fresh: true,
-        };
+        let swell = |t: f32| flat(10f32.powf((-30.0 + 5.0 * t) / 10.0), 0.0);
         let bars = [0.5; 8];
         let mut every = AudioFeatures::default();
         let mut bursty = AudioFeatures::default();

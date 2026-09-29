@@ -187,6 +187,18 @@ fn editor_ui(
     editor.open = open;
 }
 
+/// A slider that clamps and snaps only what the user edits. egui's default
+/// (`SliderClamping::Always`) writes the range clamp and step rounding back into
+/// the bound value on every draw, so merely opening the editor would rewrite
+/// an off-grid or out-of-range setting — and under an active scene, a key
+/// changed that way counts as the user's (see `scene::SceneBase`).
+fn slider<Num: egui::emath::Numeric>(
+    value: &mut Num,
+    range: std::ops::RangeInclusive<Num>,
+) -> egui::Slider<'_> {
+    egui::Slider::new(value, range).clamping(egui::SliderClamping::Edits)
+}
+
 // --- Sections ---------------------------------------------------------------
 
 /// The live resources the editor reads and writes, bundled so the save /
@@ -411,29 +423,29 @@ fn fx_section(ui: &mut egui::Ui, fx: &mut FxSettings) {
         ui.checkbox(&mut fx.sparks, "impact sparks");
         ui.checkbox(&mut fx.glossy_balls, "glossy balls");
     });
-    ui.add(egui::Slider::new(&mut fx.blob_opacity, 0.0..=1.0).text("fill opacity"));
-    ui.add(egui::Slider::new(&mut fx.halo, 0.0..=4.0).text("halo"));
-    ui.add(egui::Slider::new(&mut fx.corona, 0.0..=4.0).text("corona streaks"));
-    ui.add(egui::Slider::new(&mut fx.flares, 0.0..=4.0).text("rim flares"));
+    ui.add(slider(&mut fx.blob_opacity, 0.0..=1.0).text("fill opacity"));
+    ui.add(slider(&mut fx.halo, 0.0..=4.0).text("halo"));
+    ui.add(slider(&mut fx.corona, 0.0..=4.0).text("corona streaks"));
+    ui.add(slider(&mut fx.flares, 0.0..=4.0).text("rim flares"));
     if fx.backdrop {
-        ui.add(egui::Slider::new(&mut fx.stars, 0.0..=1.0).text("stars"));
-        ui.add(egui::Slider::new(&mut fx.nebula, 0.0..=4.0).text("nebula"));
+        ui.add(slider(&mut fx.stars, 0.0..=1.0).text("stars"));
+        ui.add(slider(&mut fx.nebula, 0.0..=4.0).text("nebula"));
     }
     ui.collapsing("Camera", |ui| {
         ui.add(
-            egui::Slider::new(&mut fx.punch, 0.0..=0.2)
+            slider(&mut fx.punch, 0.0..=0.2)
                 .text("beat zoom punch")
                 .step_by(0.005),
         );
-        ui.add(egui::Slider::new(&mut fx.shake, 0.0..=40.0).text("beat shake (px)"));
+        ui.add(slider(&mut fx.shake, 0.0..=40.0).text("beat shake (px)"));
         ui.add(
-            egui::Slider::new(&mut fx.chromatic, 0.0..=0.1)
+            slider(&mut fx.chromatic, 0.0..=0.1)
                 .text("chromatic aberration")
                 .step_by(0.001),
         );
-        ui.add(egui::Slider::new(&mut fx.vignette, 0.0..=1.0).text("vignette"));
+        ui.add(slider(&mut fx.vignette, 0.0..=1.0).text("vignette"));
         ui.add(
-            egui::Slider::new(&mut fx.art_zoom, 0.0..=0.3)
+            slider(&mut fx.art_zoom, 0.0..=0.3)
                 .text("cover zoom on bass")
                 .step_by(0.005),
         );
@@ -455,7 +467,7 @@ fn mode_section(ui: &mut egui::Ui, mode: &mut DrawingMode) {
 fn geometry_section(ui: &mut egui::Ui, vis: &mut VisSettings) {
     ui.label(egui::RichText::new("Geometry").strong());
 
-    ui.add(egui::Slider::new(&mut vis.monstercat, 1.0..=4.0).text("monstercat smoothing"));
+    ui.add(slider(&mut vis.monstercat, 1.0..=4.0).text("monstercat smoothing"));
 
     enum_combo(
         ui,
@@ -484,19 +496,17 @@ fn geometry_section(ui: &mut egui::Ui, vis: &mut VisSettings) {
     ui.checkbox(&mut vis.filling, "Fill shape");
     ui.checkbox(&mut vis.hearts, "Hearts (spine modes)");
 
-    ui.add(egui::Slider::new(&mut vis.line_thickness, 0.5..=40.0).text("line thickness"));
-    ui.add(egui::Slider::new(&mut vis.items_offset, 0.0..=0.5).text("items offset"));
-    ui.add(egui::Slider::new(&mut vis.items_roundness, 0.0..=1.0).text("items roundness"));
-    ui.add(egui::Slider::new(&mut vis.inner_radius, 0.0..=1.0).text("inner radius (circle)"));
-    ui.add(
-        egui::Slider::new(&mut vis.rotation, 0.0..=std::f32::consts::TAU).text("rotation (circle)"),
-    );
-    ui.add(egui::Slider::new(&mut vis.circle_scale, 0.1..=3.0).text("size (circle)"));
-    ui.add(egui::Slider::new(&mut vis.area_margin, 0.0..=200.0).text("area margin (px)"));
+    ui.add(slider(&mut vis.line_thickness, 0.5..=40.0).text("line thickness"));
+    ui.add(slider(&mut vis.items_offset, 0.0..=0.5).text("items offset"));
+    ui.add(slider(&mut vis.items_roundness, 0.0..=1.0).text("items roundness"));
+    ui.add(slider(&mut vis.inner_radius, 0.0..=1.0).text("inner radius (circle)"));
+    ui.add(slider(&mut vis.rotation, 0.0..=std::f32::consts::TAU).text("rotation (circle)"));
+    ui.add(slider(&mut vis.circle_scale, 0.1..=3.0).text("size (circle)"));
+    ui.add(slider(&mut vis.area_margin, 0.0..=200.0).text("area margin (px)"));
     ui.horizontal(|ui| {
         ui.label("area offset");
-        ui.add(egui::Slider::new(&mut vis.area_offset.x, -1.0..=1.0).text("x"));
-        ui.add(egui::Slider::new(&mut vis.area_offset.y, -1.0..=1.0).text("y"));
+        ui.add(slider(&mut vis.area_offset.x, -1.0..=1.0).text("x"));
+        ui.add(slider(&mut vis.area_offset.y, -1.0..=1.0).text("y"));
     });
 }
 
@@ -520,12 +530,12 @@ fn colors_section(ui: &mut egui::Ui, vis: &mut VisSettings) {
         ],
     );
     ui.add(
-        egui::Slider::new(&mut vis.bloom_intensity, 0.0..=2.0)
+        slider(&mut vis.bloom_intensity, 0.0..=2.0)
             .text("bloom intensity")
             .step_by(0.01),
     );
     ui.add(
-        egui::Slider::new(&mut vis.glow_gain, 0.0..=6.0)
+        slider(&mut vis.glow_gain, 0.0..=6.0)
             .text("glow gain (HDR)")
             .step_by(0.05),
     );
@@ -534,11 +544,11 @@ fn colors_section(ui: &mut egui::Ui, vis: &mut VisSettings) {
             "Use colors from the current track's cover for the foreground gradient. \
              Colors fade when the track changes.",
         );
-    ui.add(egui::Slider::new(&mut vis.album_art_linger, 0.0..=60.0).text("cover linger (s)"))
+    ui.add(slider(&mut vis.album_art_linger, 0.0..=60.0).text("cover linger (s)"))
         .on_hover_text("Keep the previous cover while waiting for new art. 0 = clear immediately.");
     if vis.dynamic_colors {
         ui.add(
-            egui::Slider::new(
+            slider(
                 &mut vis.dynamic_color_count,
                 2..=crate::now_playing::MAX_DYNAMIC_COLORS,
             )
@@ -546,7 +556,7 @@ fn colors_section(ui: &mut egui::Ui, vis: &mut VisSettings) {
         )
         .on_hover_text("Number of cover colors used for the gradient and balls.");
         ui.add(
-            egui::Slider::new(&mut vis.dynamic_color_fade, 0.0..=5.0)
+            slider(&mut vis.dynamic_color_fade, 0.0..=5.0)
                 .text("color fade (s)")
                 .step_by(0.05),
         )
@@ -614,18 +624,18 @@ fn audio_section(
 
     let mut bars = cava.bars_per_channel as u32;
     if ui
-        .add(egui::Slider::new(&mut bars, 1..=128).text("bars / channel"))
+        .add(slider(&mut bars, 1..=128).text("bars / channel"))
         .changed()
     {
         cava.bars_per_channel = bars as usize;
     }
     ui.checkbox(&mut cava.autosens, "Auto-sensitivity");
-    ui.add(egui::Slider::new(&mut cava.noise_reduction, 0.0..=1.0).text("noise reduction"));
+    ui.add(slider(&mut cava.noise_reduction, 0.0..=1.0).text("noise reduction"));
 
     let mut low = cava.low_cutoff_freq;
     let mut high = cava.high_cutoff_freq;
     if ui
-        .add(egui::Slider::new(&mut low, 20..=2_000).text("low cutoff (Hz)"))
+        .add(slider(&mut low, 20..=2_000).text("low cutoff (Hz)"))
         .changed()
     {
         cava.low_cutoff_freq = low;
@@ -635,7 +645,7 @@ fn audio_section(
     // (the old fixed 22 kHz max at, say, a 32 kHz rate) is a trap.
     let high_max = (cava.rate / 2).saturating_sub(1).max(2_001);
     if ui
-        .add(egui::Slider::new(&mut high, 2_000..=high_max).text("high cutoff (Hz)"))
+        .add(slider(&mut high, 2_000..=high_max).text("high cutoff (Hz)"))
         .changed()
     {
         cava.high_cutoff_freq = high.min(high_max);
@@ -664,10 +674,7 @@ fn audio_section(
             );
         });
         let mut chans = cava.channels as u32;
-        if ui
-            .add(egui::Slider::new(&mut chans, 1..=2).text("channels"))
-            .changed()
-        {
+        if ui.add(slider(&mut chans, 1..=2).text("channels")).changed() {
             cava.channels = chans as usize;
         }
         ui.horizontal(|ui| {
@@ -733,8 +740,8 @@ fn image_layer_editor(
             layer.path = None;
         }
         ui.label(egui::RichText::new(help).weak().small());
-        ui.add(egui::Slider::new(&mut layer.scale, 0.1..=4.0).text("scale"));
-        ui.add(egui::Slider::new(&mut layer.alpha, 0.0..=1.0).text("alpha"));
+        ui.add(slider(&mut layer.scale, 0.1..=4.0).text("scale"));
+        ui.add(slider(&mut layer.alpha, 0.0..=1.0).text("alpha"));
     });
 }
 
@@ -748,30 +755,30 @@ fn physics_section(ui: &mut egui::Ui, physics: &mut PhysicsSettings) {
     }
 
     ui.add(
-        egui::Slider::new(&mut physics.gravity, 0.0..=5000.0)
+        slider(&mut physics.gravity, 0.0..=5000.0)
             .text("gravity (px/s²)")
             .step_by(10.0),
     );
     ui.add(
-        egui::Slider::new(&mut physics.restitution, 0.0..=1.0)
+        slider(&mut physics.restitution, 0.0..=1.0)
             .text("ball restitution")
             .step_by(0.01),
     );
     ui.add(
-        egui::Slider::new(&mut physics.air_resistance, 0.0..=5.0)
+        slider(&mut physics.air_resistance, 0.0..=5.0)
             .text("air resistance")
             .step_by(0.01),
     );
     ui.add(
-        egui::Slider::new(&mut physics.mass, 0.1..=10.0)
+        slider(&mut physics.mass, 0.1..=10.0)
             .text("ball mass")
             .step_by(0.1),
     );
-    ui.add(egui::Slider::new(&mut physics.radius, 2.0..=80.0).text("ball radius (px)"));
+    ui.add(slider(&mut physics.radius, 2.0..=80.0).text("ball radius (px)"));
 
     let mut max = physics.max_balls as u32;
     if ui
-        .add(egui::Slider::new(&mut max, 1..=2000).text("max balls"))
+        .add(slider(&mut max, 1..=2000).text("max balls"))
         .changed()
     {
         physics.max_balls = max as usize;
@@ -782,7 +789,7 @@ fn physics_section(ui: &mut egui::Ui, physics: &mut PhysicsSettings) {
     let mut debounce = physics.spawn_debounce_ms as u32;
     if ui
         .add(
-            egui::Slider::new(&mut debounce, 0..=2000)
+            slider(&mut debounce, 0..=2000)
                 .text("right-click spray delay (ms)")
                 .step_by(10.0),
         )
@@ -794,19 +801,19 @@ fn physics_section(ui: &mut egui::Ui, physics: &mut PhysicsSettings) {
 
     ui.collapsing("Surface / wave", |ui| {
         ui.add(
-            egui::Slider::new(&mut physics.bar_restitution, 0.0..=2.0)
+            slider(&mut physics.bar_restitution, 0.0..=2.0)
                 .text("surface restitution")
                 .step_by(0.01),
         );
         ui.add(
-            egui::Slider::new(&mut physics.bar_push, 0.0..=10.0)
+            slider(&mut physics.bar_push, 0.0..=10.0)
                 .text("launch gain")
                 .step_by(0.05),
         );
     });
 
     ui.add(
-        egui::Slider::new(&mut physics.central_gravity, 0.0..=5000.0)
+        slider(&mut physics.central_gravity, 0.0..=5000.0)
             .text("central gravity (circle)")
             .step_by(10.0),
     );
@@ -822,7 +829,7 @@ fn physics_section(ui: &mut egui::Ui, physics: &mut PhysicsSettings) {
         if physics.trails {
             let mut tlen = physics.trail_length as u32;
             if ui
-                .add(egui::Slider::new(&mut tlen, 1..=120).text("trail length"))
+                .add(slider(&mut tlen, 1..=120).text("trail length"))
                 .changed()
             {
                 physics.trail_length = tlen as usize;
@@ -891,4 +898,45 @@ fn egui_to_color(c: egui::Color32) -> Color {
         b as f32 / 255.0,
         a as f32 / 255.0,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn drawing_the_editor_never_rewrites_a_setting() {
+        // Off the sliders' step grid or outside their ranges, as a hand-written
+        // config or scene can set them.
+        let mut vis = VisSettings {
+            glow_gain: 1.42,
+            monstercat: 0.5,
+            line_thickness: 55.0,
+            ..default()
+        };
+        let mut physics = PhysicsSettings {
+            gravity: 1234.5,
+            mass: 0.05,
+            ..default()
+        };
+        let mut fx = FxSettings {
+            halo: 5.0,
+            ..default()
+        };
+        let ctx = egui::Context::default();
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            geometry_section(ui, &mut vis);
+            colors_section(ui, &mut vis);
+            physics_section(ui, &mut physics);
+            fx_section(ui, &mut fx);
+        });
+        // No renderer takes the font atlas upload here.
+        out.textures_delta.clear();
+        assert_eq!(vis.glow_gain, 1.42);
+        assert_eq!(vis.monstercat, 0.5);
+        assert_eq!(vis.line_thickness, 55.0);
+        assert_eq!(physics.gravity, 1234.5);
+        assert_eq!(physics.mass, 0.05);
+        assert_eq!(fx.halo, 5.0);
+    }
 }

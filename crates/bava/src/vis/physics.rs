@@ -261,8 +261,11 @@ impl Plugin for PhysicsPlugin {
             .add_systems(
                 Update,
                 (
-                    // Tear down on a mode switch before anything reads the caches.
-                    on_mode_change,
+                    // Tear down on a mode switch before anything reads the caches
+                    // — after a scene has set its mode, so the scene's first
+                    // frame doesn't read as a switch (and despawn the launch
+                    // balls queued below).
+                    on_mode_change.after(crate::scene::SceneApplySet),
                     spawn_ball_on_click,
                     enforce_ball_cap,
                     despawn_escaped_balls,
@@ -295,7 +298,9 @@ impl Plugin for PhysicsPlugin {
                     // After a `--scene` has applied its `[physics]` overrides,
                     // so the launch balls follow them (a scene's `randomize =
                     // false` keeps a recording deterministic).
-                    spawn_initial_balls.after(crate::scene::SceneApplySet),
+                    spawn_initial_balls
+                        .after(crate::scene::SceneApplySet)
+                        .after(on_mode_change),
                 ),
             )
             // Ball and trail geometry is built from the *simulated* transforms,

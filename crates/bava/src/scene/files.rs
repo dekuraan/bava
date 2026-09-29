@@ -239,61 +239,96 @@ fn read_dir(dir: &Path) -> Result<SceneFiles, String> {
 #[cfg(not(target_arch = "wasm32"))]
 const MAX_SCENE_DEPTH: usize = 32;
 
+/// Most files [`walk_scene`] lists. With [`MAX_SCENE_BYTES`] it bounds the walk
+/// itself, which the hot-reload stamp repeats every second.
+#[cfg(not(target_arch = "wasm32"))]
+const MAX_SCENE_FILES: usize = 10_000;
+
 /// Every file of a scene directory, recursively. Symlinks are followed, to
 /// agree with [`discover`] / [`resolve`] (which accept a linked `scene.toml`)
 /// and so scenes installed by a dotfile manager load. Dangling links are
-/// skipped, and so is a linked directory that is one of its own ancestors.
+/// skipped; a linked directory is expanded once however many links reach it,
+/// and never when it is one of its own ancestors. Stops with an error past
+/// [`MAX_SCENE_FILES`] files or [`MAX_SCENE_BYTES`] bytes, so a link into a big
+/// or link-dense tree fails fast instead of walking it.
 #[cfg(not(target_arch = "wasm32"))]
 fn walk_scene(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
-    let mut ancestors = vec![dir.canonicalize()?];
-    walk(dir, &mut ancestors, out)
+    let root = dir.canonicalize()?;
+    let mut walk = Walk {
+        out,
+        ancestors: vec![root],
+        expanded: std::collections::HashSet::new(),
+        bytes: 0,
+    };
+    walk.dir(dir)
 }
 
-/// [`walk_scene`]'s recursion. `ancestors` holds the canonical paths of `dir`
-/// and every directory above it, so a link cycle is caught on its way back.
+/// [`walk_scene`]'s state.
 #[cfg(not(target_arch = "wasm32"))]
-fn walk(dir: &Path, ancestors: &mut Vec<PathBuf>, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
-    if ancestors.len() > MAX_SCENE_DEPTH {
-        return Err(std::io::Error::other(format!(
-            "{} is nested more than {MAX_SCENE_DEPTH} directories deep",
-            dir.display()
-        )));
-    }
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.starts_with('.') || name.ends_with('~') {
-            continue;
+struct Walk<'a> {
+    out: &'a mut Vec<PathBuf>,
+    /// Canonical paths of the directory being walked and every one above it,
+    /// so a link cycle is caught on its way back.
+    ancestors: Vec<PathBuf>,
+    /// Canonical targets of linked directories already walked.
+    expanded: std::collections::HashSet<PathBuf>,
+    bytes: u64,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Walk<'_> {
+    fn dir(&mut self, dir: &Path) -> std::io::Result<()> {
+        if self.ancestors.len() > MAX_SCENE_DEPTH {
+            return Err(std::io::Error::other(format!(
+                "{} is nested more than {MAX_SCENE_DEPTH} directories deep",
+                dir.display()
+            )));
         }
-        let path = entry.path();
-        let mut kind = entry.file_type()?;
-        let linked = kind.is_symlink();
-        if linked {
-            match std::fs::metadata(&path) {
-                Ok(target) => kind = target.file_type(),
-                Err(_) => continue,
-            }
-        }
-        if kind.is_dir() {
-            let canonical = if linked {
-                path.canonicalize()?
-            } else {
-                // A real subdirectory of a canonical path is canonical too.
-                ancestors[ancestors.len() - 1].join(entry.file_name())
-            };
-            if ancestors.contains(&canonical) {
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with('.') || name.ends_with('~') {
                 continue;
             }
-            ancestors.push(canonical);
-            let walked = walk(&path, ancestors, out);
-            ancestors.pop();
-            walked?;
-        } else if kind.is_file() {
-            out.push(path);
+            let path = entry.path();
+            let mut kind = entry.file_type()?;
+            let linked = kind.is_symlink();
+            if linked {
+                match std::fs::metadata(&path) {
+                    Ok(target) => kind = target.file_type(),
+                    Err(_) => continue,
+                }
+            }
+            if kind.is_dir() {
+                let canonical = if linked {
+                    path.canonicalize()?
+                } else {
+                    // A real subdirectory of a canonical path is canonical too.
+                    self.ancestors[self.ancestors.len() - 1].join(entry.file_name())
+                };
+                if self.ancestors.contains(&canonical)
+                    || (linked && !self.expanded.insert(canonical.clone()))
+                {
+                    continue;
+                }
+                self.ancestors.push(canonical);
+                let walked = self.dir(&path);
+                self.ancestors.pop();
+                walked?;
+            } else if kind.is_file() {
+                self.bytes += std::fs::metadata(&path).map_or(0, |m| m.len());
+                self.out.push(path);
+                if self.out.len() > MAX_SCENE_FILES || self.bytes > MAX_SCENE_BYTES {
+                    return Err(std::io::Error::other(format!(
+                        "more than {MAX_SCENE_FILES} files or {} MB",
+                        MAX_SCENE_BYTES / (1024 * 1024)
+                    )));
+                }
+            }
         }
+        Ok(())
     }
-    Ok(())
 }
 
 /// A cheap change stamp for a user scene directory (sizes + mtimes of every
@@ -475,6 +510,28 @@ mod tests {
         let before = stamp(&entry.source).unwrap();
         std::fs::write(store.join("sand.png"), "a bigger png").unwrap();
         assert_ne!(stamp(&entry.source).unwrap(), before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_reached_by_many_links_is_walked_once() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        // d0 → d1 → … → d20, each level linked twice: 2^20 paths to d20.
+        const LEVELS: usize = 20;
+        for i in 0..=LEVELS {
+            std::fs::create_dir_all(dir.path().join(format!("d{i}"))).unwrap();
+        }
+        for i in 0..LEVELS {
+            let next = dir.path().join(format!("d{}", i + 1));
+            let here = dir.path().join(format!("d{i}"));
+            symlink(&next, here.join("a")).unwrap();
+            symlink(&next, here.join("b")).unwrap();
+        }
+        std::fs::write(dir.path().join(format!("d{LEVELS}/leaf.txt")), "x").unwrap();
+        let mut out = Vec::new();
+        walk_scene(&dir.path().join("d0"), &mut out).unwrap();
+        assert_eq!(out.len(), 1, "{out:?}");
     }
 
     #[test]

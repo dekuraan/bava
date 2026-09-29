@@ -32,6 +32,11 @@ pub struct FxMaterial3d {
     pub texture: Option<Handle<Image>>,
     pub shader: Handle<Shader>,
     pub blend: FxBlend,
+    /// Write depth although alpha-blended: a scene `alpha` material at full
+    /// opacity (see [`alpha_mode`](Material::alpha_mode)). Set per `MaterialDef`
+    /// at spawn — never for `mask` or translucent materials, whose clear
+    /// texels would otherwise hide what is behind them.
+    pub depth_write: bool,
     /// Draw back faces too (sky domes, thin shells).
     pub double_sided: bool,
 }
@@ -51,7 +56,7 @@ impl From<&FxMaterial3d> for FxMaterial3dKey {
         Self {
             shader: m.shader.clone(),
             blend: m.blend,
-            depth_write: m.blend == FxBlend::Alpha && m.uniform.color.w >= 1.0,
+            depth_write: m.blend == FxBlend::Alpha && m.depth_write,
             double_sided: m.double_sided,
         }
     }
@@ -164,6 +169,8 @@ mod tests {
             texture: None,
             shader: HALO_SHADER,
             blend,
+            // As `spawn` sets it for a scene `alpha` material.
+            depth_write: alpha >= 1.0,
             double_sided: false,
         }
     }
