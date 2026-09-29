@@ -3,7 +3,9 @@ import vm from "node:vm";
 import test from "node:test";
 import assert from "node:assert/strict";
 
-const source = readFileSync(new URL("../bava.js", import.meta.url), "utf8").split("const AUDIO_EXT")[0];
+const script = readFileSync(new URL("../bava.js", import.meta.url), "utf8");
+const source = script.split("const AUDIO_EXT")[0]
+  + script.slice(script.indexOf("async function pushNowPlaying()"), script.indexOf("const PANEL ="));
 const deferred = () => {
   let resolve, reject;
   const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
@@ -137,4 +139,79 @@ test("failed worklet loading releases the stream and context", async () => {
   assert.equal(await start, false);
   assert.equal(shared.track.stopped, true);
   assert.equal(s.contexts[0].closed, true);
+});
+
+test("a file pauses YouTube and keeps its title after a late player event", async () => {
+  const s = setup();
+  s.run(`globalThis.pauses = 0; globalThis.titles = [];
+    player = { pauseVideo() { pauses++; }, getVideoData() {
+      return { video_id: "abcdefghijk", title: "Old YouTube song" };
+    } };
+    wasm.bava_set_now_playing = (title) => titles.push(title);`);
+  const start = s.run('startFile({name:"local.mp3"})');
+  await flush();
+  s.contexts[0].module.resolve();
+  assert.equal(await start, true);
+  await s.run('pushNowPlaying()');
+  assert.equal(s.run('pauses'), 1);
+  assert.equal(s.run('titles.at(-1)'), "local");
+});
+
+test("a thumbnail finishing after switching to a file cannot replace its art", async () => {
+  const s = setup();
+  const sharing = s.run('startCapture(true)');
+  s.pickers[0].resolve(stream("this tab"));
+  await flush();
+  s.contexts[0].module.resolve();
+  await sharing;
+  s.run(`globalThis.art = [];
+    player = { pauseVideo() {}, getVideoData() { return { video_id: "abcdefghijk" }; } };
+    wasm.bava_set_album_art = (bytes) => art.push(bytes.length);
+    globalThis.fetch = () => new Promise(resolve => {
+      globalThis.finishThumbnail = () => resolve({ ok: true, arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer });
+    });`);
+  const metadata = s.run('pushNowPlaying()');
+  const start = s.run('startFile({name:"local.mp3"})');
+  await flush();
+  s.run('finishThumbnail()');
+  await metadata;
+  assert.equal(s.run('art.includes(3)'), false);
+  s.contexts[1].module.resolve();
+  assert.equal(await start, true);
+});
+
+test("switching back to this tab restores YouTube metadata", async () => {
+  const s = setup();
+  s.run(`globalThis.titles = [];
+    player = { pauseVideo() {}, getVideoData() {
+      return { video_id: "abcdefghijk", title: "YouTube song" };
+    } };
+    wasm.bava_set_now_playing = (title) => titles.push(title);`);
+  const file = s.run('startFile({name:"local.mp3"})');
+  await flush();
+  s.contexts[0].module.resolve();
+  await file;
+  assert.equal(s.run('titles.at(-1)'), "local");
+  const sharing = s.run('startCapture(true)');
+  s.pickers[0].resolve(stream("this tab"));
+  await flush();
+  s.contexts[1].module.resolve();
+  assert.equal(await sharing, true);
+  assert.equal(s.run('titles.at(-1)'), "YouTube song");
+});
+
+test("another tab cannot inherit the embedded player's metadata", async () => {
+  const s = setup();
+  s.run(`globalThis.titles = [];
+    player = { pauseVideo() {}, getVideoData() {
+      return { video_id: "abcdefghijk", title: "Wrong tab" };
+    } };
+    wasm.bava_set_now_playing = (title) => titles.push(title);`);
+  const sharing = s.run('startCapture(false)');
+  s.pickers[0].resolve(stream("other tab"));
+  await flush();
+  s.contexts[0].module.resolve();
+  assert.equal(await sharing, true);
+  await s.run('pushNowPlaying()');
+  assert.equal(s.run('titles.at(-1)'), undefined);
 });

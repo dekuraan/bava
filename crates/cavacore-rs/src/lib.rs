@@ -244,7 +244,7 @@ impl CavaPlan {
         let fft_treble = base;
         let fft_bass = base * 2;
 
-        if bars as i32 > (fft_treble / 2 + 1) as i32 {
+        if bars > fft_treble / 2 + 1 {
             return Err(format!(
                 "cava_init called with illegal number of bars: {bars}, for {rate} sample rate \
                  number of bars can't be more than {}\n",

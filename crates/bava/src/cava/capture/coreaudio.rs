@@ -486,6 +486,10 @@ unsafe extern "C-unwind" fn io_proc(
 /// settings pane makes it fixable. Failure to spawn `open` is ignored — it is a
 /// convenience, not a requirement.
 fn open_audio_privacy_settings() {
+    static OPENED: AtomicBool = AtomicBool::new(false);
+    if OPENED.swap(true, Ordering::Relaxed) {
+        return;
+    }
     let _ = std::process::Command::new("open")
         .arg("x-apple.systempreferences:com.apple.settings.PrivacySecurity?Privacy_ScreenCapture")
         .spawn();
