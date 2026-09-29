@@ -85,12 +85,11 @@ pub fn open(
 /// to be [`Send`]. The web build has no capture thread and so no implementors.
 #[cfg(not(target_arch = "wasm32"))]
 pub trait AudioCapture: Send {
-    /// Fill the **entire** `buf` with interleaved `f64` samples, blocking as
-    /// needed. Backends capturing a live stream (PulseAudio monitor, WASAPI
-    /// loopback) never end, so there is no end-of-stream signal; an idle source
-    /// must pad with silence to keep a steady cadence rather than short-read.
+    /// Read interleaved samples, blocking for a full buffer during playback.
+    /// Return the number of real samples written. An idle timeout may return
+    /// fewer samples, including zero; the consumer supplies paced silence.
     /// Errors are transient by convention; the caller may log and retry.
-    fn read(&mut self, buf: &mut [f64]) -> Result<(), CaptureError>;
+    fn read(&mut self, buf: &mut [f64]) -> Result<usize, CaptureError>;
 
     /// Sample rate of the captured stream, in Hz.
     fn rate(&self) -> u32;

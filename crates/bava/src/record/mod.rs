@@ -539,6 +539,12 @@ pub fn run(cli: &Cli, config: &Config) -> Result<(), String> {
         synchronous_pipeline_compilation: true,
         ..default()
     });
+    // Only explicit user image loads may opt out of the asset-directory restriction.
+    #[cfg(not(target_arch = "wasm32"))]
+    let default_plugins = default_plugins.set(AssetPlugin {
+        unapproved_path_mode: bevy::asset::UnapprovedPathMode::Deny,
+        ..default()
+    });
     // Same puffin bridge as the live app — a headless `--input` render is the
     // reproducible harness for A/B-ing renderer changes (deterministic frames,
     // no display needed). See `crate::profiling`.

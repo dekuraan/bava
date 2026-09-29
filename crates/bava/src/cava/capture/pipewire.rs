@@ -36,23 +36,11 @@ use spa::utils::{Direction, SpaTypes};
 
 use super::{AudioCapture, CaptureError};
 
-/// How long [`PipeWireCapture::open`] waits for the stream to negotiate a format
-/// (or report an error) before giving up so the caller can fall back to Pulse.
+/// Bound format negotiation so the caller can fall back to PulseAudio.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// How long [`PipeWireCapture::read`] waits for a full chunk of *real* samples
-/// before giving up and zero-filling. This must comfortably exceed PipeWire's
-/// largest plausible quantum (a quantum can be a few tens of ms) so that during
-/// active playback `read` always assembles a full real chunk and never injects
-/// spurious silence — which would otherwise corrupt cava's autosens/gravity
-/// smoothing (the Pulse backend blocks until a full real read is available, so
-/// it never does this). Only a genuinely idle source — sink suspended, no
-/// buffers arriving — hits this timeout; the bars then decay on the resulting
-/// silence, the same path as cava's `reset_output_buffers`. Sized above the
-/// largest configurable quantum (8192 frames @ 48 kHz ≈ 171 ms, reachable when
-/// `default.clock.max-quantum` is raised) so active playback never times out
-/// mid-quantum, yet still below `feed_cava`'s 200 ms stall window so steady
-/// silence reaches the analysis before that net trips.
+/// Wait long enough to span ordinary packet jitter before returning a short
+/// read. The shared consumer handles idle decay after 200 ms without samples.
 const IDLE_TIMEOUT: Duration = Duration::from_millis(180);
 
 /// Hand-off between the realtime process callback (producer) and `read`
@@ -201,16 +189,9 @@ impl Drop for PipeWireCapture {
 }
 
 impl AudioCapture for PipeWireCapture {
-    fn read(&mut self, buf: &mut [f64]) -> Result<(), CaptureError> {
-        // Block until the queue holds a full chunk of *real* samples, then drain
-        // it. PipeWire delivers in quanta that are usually larger than one chunk
-        // and arrive tens of ms apart, so returning early with whatever happens
-        // to be queued would zero-fill most chunks mid-quantum during active
-        // playback and feed cava a stream of real-audio-interspersed-with-silence
-        // — visibly different bar smoothing than the Pulse backend, whose
-        // `simple.read` blocks until a full real read is available. Only a
-        // genuinely idle source (no quanta within `IDLE_TIMEOUT`) short-reads and
-        // zero-fills, so the bars decay on silence at a steady cadence.
+    fn read(&mut self, buf: &mut [f64]) -> Result<usize, CaptureError> {
+        // Wait across packet boundaries. Only a real idle timeout short-reads;
+        // the caller must distinguish it from captured silence.
         let need = buf.len();
         let mut q = self.shared.queue.lock().unwrap();
         let start = Instant::now();
@@ -235,10 +216,7 @@ impl AudioCapture for PipeWireCapture {
             *slot = q.pop_front().unwrap() as f64;
         }
         drop(q);
-        for slot in &mut buf[take..] {
-            *slot = 0.0;
-        }
-        Ok(())
+        Ok(take)
     }
 
     fn rate(&self) -> u32 {

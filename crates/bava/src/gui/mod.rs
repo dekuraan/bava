@@ -494,10 +494,8 @@ fn geometry_section(ui: &mut egui::Ui, vis: &mut VisSettings) {
     ui.checkbox(&mut vis.reverse_mirror, "Reverse mirror side");
     ui.checkbox(&mut vis.reverse_order, "Reverse bar order");
     ui.checkbox(&mut vis.filling, "Fill shape");
-    ui.checkbox(&mut vis.hearts, "Hearts (spine modes)");
 
     ui.add(slider(&mut vis.line_thickness, 0.5..=40.0).text("line thickness"));
-    ui.add(slider(&mut vis.items_offset, 0.0..=0.5).text("items offset"));
     ui.add(slider(&mut vis.items_roundness, 0.0..=1.0).text("items roundness"));
     ui.add(slider(&mut vis.inner_radius, 0.0..=1.0).text("inner radius (circle)"));
     ui.add(slider(&mut vis.rotation, 0.0..=std::f32::consts::TAU).text("rotation (circle)"));
@@ -621,7 +619,6 @@ fn colors_section(ui: &mut egui::Ui, vis: &mut VisSettings) {
     );
 
     color_stops(ui, "Foreground", &mut prof.fg);
-    color_stops(ui, "Background", &mut prof.bg);
 }
 
 /// Audio / DSP controls. DSP params apply on an explicit rebuild; the capture

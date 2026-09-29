@@ -44,4 +44,7 @@ jobs:
           # winit, paste via simba -> parry2d -> avian2d. They go away when
           # those upstreams drop the deps; until then they'd otherwise open a
           # fresh issue on every scheduled run.
-          ignore: RUSTSEC-2026-0194,RUSTSEC-2026-0195,RUSTSEC-2026-0192,RUSTSEC-2024-0436
+          # Bincode is used only by optional puffin profiling serialization.
+          # 2025-0141 reports unmaintained status, with no patched release.
+          # Remove this exception when puffin replaces its serialization format.
+          ignore: RUSTSEC-2026-0194,RUSTSEC-2026-0195,RUSTSEC-2026-0192,RUSTSEC-2024-0436,RUSTSEC-2025-0141

@@ -48,16 +48,8 @@ use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSString};
 
 use super::{AudioCapture, CaptureError, LinearResampler};
 
-/// How long [`CoreAudioCapture::read`] waits for real tap data before giving up
-/// and zero-filling the rest of the chunk. Must comfortably exceed the device IO
-/// period (commonly ~11 ms, up to ~85 ms for a 4096-frame buffer) so that during
-/// active playback a read spanning an IO-cycle boundary blocks for the next
-/// callback instead of injecting silence — feeding cava silence-laced audio
-/// skews its autosens/gravity smoothing (this was the PipeWire backend's bug
-/// too). The tap's IO proc runs continuously and pushes zeros for silent
-/// buffers, so an idle device keeps the queue fed and rarely hits this; it's the
-/// floor for the device-stopped case. Kept below `feed_cava`'s 200 ms stall
-/// window.
+/// Wait long enough to span ordinary packet jitter before returning a short
+/// read. The shared consumer handles idle decay after 200 ms without samples.
 const IDLE_TIMEOUT: Duration = Duration::from_millis(120);
 
 /// Shared hand-off between the realtime IO proc (producer) and `read` (consumer).
@@ -343,7 +335,7 @@ impl Drop for CoreAudioCapture {
 }
 
 impl AudioCapture for CoreAudioCapture {
-    fn read(&mut self, buf: &mut [f64]) -> Result<(), CaptureError> {
+    fn read(&mut self, buf: &mut [f64]) -> Result<usize, CaptureError> {
         // If the device's sample rate changed under us, re-read the tap format
         // and fix the resampler ratio (and channel stride) so we don't keep
         // resampling against a stale device rate.
@@ -364,10 +356,8 @@ impl AudioCapture for CoreAudioCapture {
             }
         }
 
-        // Mirror the WASAPI/PipeWire backends: fill the whole buffer with real
-        // samples, only zero-filling after `IDLE_TIMEOUT` with no data — so active
-        // playback never injects silence mid-stream (the IO period exceeds one
-        // chunk's span, so a per-chunk budget would zero-fill between callbacks).
+        // Wait across IO-cycle boundaries. Idle timeouts return only the
+        // samples received, so the consumer can supply silence at the sample rate.
         let start = Instant::now();
         while self.pending.len() < buf.len() {
             if !self.pump() {
@@ -386,10 +376,11 @@ impl AudioCapture for CoreAudioCapture {
             let overflow = self.pending.len() - cap;
             self.pending.drain(..overflow);
         }
-        for slot in buf.iter_mut() {
+        let take = buf.len().min(self.pending.len());
+        for slot in buf[..take].iter_mut() {
             *slot = self.pending.pop_front().unwrap_or(0.0);
         }
-        Ok(())
+        Ok(take)
     }
 
     fn rate(&self) -> u32 {

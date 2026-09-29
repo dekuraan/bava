@@ -324,7 +324,20 @@ fn apply_image_layer(
         *visibility = Visibility::Hidden;
         return true;
     };
+    #[cfg(target_arch = "wasm32")]
     let handle: Handle<Image> = asset_server.load(path.clone());
+    #[cfg(not(target_arch = "wasm32"))]
+    let handle: Handle<Image> = match std::path::absolute(path) {
+        Ok(path) => asset_server
+            .load_builder()
+            .override_unapproved()
+            .load(bevy::asset::AssetPath::from_path_buf(path)),
+        Err(error) => {
+            warn!("bava: cannot resolve image path {path:?}: {error}");
+            *visibility = Visibility::Hidden;
+            return true;
+        }
+    };
     // Cover-fit to window when the image's dimensions are known.
     let loaded = if let Some(img) = images.get(&handle) {
         let (iw, ih) = (img.width() as f32, img.height() as f32);
@@ -404,6 +417,69 @@ fn update_user_images(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn filesystem_layers_load_absolute_and_working_directory_paths() {
+        let cwd = std::env::current_dir().unwrap();
+        let dir = tempfile::tempdir_in(&cwd).unwrap();
+        let file = dir.path().join("cover #1.png");
+        image::RgbaImage::from_pixel(2, 1, image::Rgba([255, 0, 0, 255]))
+            .save(&file)
+            .unwrap();
+        let mut app = App::new();
+        app.add_plugins((
+            MinimalPlugins,
+            AssetPlugin {
+                unapproved_path_mode: bevy::asset::UnapprovedPathMode::Deny,
+                ..default()
+            },
+            bevy::image::ImagePlugin::default(),
+        ));
+        app.register_asset_loader(bevy::image::ImageLoader::new(
+            bevy::image::CompressedImageFormats::NONE,
+        ));
+        app.finish();
+        app.cleanup();
+        for path in [&file, file.strip_prefix(&cwd).unwrap()] {
+            let layer = ImageLayer {
+                path: Some(path.to_path_buf()),
+                ..default()
+            };
+            let mut sprite = Sprite::default();
+            let mut visibility = Visibility::Hidden;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                app.update();
+                if apply_image_layer(
+                    &layer,
+                    200.0,
+                    100.0,
+                    app.world().resource::<AssetServer>(),
+                    app.world().resource::<Assets<Image>>(),
+                    &mut sprite,
+                    &mut visibility,
+                ) {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "image did not load: {path:?}"
+                );
+                std::thread::yield_now();
+            }
+            assert_eq!(visibility, Visibility::Visible);
+            assert_eq!(sprite.custom_size, Some(Vec2::new(200.0, 100.0)));
+            assert_eq!(
+                app.world()
+                    .resource::<Assets<Image>>()
+                    .get(&sprite.image)
+                    .unwrap()
+                    .width(),
+                2
+            );
+        }
+    }
 
     /// A minimal app carrying just what `update_art_blur` touches.
     fn blur_app() -> App {
