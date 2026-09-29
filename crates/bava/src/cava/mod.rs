@@ -594,7 +594,8 @@ fn capture_reader(mut settings: CavaSettings, ring: AudioRing, status: CaptureSt
     let mut consecutive_failures = 0u32;
 
     while ring.running.load(Ordering::Relaxed) {
-        if let Err(e) = capture.read(&mut buf) {
+        let read = capture.read(&mut buf);
+        if let Err(e) = &read {
             // Back off before retrying: if the server died or the source was
             // removed, read() errors immediately every call, which would spin
             // a core at 100% and flood the log without this pause.
@@ -624,7 +625,7 @@ fn capture_reader(mut settings: CavaSettings, ring: AudioRing, status: CaptureSt
         }
         consecutive_failures = 0;
         if let Ok(mut q) = ring.buf.lock() {
-            q.extend(buf.iter().copied());
+            q.extend(buf[..read.unwrap()].iter().copied());
             while q.len() > ring.cap {
                 q.pop_front();
             }
@@ -721,6 +722,7 @@ fn feed_cava(
     if let Ok(mut q) = ring.buf.lock() {
         state.accum.extend(q.drain(..));
     }
+    let received = state.accum.len() > before;
     let measured = meter.measure(
         state.accum.range(before..).copied(),
         state.plan.channels(),
@@ -752,29 +754,22 @@ fn feed_cava(
         }
     }
 
-    // Stall safety net — live capture only. Offline (`AudioInjector` present),
-    // audio arrives in *video* time while this timer measures *wall* time, so
-    // on a slow render it would inject spurious silence between real chunks
-    // (nondeterministic output); a recording can't stall anyway.
-    //
-    // Live: the platform backends pad an *idle* device with silence,
-    // so a connected-but-quiet source keeps feeding zeros and the bars decay on
-    // their own. But a hard failure — PulseAudio server death, a monitor source
-    // that vanished, a capture thread backing off on repeated read errors —
-    // delivers *nothing*, which would otherwise freeze the last bars on screen.
-    // When no chunk has arrived for a short window, keep executing on silence so
-    // autosens decays the bars to zero (matching cava's `reset_output_buffers`)
-    // instead of holding a stale frame.
-    if executed > 0 {
-        stall.last_audio = Some(Instant::now());
-    } else if offline.is_none() {
-        let stalled = stall
-            .last_audio
-            .is_none_or(|t| t.elapsed() >= STALL_DECAY_AFTER);
-        if stalled {
+    // Offline samples use video time, so wall-clock decay must stay disabled.
+    if offline.is_none() {
+        let silent_chunks = stall.silence_chunks(
+            Instant::now(),
+            received,
+            state.plan.rate(),
+            chunk / state.plan.channels(),
+        );
+        if silent_chunks > 0 {
+            state.accum.clear();
             state.scratch.clear();
             state.scratch.resize(chunk, 0.0);
-            state.plan.execute(&state.scratch);
+            for _ in 0..silent_chunks {
+                state.plan.execute(&state.scratch);
+            }
+            executed += silent_chunks as u32;
         }
     }
 
@@ -988,6 +983,29 @@ const STALL_DECAY_AFTER: std::time::Duration = std::time::Duration::from_millis(
 #[derive(Default)]
 struct StallState {
     last_audio: Option<Instant>,
+    last_step: Option<Instant>,
+    remainder: f64,
+}
+
+impl StallState {
+    fn silence_chunks(&mut self, now: Instant, received: bool, rate: u32, frames: usize) -> usize {
+        if received || self.last_audio.is_none() {
+            self.last_audio = Some(now);
+            self.last_step = Some(now);
+            self.remainder = 0.0;
+            return 0;
+        }
+        if now.duration_since(self.last_audio.unwrap()) < STALL_DECAY_AFTER {
+            return 0;
+        }
+        // Bound catch-up after a suspended render loop while preserving fractional
+        // chunks across ordinary frames. Decay follows sample time, not render FPS.
+        let elapsed = now.duration_since(self.last_step.replace(now).unwrap());
+        self.remainder += elapsed.as_secs_f64().min(0.25) * f64::from(rate);
+        let chunks = (self.remainder / frames as f64) as usize;
+        self.remainder -= (chunks * frames) as f64;
+        chunks
+    }
 }
 
 /// Rolling debug accumulator for [`feed_cava`].
@@ -1015,6 +1033,75 @@ fn stop_on_exit(mut exit: MessageReader<AppExit>, ring: Option<Res<AudioRing>>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn idle_silence_tracks_sample_time_at_different_render_rates() {
+        for fps in [30, 60, 144, 240] {
+            let mut stall = StallState::default();
+            let start = Instant::now();
+            assert_eq!(stall.silence_chunks(start, true, 48_000, 128), 0);
+            let mut chunks = 0;
+            for frame in 1..=fps {
+                let now = start + std::time::Duration::from_secs_f64(frame as f64 / fps as f64);
+                chunks += stall.silence_chunks(now, false, 48_000, 128);
+            }
+            assert!((374..=375).contains(&chunks), "{fps} fps: {chunks}");
+        }
+    }
+
+    #[test]
+    fn packet_jitter_and_partial_audio_do_not_inject_silence() {
+        let mut stall = StallState::default();
+        let start = Instant::now();
+        for millis in 0..1_000 {
+            let now = start + std::time::Duration::from_millis(millis);
+            // Even a partial real chunk resets the idle deadline.
+            assert_eq!(stall.silence_chunks(now, millis % 180 == 0, 48_000, 128), 0);
+        }
+    }
+
+    #[test]
+    fn resumed_audio_discards_silence_debt_and_suspend_catchup_is_bounded() {
+        let mut stall = StallState::default();
+        let start = Instant::now();
+        stall.silence_chunks(start, true, 48_000, 128);
+        let later = start + std::time::Duration::from_secs(3_600);
+        assert_eq!(stall.silence_chunks(later, false, 48_000, 128), 93);
+        assert_eq!(stall.silence_chunks(later, true, 48_000, 128), 0);
+        assert_eq!(
+            stall.silence_chunks(later + STALL_DECAY_AFTER / 2, false, 48_000, 128),
+            0
+        );
+    }
+
+    #[test]
+    fn warmed_spectrum_decays_after_one_second_without_capture() {
+        let mut plan = CavaSettings::default().plan_config().build().unwrap();
+        let frames = 128;
+        let rate = plan.rate();
+        let channels = plan.channels();
+        for chunk in 0..rate as usize / frames {
+            let samples: Vec<_> = (chunk * frames..(chunk + 1) * frames)
+                .flat_map(|i| {
+                    let sample = (std::f64::consts::TAU * 100.0 * i as f64 / rate as f64).sin();
+                    std::iter::repeat_n(sample, channels)
+                })
+                .collect();
+            plan.execute(&samples);
+        }
+        assert!(plan.last_output().iter().copied().fold(0.0, f64::max) > 0.5);
+        let mut stall = StallState::default();
+        let start = Instant::now();
+        stall.silence_chunks(start, true, rate, frames);
+        let zeros = vec![0.0; frames * channels];
+        for frame in 1..=60 {
+            let now = start + std::time::Duration::from_secs_f64(frame as f64 / 60.0);
+            for _ in 0..stall.silence_chunks(now, false, rate, frames) {
+                plan.execute(&zeros);
+            }
+        }
+        assert!(plan.last_output().iter().all(|&level| level < 0.01));
+    }
 
     #[test]
     fn low_band_meter_passes_bass_and_rejects_treble() {
