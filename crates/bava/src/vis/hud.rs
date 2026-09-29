@@ -430,8 +430,14 @@ mod tests {
         let mut app = App::new();
         app.add_plugins((
             MinimalPlugins,
-            AssetPlugin::default(),
+            AssetPlugin {
+                unapproved_path_mode: bevy::asset::UnapprovedPathMode::Deny,
+                ..default()
+            },
             bevy::image::ImagePlugin::default(),
+        ));
+        app.register_asset_loader(bevy::image::ImageLoader::new(
+            bevy::image::CompressedImageFormats::NONE,
         ));
         app.finish();
         app.cleanup();

@@ -106,6 +106,12 @@ fn main() {
         }),
         ..default()
     });
+    // Only explicit user image loads may opt out of the asset-directory restriction.
+    #[cfg(not(target_arch = "wasm32"))]
+    let default_plugins = default_plugins.set(AssetPlugin {
+        unapproved_path_mode: bevy::asset::UnapprovedPathMode::Deny,
+        ..default()
+    });
     // Bevy owns the global `tracing` subscriber, so the puffin bridge has to be
     // handed to `LogPlugin` rather than installed alongside it.
     #[cfg(feature = "profile")]
