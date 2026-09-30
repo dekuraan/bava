@@ -8,7 +8,8 @@
 // params[0] = (intensity, corona amount, falloff scale, quad half-size px)
 
 #import bevy_sprite::mesh2d_vertex_output::VertexOutput
-#import bava::fx::{fbm, TAU}
+#import bava::fx::TAU
+#import bava::fx_cached::fbm
 #import bava::fx_material::{fx, palette, rim_radius}
 
 @fragment
@@ -26,6 +27,11 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let corona_amount = fx.params[0].y;
 
     let d = r - rim; // px outside the rim (negative inside)
+    // Both glow and corona are exactly zero here. Avoid ten noise octaves
+    // across the interior of the quad; additive blending contributes nothing.
+    if d <= -base * 0.12 {
+        return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    }
     let falloff = base * fx.params[0].z * (0.16 + 0.22 * bass + 0.18 * pulse);
     var glow = exp(-max(d, 0.0) / max(falloff, 1.0));
     // Fade in just inside the rim so the fill's edge has no seam.

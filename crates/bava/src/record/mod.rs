@@ -618,6 +618,15 @@ pub fn run(cli: &Cli, config: &Config) -> Result<(), String> {
     #[cfg(feature = "profile")]
     app.add_plugins(crate::profiling::PuffinPlugin);
 
+    // GPU pass timings exclude readback and ffmpeg, so headless recordings
+    // can also measure the render budget. Leave query overhead off normally.
+    if cli.debug {
+        app.add_plugins((
+            bevy::render::diagnostic::RenderDiagnosticsPlugin,
+            bevy::diagnostic::LogDiagnosticsPlugin::default(),
+        ));
+    }
+
     match app.run() {
         AppExit::Success => Ok(()),
         AppExit::Error(_) => Err("recording failed".into()),
@@ -627,6 +636,116 @@ pub fn run(cli: &Cli, config: &Config) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Run manually on a GPU host. Unlike a recording this has no GPU readback
+    /// or encoder, so it measures uncapped default-view throughput.
+    #[test]
+    #[ignore = "GPU performance benchmark; run in release with --nocapture"]
+    fn default_scene_render_benchmark() {
+        use bevy::app::PluginsState;
+        use bevy::render::render_resource::PollType;
+        use bevy::render::renderer::RenderDevice;
+
+        const WARMUP: usize = 180;
+        const FRAMES: usize = 600;
+        let config = Config::default();
+        let settings = config.to_cava_settings(false);
+        let rate = settings.rate;
+        let channels = settings.channels;
+        let mut app = App::new();
+        app.add_plugins(
+            DefaultPlugins
+                .set(WindowPlugin {
+                    primary_window: None,
+                    exit_condition: ExitCondition::DontExit,
+                    ..default()
+                })
+                .set(RenderPlugin {
+                    synchronous_pipeline_compilation: true,
+                    ..default()
+                })
+                .disable::<WinitPlugin>(),
+        )
+        .insert_resource(settings)
+        .insert_resource(config.to_vis_settings())
+        .insert_resource(config.to_physics_settings())
+        .insert_resource(config.to_fx_settings())
+        .insert_resource(config.vis_mode())
+        .insert_resource(ClearColor(Color::srgb(0.02, 0.02, 0.04)))
+        .insert_resource(EditorState::new(false, config.gui_toggle_key()))
+        .insert_resource(TimeUpdateStrategy::ManualDuration(frame_duration(60)))
+        .add_plugins((
+            CavaPlugin { offline: true },
+            NowPlayingPlugin {
+                offline: Some(Default::default()),
+            },
+            VisPlugin,
+        ))
+        .add_systems(
+            PostStartup,
+            |mut commands: Commands,
+             mut images: ResMut<Assets<Image>>,
+             camera: Query<Entity, With<VisCamera>>| {
+                commands
+                    .entity(camera.single().unwrap())
+                    .insert(RenderTarget::target_headless(1920, 1080, &mut images));
+            },
+        );
+        app.world_mut().spawn(Window {
+            resolution: WindowResolution::new(1920, 1080).with_scale_factor_override(1.0),
+            ..default()
+        });
+        while app.plugins_state() == PluginsState::Adding {
+            bevy::tasks::tick_global_task_pools_on_main_thread();
+            std::thread::yield_now();
+        }
+        app.finish();
+        app.cleanup();
+
+        // Precompute broad noise plus periodic bass kicks, so generating the
+        // signal is outside the measured work. Audio still traverses the real
+        // analysis, features, effects and three-ball physics systems.
+        let pcm_frames = (WARMUP + FRAMES) * rate as usize / 60;
+        let mut samples = Vec::with_capacity(pcm_frames * channels);
+        let mut seed = 7u32;
+        for i in 0..pcm_frames {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            let noise = ((seed >> 8) as f64 / 16777216.0 - 0.5) * 0.15;
+            let t = i as f64 / rate as f64;
+            let kick =
+                (t.rem_euclid(0.4) * -20.0).exp() * (t * std::f64::consts::TAU * 80.0).sin() * 0.5;
+            samples.extend(std::iter::repeat_n(noise + kick, channels));
+        }
+        let injector = app.world().resource::<AudioInjector>().clone();
+        let step = |app: &mut App, frame: usize| {
+            let start = frame * rate as usize / 60 * channels;
+            let end = (frame + 1) * rate as usize / 60 * channels;
+            injector.push(&samples[start..end]);
+            app.update();
+        };
+        let flush = |app: &App| {
+            // The render thread may submit its last frame while the first
+            // poll waits. The second poll also drains that final submission.
+            let device = app.world().resource::<RenderDevice>();
+            device.poll(PollType::wait_indefinitely()).unwrap();
+            device.poll(PollType::wait_indefinitely()).unwrap();
+        };
+        for frame in 0..WARMUP {
+            step(&mut app, frame);
+        }
+        flush(&app);
+        let started = Instant::now();
+        for frame in WARMUP..WARMUP + FRAMES {
+            step(&mut app, frame);
+        }
+        flush(&app);
+        let ms = started.elapsed().as_secs_f64() * 1000.0 / FRAMES as f64;
+        eprintln!(
+            "default scene, 1920x1080, {FRAMES} frames: {ms:.3} ms/frame, \
+             {:.1} FPS uncapped (CPU + GPU completion; 8.333 ms target)",
+            1000.0 / ms,
+        );
+    }
 
     #[test]
     fn low_rate_audio_gets_a_valid_analysis_band() {

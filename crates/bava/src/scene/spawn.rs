@@ -239,6 +239,10 @@ pub(crate) fn restore_builtin_layers(world: &mut World) {
     for mut cam in cams.iter_mut(world) {
         cam.clear_color = ClearColorConfig::Default;
     }
+    let mut samples = world.query_filtered::<&mut Msaa, With<VisCamera>>();
+    for mut msaa in samples.iter_mut(world) {
+        *msaa = Msaa::Off;
+    }
     set_hud_visible(world, true);
 }
 
@@ -567,6 +571,7 @@ fn material_2d(
             .cloned()
             .ok_or_else(|| format!("unknown shader {name:?}"))?;
         let material = FxMaterial {
+            noise_texture: crate::vis::fx::material::NOISE_TEXTURE,
             uniform: FxUniform {
                 color: lin,
                 params: link.params,
@@ -941,10 +946,15 @@ fn spawn_camera(world: &mut World, def: &SceneDef, shaders: &Shaders) -> Result<
     let look_at = Vec3::from(c.look_at);
     let offset = Vec3::from(c.position) - look_at;
     let (msaa, target) = {
-        let mut q = world.query_filtered::<(&Msaa, Option<&RenderTarget>), With<VisCamera>>();
-        q.iter(world)
+        let mut q = world.query_filtered::<(&mut Msaa, Option<&RenderTarget>), With<VisCamera>>();
+        q.iter_mut(world)
             .next()
-            .map(|(m, t)| (*m, t.cloned()))
+            .map(|(mut m, t)| {
+                // Cameras sharing this HDR target must agree. Keep geometric
+                // AA for 3D scenes; unloading restores the analytic-AA 2D view.
+                *m = Msaa::Sample4;
+                (*m, t.cloned())
+            })
             .unwrap_or((Msaa::Sample4, None))
     };
     let env = &def.environment;
@@ -1213,6 +1223,27 @@ pub(crate) fn drive_model_animation(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scene_cameras_share_msaa_and_unloading_restores_2d() {
+        let mut world = World::new();
+        world.insert_resource(ClearColor::default());
+        let vis = world.spawn((VisCamera, Camera2d, Msaa::Off)).id();
+        spawn_camera(&mut world, &SceneDef::default(), &Shaders::default()).unwrap();
+        assert_eq!(world.get::<Msaa>(vis), Some(&Msaa::Sample4));
+        let scene = world
+            .query_filtered::<Entity, With<SceneCamera3d>>()
+            .single(&world)
+            .unwrap();
+        assert_eq!(world.get::<Msaa>(scene), Some(&Msaa::Sample4));
+        world.despawn(scene);
+        restore_builtin_layers(&mut world);
+        assert_eq!(world.get::<Msaa>(vis), Some(&Msaa::Off));
+        assert!(matches!(
+            world.get::<Camera>(vis).unwrap().clear_color,
+            ClearColorConfig::Default
+        ));
+    }
 
     #[test]
     fn meshes_build_for_every_primitive() {

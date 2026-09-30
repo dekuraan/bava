@@ -92,10 +92,9 @@ impl Plugin for BarsPlugin {
     }
 }
 
-/// Spawn the 2D camera and one sprite per bar. The camera is HDR with 4× MSAA
-/// and bloom, so the amplitude-boosted (HDR-range) colors from
-/// [`gradient_color`](crate::vis::gradient_color) glow at peaks and the gizmo /
-/// mesh edges stay smooth.
+/// Spawn the HDR 2D camera and spectrum meshes. Strokes and particles have
+/// feathered edges; balls use derivative-based shader AA. Scene cameras enable
+/// 4× MSAA when rendering 3D geometry.
 fn setup(
     mut commands: Commands,
     vis: Res<VisSettings>,
@@ -111,17 +110,16 @@ fn setup(
         // the HUD would silently vanish from the captured video.
         bevy::ui::IsDefaultUiCamera,
         Hdr,
-        // 4×, not 8×: WebGPU only guarantees sample counts 1 and 4 for the
-        // HDR color (Rgba16Float) and depth formats, and adapters that stop
-        // there (llvmpipe, some mobile/integrated GPUs) fail to create the
-        // 8× target outright. Strokes and bars carry their own feathered edge,
-        // so 4× loses nothing visible. A scene's 3D camera copies this value
-        // (cameras sharing a target must agree on it).
-        Msaa::Sample4,
+        // Analytic AA already smooths the default 2D geometry. Avoid four
+        // HDR samples per pixel plus their resolve on the fullscreen effects.
+        Msaa::Off,
         // Map the HDR (amplitude-boosted) colors to the display per [`VisSettings::tonemapping`].
         Tonemapping::from(vis.tonemapping),
         Bloom {
             intensity: vis.bloom_intensity,
+            // The broad glow doesn't need a 512px pyramid. Halving the
+            // largest mip cuts its intermediate pixel work by four.
+            max_mip_dimension: 256,
             ..Bloom::NATURAL
         },
     ));

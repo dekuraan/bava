@@ -151,10 +151,14 @@ fn main() {
 
     // `--debug` also logs FPS/frame time ~1×/s. The vis plugin already adds
     // `FrameTimeDiagnosticsPlugin` (for the F3 overlay), so adding it again here
-    // would panic ("plugin was already added"); only the log sink is needed.
+    // would panic ("plugin was already added"). Add GPU pass timings so slow
+    // shaders can be distinguished from CPU frame costs.
     if cli.debug {
         use bevy::diagnostic::LogDiagnosticsPlugin;
-        app.add_plugins(LogDiagnosticsPlugin::default());
+        app.add_plugins((
+            bevy::render::diagnostic::RenderDiagnosticsPlugin,
+            LogDiagnosticsPlugin::default(),
+        ));
     }
 
     app.run();

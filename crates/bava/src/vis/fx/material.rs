@@ -21,8 +21,9 @@ use bevy::asset::uuid_handle;
 use bevy::mesh::MeshVertexBufferLayoutRef;
 use bevy::prelude::*;
 use bevy::render::render_resource::{
-    AsBindGroup, BlendComponent, BlendFactor, BlendOperation, BlendState, RenderPipelineDescriptor,
-    ShaderType, SpecializedMeshPipelineError,
+    AsBindGroup, BlendComponent, BlendFactor, BlendOperation, BlendState, Extent3d,
+    RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError, TextureDimension,
+    TextureFormat,
 };
 use bevy::shader::{Shader, ShaderRef};
 use bevy::sprite_render::{AlphaMode2d, Material2d, Material2dKey, Material2dPlugin};
@@ -45,14 +46,75 @@ pub const BACKDROP_SHADER: Handle<Shader> = uuid_handle!("5b0c7e0e-2c61-4f1f-9d1
 pub const BALL_SHADER: Handle<Shader> = uuid_handle!("5b0c7e0e-2c61-4f1f-9d1c-1f0a8f2b6a06");
 /// Vertex-colored additive geometry (sparks, flares, shockwaves).
 pub const ADDITIVE_SHADER: Handle<Shader> = uuid_handle!("5b0c7e0e-2c61-4f1f-9d1c-1f0a8f2b6a07");
+const CACHED_NOISE_SHADER: Handle<Shader> = uuid_handle!("5b0c7e0e-2c61-4f1f-9d1c-1f0a8f2b6a08");
+pub(crate) const NOISE_TEXTURE: Handle<Image> =
+    uuid_handle!("5b0c7e0e-2c61-4f1f-9d1c-1f0a8f2b6a09");
+
+// Pack the four value-noise corners into each texel. One unfiltered fetch
+// replaces four PCG hashes per octave, without reducing noise precision.
+fn noise_texture() -> Image {
+    const SIZE: i32 = 512;
+    fn hash(x: i32, y: i32) -> f32 {
+        let wrap = |n: i32| (n + 256).rem_euclid(SIZE) - 256;
+        let mut x = (wrap(x) as u32)
+            .wrapping_mul(1664525)
+            .wrapping_add(1013904223);
+        let mut y = (wrap(y) as u32)
+            .wrapping_mul(1664525)
+            .wrapping_add(1013904223);
+        x = x.wrapping_add(y.wrapping_mul(1664525));
+        y = y.wrapping_add(x.wrapping_mul(1664525));
+        x ^= x >> 16;
+        y ^= y >> 16;
+        x = x.wrapping_add(y.wrapping_mul(1664525));
+        x ^= x >> 16;
+        (x >> 8) as f32 * (1.0 / 16777216.0)
+    }
+    let mut data = Vec::with_capacity(SIZE as usize * SIZE as usize * 16);
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let signed = |n| if n >= 256 { n - SIZE } else { n };
+            let (x, y) = (signed(x), signed(y));
+            for value in [
+                hash(x, y),
+                hash(x + 1, y),
+                hash(x, y + 1),
+                hash(x + 1, y + 1),
+            ] {
+                data.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+    }
+    Image::new(
+        Extent3d {
+            width: SIZE as u32,
+            height: SIZE as u32,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba32Float,
+        bevy::asset::RenderAssetUsages::RENDER_WORLD,
+    )
+}
 
 /// Register the embedded WGSL sources under their fixed handles. Idempotent,
 /// and safe to call from any plugin that needs them.
 pub fn register_shaders(app: &mut App) {
+    if let Some(mut images) = app.world_mut().get_resource_mut::<Assets<Image>>()
+        && !images.contains(NOISE_TEXTURE.id())
+    {
+        let _ = images.insert(NOISE_TEXTURE.id(), noise_texture());
+    }
     let Some(mut shaders) = app.world_mut().get_resource_mut::<Assets<Shader>>() else {
         return; // no render stack (headless unit tests)
     };
-    let sources: [(&Handle<Shader>, &'static str, &str); 7] = [
+    let sources: [(&Handle<Shader>, &'static str, &str); 8] = [
+        (
+            &CACHED_NOISE_SHADER,
+            include_str!("shaders/fx_cached.wgsl"),
+            "bava/fx_cached.wgsl",
+        ),
         (
             &FX_LIB_SHADER,
             include_str!("shaders/fx.wgsl"),
@@ -162,6 +224,8 @@ pub struct FxMaterial {
     #[texture(1)]
     #[sampler(2)]
     pub texture: Option<Handle<Image>>,
+    #[texture(3, filterable = false)]
+    pub noise_texture: Handle<Image>,
     /// Fragment shader. Must import `bava::fx_material` for its bindings.
     pub shader: Handle<Shader>,
     pub blend: FxBlend,
@@ -176,6 +240,7 @@ impl FxMaterial {
         Self {
             uniform: FxUniform::default(),
             texture: None,
+            noise_texture: NOISE_TEXTURE,
             shader,
             blend: FxBlend::Alpha,
             live: true,
@@ -385,6 +450,36 @@ pub struct FxSyncSet;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cached_noise_corners_join_across_every_cell_and_wrap() {
+        let image = noise_texture();
+        let data = image.data.as_ref().unwrap();
+        let texel = |x: usize, y: usize| -> [f32; 4] {
+            std::array::from_fn(|c| {
+                let start = ((y * 512 + x) * 4 + c) * 4;
+                f32::from_le_bytes(data[start..start + 4].try_into().unwrap())
+            })
+        };
+        // Known PCG outputs from the procedural shader, before normalization.
+        assert_eq!(
+            texel(0, 0),
+            [1631281.0, 10341361.0, 9035872.0, 5162297.0].map(|v| v / 16777216.0)
+        );
+        assert_eq!(texel(511, 511)[0], 1975946.0 / 16777216.0);
+        for y in 0..512 {
+            for x in 0..512 {
+                let a = texel(x, y);
+                let right = texel((x + 1) % 512, y);
+                let above = texel(x, (y + 1) % 512);
+                assert_eq!(a[1], right[0]);
+                assert_eq!(a[3], right[2]);
+                assert_eq!(a[2], above[0]);
+                assert_eq!(a[3], above[1]);
+                assert!(a.iter().all(|v| (0.0..1.0).contains(v)));
+            }
+        }
+    }
 
     #[test]
     fn palette_uniform_keeps_short_palettes_verbatim() {

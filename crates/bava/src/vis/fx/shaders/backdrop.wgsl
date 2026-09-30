@@ -5,14 +5,16 @@
 // palette-tinted nebula that breathes with the overall energy.
 //
 // params[0] = (star density, nebula intensity, star brightness, _)
+// params[1].xy/zw and params[2].xy = (cos, sin) of the star layer rotations
 
 #import bevy_sprite::mesh2d_vertex_output::VertexOutput
-#import bava::fx::{fbm, hash21, hash22}
+#import bava::fx::{hash21, hash22}
+#import bava::fx_cached::fbm
 #import bava::fx_material::{fx, palette}
 
-fn rotate(p: vec2<f32>, a: f32) -> vec2<f32> {
-    let c = cos(a);
-    let s = sin(a);
+fn rotate(p: vec2<f32>, turn: vec2<f32>) -> vec2<f32> {
+    let c = turn.x;
+    let s = turn.y;
     return vec2<f32>(c * p.x - s * p.y, s * p.x + c * p.y);
 }
 
@@ -25,6 +27,11 @@ fn star_layer(p: vec2<f32>, scale: f32, density: f32, seed: f32, time: f32, treb
     let offset = (h - 0.5) * 0.7;
     let d = length(f - offset);
     let size = 0.035 + 0.05 * h.x;
+    // Almost all pixels miss the tiny star. Don't evaluate its animated
+    // twinkle (a sine per layer per pixel) when its contribution is zero.
+    if present == 0.0 || d >= size {
+        return 0.0;
+    }
     let twinkle = 0.55 + 0.45 * sin(time * (1.5 + 4.0 * h.y) + h.x * 40.0);
     let spark = 1.0 + treble * 2.5 * step(0.8, h.y);
     return present * smoothstep(size, 0.0, d) * twinkle * spark;
@@ -45,9 +52,9 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let star_gain = fx.params[0].z;
 
     var stars = 0.0;
-    stars += star_layer(rotate(p, time * 0.004), 38.0, density, 1.0, time, treble) * 0.55;
-    stars += star_layer(rotate(p, time * 0.007), 22.0, density * 0.8, 7.0, time, treble) * 0.8;
-    stars += star_layer(rotate(p, time * 0.011), 12.0, density * 0.6, 13.0, time, treble) * 1.1;
+    stars += star_layer(rotate(p, fx.params[1].xy), 38.0, density, 1.0, time, treble) * 0.55;
+    stars += star_layer(rotate(p, fx.params[1].zw), 22.0, density * 0.8, 7.0, time, treble) * 0.8;
+    stars += star_layer(rotate(p, fx.params[2].xy), 12.0, density * 0.6, 13.0, time, treble) * 1.1;
 
     let q = p * 2.4;
     let w = vec2<f32>(fbm(q + vec2<f32>(0.0, flow * 0.02)), fbm(q + vec2<f32>(4.1, -flow * 0.025)));
@@ -57,7 +64,10 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let ring = smoothstep(0.08, 0.45, length(p));
     let neb = palette(n) * cloud * ring * (0.05 + 0.2 * energy + 0.14 * pulse) * nebula_gain;
 
-    let star_col = mix(vec3<f32>(0.75, 0.85, 1.0), palette(hash21(floor(p * 12.0))), 0.35);
-    let rgb = neb + star_col * stars * star_gain;
+    var rgb = neb;
+    if stars > 0.0 {
+        let star_col = mix(vec3<f32>(0.75, 0.85, 1.0), palette(hash21(floor(p * 12.0))), 0.35);
+        rgb += star_col * stars * star_gain;
+    }
     return vec4<f32>(rgb, 1.0);
 }
