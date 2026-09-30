@@ -101,10 +101,10 @@ fn noise_texture() -> Image {
 /// Register the embedded WGSL sources under their fixed handles. Idempotent,
 /// and safe to call from any plugin that needs them.
 pub fn register_shaders(app: &mut App) {
-    if let Some(mut images) = app.world_mut().get_resource_mut::<Assets<Image>>() {
-        if !images.contains(NOISE_TEXTURE.id()) {
-            let _ = images.insert(NOISE_TEXTURE.id(), noise_texture());
-        }
+    if let Some(mut images) = app.world_mut().get_resource_mut::<Assets<Image>>()
+        && !images.contains(NOISE_TEXTURE.id())
+    {
+        let _ = images.insert(NOISE_TEXTURE.id(), noise_texture());
     }
     let Some(mut shaders) = app.world_mut().get_resource_mut::<Assets<Shader>>() else {
         return; // no render stack (headless unit tests)
